@@ -1,5 +1,5 @@
 /*
- * sound/uart6850.c
+ * sound/oss/uart6850.c
  *
  *
  * Copyright (C) by Hannu Savolainen 1993-1997
@@ -72,14 +72,13 @@ static int uart6850_opened;
 static int uart6850_irq;
 static int uart6850_detected;
 static int my_dev;
-static spinlock_t lock=SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(lock);
 
 static void (*midi_input_intr) (int dev, unsigned char data);
 static void poll_uart6850(unsigned long dummy);
 
 
-static struct timer_list uart6850_timer =
-		TIMER_INITIALIZER(poll_uart6850, 0, 0);
+static DEFINE_TIMER(uart6850_timer, poll_uart6850, 0, 0);
 
 static void uart6850_input_loop(void)
 {
@@ -105,7 +104,7 @@ static void uart6850_input_loop(void)
 	}
 }
 
-static irqreturn_t m6850intr(int irq, void *dev_id, struct pt_regs *dummy)
+static irqreturn_t m6850intr(int irq, void *dev_id)
 {
 	if (input_avail())
 		uart6850_input_loop();
@@ -316,8 +315,8 @@ static struct address_info cfg_mpu;
 static int __initdata io = -1;
 static int __initdata irq = -1;
 
-MODULE_PARM(io,"i");
-MODULE_PARM(irq,"i");
+module_param(io, int, 0);
+module_param(irq, int, 0);
 
 static int __init init_uart6850(void)
 {

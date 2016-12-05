@@ -4,19 +4,17 @@
  * POLARIS chip-specific code
  */
 
-#include <linux/kernel.h>
+#define __EXTERN_INLINE inline
+#include <asm/io.h>
+#include <asm/core_polaris.h>
+#undef __EXTERN_INLINE
+
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/sched.h>
 #include <linux/init.h>
 
-#include <asm/system.h>
 #include <asm/ptrace.h>
-
-#define __EXTERN_INLINE inline
-#include <asm/io.h>
-#include <asm/core_polaris.h>
-#undef __EXTERN_INLINE
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -189,8 +187,7 @@ polaris_pci_clr_err(void)
 }
 
 void
-polaris_machine_check(unsigned long vector, unsigned long la_ptr,
-		      struct pt_regs * regs)
+polaris_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	/* Clear the error before any reporting.  */
 	mb();
@@ -200,6 +197,6 @@ polaris_machine_check(unsigned long vector, unsigned long la_ptr,
 	wrmces(0x7);
 	mb();
 
-	process_mcheck_info(vector, la_ptr, regs, "POLARIS",
+	process_mcheck_info(vector, la_ptr, "POLARIS",
 			    mcheck_expected(0));
 }

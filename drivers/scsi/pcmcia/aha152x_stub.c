@@ -37,7 +37,6 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
@@ -47,213 +46,122 @@
 #include <scsi/scsi_ioctl.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "aha152x.h"
 
-#include <pcmcia/version.h>
-#include <pcmcia/cs_types.h>
-#include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
 
-#ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
-#define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
-static char *version =
-"aha152x_cs.c 1.54 2000/06/12 21:27:25 (David Hinds)";
-#else
-#define DEBUG(n, args...)
-#endif
 
 /*====================================================================*/
 
 /* Parameters that can be set with 'insmod' */
 
-/* Bit map of interrupts to choose from */
-static u_int irq_mask = 0xdeb8;
-static int irq_list[4] = { -1 };
-
 /* SCSI bus setup options */
 static int host_id = 7;
 static int reconnect = 1;
 static int parity = 1;
-static int synchronous = 0;
+static int synchronous = 1;
 static int reset_delay = 100;
 static int ext_trans = 0;
 
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-MODULE_PARM(host_id, "i");
-MODULE_PARM(reconnect, "i");
-MODULE_PARM(parity, "i");
-MODULE_PARM(synchronous, "i");
-MODULE_PARM(reset_delay, "i");
-MODULE_PARM(ext_trans, "i");
+module_param(host_id, int, 0);
+module_param(reconnect, int, 0);
+module_param(parity, int, 0);
+module_param(synchronous, int, 0);
+module_param(reset_delay, int, 0);
+module_param(ext_trans, int, 0);
 
 MODULE_LICENSE("Dual MPL/GPL");
 
 /*====================================================================*/
 
 typedef struct scsi_info_t {
-    dev_link_t		link;
-    dev_node_t		node;
+	struct pcmcia_device	*p_dev;
     struct Scsi_Host	*host;
 } scsi_info_t;
 
-static void aha152x_release_cs(dev_link_t *link);
-static int aha152x_event(event_t event, int priority,
-			 event_callback_args_t *args);
+static void aha152x_release_cs(struct pcmcia_device *link);
+static void aha152x_detach(struct pcmcia_device *p_dev);
+static int aha152x_config_cs(struct pcmcia_device *link);
 
-static dev_link_t *aha152x_attach(void);
-static void aha152x_detach(dev_link_t *);
-
-static dev_link_t *dev_list;
-static dev_info_t dev_info = "aha152x_cs";
-
-static dev_link_t *aha152x_attach(void)
+static int aha152x_probe(struct pcmcia_device *link)
 {
     scsi_info_t *info;
-    client_reg_t client_reg;
-    dev_link_t *link;
-    int i, ret;
-    
-    DEBUG(0, "aha152x_attach()\n");
+
+    dev_dbg(&link->dev, "aha152x_attach()\n");
 
     /* Create new SCSI device */
-    info = kmalloc(sizeof(*info), GFP_KERNEL);
-    if (!info) return NULL;
-    memset(info, 0, sizeof(*info));
-    link = &info->link; link->priv = info;
+    info = kzalloc(sizeof(*info), GFP_KERNEL);
+    if (!info) return -ENOMEM;
+    info->p_dev = link;
+    link->priv = info;
 
-    link->io.NumPorts1 = 0x20;
-    link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
-    link->io.IOAddrLines = 10;
-    link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-    if (irq_list[0] == -1)
-	link->irq.IRQInfo2 = irq_mask;
-    else
-	for (i = 0; i < 4; i++)
-	    link->irq.IRQInfo2 |= 1 << irq_list[i];
-    link->conf.Attributes = CONF_ENABLE_IRQ;
-    link->conf.Vcc = 50;
-    link->conf.IntType = INT_MEMORY_AND_IO;
-    link->conf.Present = PRESENT_OPTION;
+    link->config_flags |= CONF_ENABLE_IRQ | CONF_AUTO_SET_IO;
+    link->config_regs = PRESENT_OPTION;
 
-    /* Register with Card Services */
-    link->next = dev_list;
-    dev_list = link;
-    client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
-    client_reg.event_handler = &aha152x_event;
-    client_reg.EventMask =
-	CS_EVENT_RESET_REQUEST | CS_EVENT_CARD_RESET |
-	CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
-	CS_EVENT_PM_SUSPEND | CS_EVENT_PM_RESUME;
-    client_reg.Version = 0x0210;
-    client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
-    if (ret != 0) {
-	cs_error(link->handle, RegisterClient, ret);
-	aha152x_detach(link);
-	return NULL;
-    }
-    
-    return link;
+    return aha152x_config_cs(link);
 } /* aha152x_attach */
 
 /*====================================================================*/
 
-static void aha152x_detach(dev_link_t *link)
+static void aha152x_detach(struct pcmcia_device *link)
 {
-    dev_link_t **linkp;
+    dev_dbg(&link->dev, "aha152x_detach\n");
 
-    DEBUG(0, "aha152x_detach(0x%p)\n", link);
-    
-    /* Locate device structure */
-    for (linkp = &dev_list; *linkp; linkp = &(*linkp)->next)
-	if (*linkp == link) break;
-    if (*linkp == NULL)
-	return;
+    aha152x_release_cs(link);
 
-    if (link->state & DEV_CONFIG)
-	aha152x_release_cs(link);
-
-    if (link->handle)
-	CardServices(DeregisterClient, link->handle);
-    
     /* Unlink device structure, free bits */
-    *linkp = link->next;
     kfree(link->priv);
-    
 } /* aha152x_detach */
 
 /*====================================================================*/
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
-
-#define CFG_CHECK(fn, args...) \
-if (CardServices(fn, args) != 0) goto next_entry
-
-static void aha152x_config_cs(dev_link_t *link)
+static int aha152x_config_check(struct pcmcia_device *p_dev, void *priv_data)
 {
-    client_handle_t handle = link->handle;
+	p_dev->io_lines = 10;
+
+	/* For New Media T&J, look for a SCSI window */
+	if ((p_dev->resource[0]->end < 0x20) &&
+		(p_dev->resource[1]->end >= 0x20))
+		p_dev->resource[0]->start = p_dev->resource[1]->start;
+
+	if (p_dev->resource[0]->start >= 0xffff)
+		return -EINVAL;
+
+	p_dev->resource[1]->start = p_dev->resource[1]->end = 0;
+	p_dev->resource[0]->end = 0x20;
+	p_dev->resource[0]->flags &= ~IO_DATA_PATH_WIDTH;
+	p_dev->resource[0]->flags |= IO_DATA_PATH_WIDTH_AUTO;
+
+	return pcmcia_request_io(p_dev);
+}
+
+static int aha152x_config_cs(struct pcmcia_device *link)
+{
     scsi_info_t *info = link->priv;
     struct aha152x_setup s;
-    tuple_t tuple;
-    cisparse_t parse;
-    int i, last_ret, last_fn;
-    u_char tuple_data[64];
+    int ret;
     struct Scsi_Host *host;
+
+    dev_dbg(&link->dev, "aha152x_config\n");
+
+    ret = pcmcia_loop_config(link, aha152x_config_check, NULL);
+    if (ret)
+	    goto failed;
+
+    if (!link->irq)
+	    goto failed;
+
+    ret = pcmcia_enable_device(link);
+    if (ret)
+	    goto failed;
     
-    DEBUG(0, "aha152x_config(0x%p)\n", link);
-
-    tuple.DesiredTuple = CISTPL_CONFIG;
-    tuple.TupleData = tuple_data;
-    tuple.TupleDataMax = 64;
-    tuple.TupleOffset = 0;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
-    CS_CHECK(GetTupleData, handle, &tuple);
-    CS_CHECK(ParseTuple, handle, &tuple, &parse);
-    link->conf.ConfigBase = parse.config.base;
-
-    /* Configure card */
-    link->state |= DEV_CONFIG;
-
-    tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
-    while (1) {
-	CFG_CHECK(GetTupleData, handle, &tuple);
-	CFG_CHECK(ParseTuple, handle, &tuple, &parse);
-	/* For New Media T&J, look for a SCSI window */
-	if (parse.cftable_entry.io.win[0].len >= 0x20)
-	    link->io.BasePort1 = parse.cftable_entry.io.win[0].base;
-	else if ((parse.cftable_entry.io.nwin > 1) &&
-		 (parse.cftable_entry.io.win[1].len >= 0x20))
-	    link->io.BasePort1 = parse.cftable_entry.io.win[1].base;
-	if ((parse.cftable_entry.io.nwin > 0) &&
-	    (link->io.BasePort1 < 0xffff)) {
-	    link->conf.ConfigIndex = parse.cftable_entry.index;
-	    i = CardServices(RequestIO, handle, &link->io);
-	    if (i == CS_SUCCESS) break;
-	}
-    next_entry:
-	CS_CHECK(GetNextTuple, handle, &tuple);
-    }
-    
-    CS_CHECK(RequestIRQ, handle, &link->irq);
-    CS_CHECK(RequestConfiguration, handle, &link->conf);
-    
-    /* A bad hack... */
-    release_region(link->io.BasePort1, link->io.NumPorts1);
-
     /* Set configuration options for the aha152x driver */
     memset(&s, 0, sizeof(s));
     s.conf        = "PCMCIA setup";
-    s.io_port     = link->io.BasePort1;
-    s.irq         = link->irq.AssignedIRQ;
+    s.io_port     = link->resource[0]->start;
+    s.irq         = link->irq;
     s.scsiid      = host_id;
     s.reconnect   = reconnect;
     s.parity      = parity;
@@ -265,87 +173,52 @@ static void aha152x_config_cs(dev_link_t *link)
     host = aha152x_probe_one(&s);
     if (host == NULL) {
 	printk(KERN_INFO "aha152x_cs: no SCSI devices found\n");
-	goto cs_failed;
+	goto failed;
     }
 
-    scsi_add_host(host, NULL); /* XXX handle failure */
-    scsi_scan_host(host);
-
-    sprintf(info->node.dev_name, "scsi%d", host->host_no);
-    link->dev = &info->node;
     info->host = host;
 
-    link->state &= ~DEV_CONFIG_PENDING;
-    return;
-    
-cs_failed:
-    cs_error(link->handle, last_fn, last_ret);
+    return 0;
+
+failed:
     aha152x_release_cs(link);
-    return;
+    return -ENODEV;
 }
 
-static void aha152x_release_cs(dev_link_t *link)
+static void aha152x_release_cs(struct pcmcia_device *link)
 {
 	scsi_info_t *info = link->priv;
 
-	scsi_remove_host(info->host);
-	link->dev = NULL;
-    
-	CardServices(ReleaseConfiguration, link->handle);
-	CardServices(ReleaseIO, link->handle, &link->io);
-	CardServices(ReleaseIRQ, link->handle, &link->irq);
-    
-	link->state &= ~DEV_CONFIG;
-	scsi_unregister(info->host);
+	aha152x_release(info->host);
+	pcmcia_disable_device(link);
 }
 
-static int aha152x_event(event_t event, int priority,
-			 event_callback_args_t *args)
+static int aha152x_resume(struct pcmcia_device *link)
 {
-    dev_link_t *link = args->client_data;
-    scsi_info_t *info = link->priv;
-    
-    DEBUG(0, "aha152x_event(0x%06x)\n", event);
-    
-    switch (event) {
-    case CS_EVENT_CARD_REMOVAL:
-	link->state &= ~DEV_PRESENT;
-	if (link->state & DEV_CONFIG)
-	    aha152x_release_cs(link);
-	break;
-    case CS_EVENT_CARD_INSERTION:
-	link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
-	aha152x_config_cs(link);
-	break;
-    case CS_EVENT_PM_SUSPEND:
-	link->state |= DEV_SUSPEND;
-	/* Fall through... */
-    case CS_EVENT_RESET_PHYSICAL:
-	if (link->state & DEV_CONFIG)
-	    CardServices(ReleaseConfiguration, link->handle);
-	break;
-    case CS_EVENT_PM_RESUME:
-	link->state &= ~DEV_SUSPEND;
-	/* Fall through... */
-    case CS_EVENT_CARD_RESET:
-	if (link->state & DEV_CONFIG) {
-	    Scsi_Cmnd tmp;
-	    CardServices(RequestConfiguration, link->handle, &link->conf);
-	    tmp.device->host = info->host;
-	    aha152x_host_reset(&tmp);
-	}
-	break;
-    }
-    return 0;
+	scsi_info_t *info = link->priv;
+
+	aha152x_host_reset_host(info->host);
+
+	return 0;
 }
+
+static struct pcmcia_device_id aha152x_ids[] = {
+	PCMCIA_DEVICE_PROD_ID123("New Media", "SCSI", "Bus Toaster", 0xcdf7e4cc, 0x35f26476, 0xa8851d6e),
+	PCMCIA_DEVICE_PROD_ID123("NOTEWORTHY", "SCSI", "Bus Toaster", 0xad89c6e8, 0x35f26476, 0xa8851d6e),
+	PCMCIA_DEVICE_PROD_ID12("Adaptec, Inc.", "APA-1460 SCSI Host Adapter", 0x24ba9738, 0x3a3c3d20),
+	PCMCIA_DEVICE_PROD_ID12("New Media Corporation", "Multimedia Sound/SCSI", 0x085a850b, 0x80a6535c),
+	PCMCIA_DEVICE_PROD_ID12("NOTEWORTHY", "NWCOMB02 SCSI/AUDIO COMBO CARD", 0xad89c6e8, 0x5f9a615b),
+	PCMCIA_DEVICE_NULL,
+};
+MODULE_DEVICE_TABLE(pcmcia, aha152x_ids);
 
 static struct pcmcia_driver aha152x_cs_driver = {
 	.owner		= THIS_MODULE,
-	.drv		= {
-		.name	= "aha152x_cs",
-	},
-	.attach		= aha152x_attach,
-	.detach		= aha152x_detach,
+	.name		= "aha152x_cs",
+	.probe		= aha152x_probe,
+	.remove		= aha152x_detach,
+	.id_table       = aha152x_ids,
+	.resume		= aha152x_resume,
 };
 
 static int __init init_aha152x_cs(void)
@@ -356,12 +229,7 @@ static int __init init_aha152x_cs(void)
 static void __exit exit_aha152x_cs(void)
 {
 	pcmcia_unregister_driver(&aha152x_cs_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL)
-		aha152x_detach(dev_list);
 }
 
 module_init(init_aha152x_cs);
 module_exit(exit_aha152x_cs);
- 

@@ -49,19 +49,30 @@ struct msginfo {
 	unsigned short  msgseg; 
 };
 
+/*
+ * Scaling factor to compute msgmni:
+ * the memory dedicated to msg queues (msgmni * msgmnb) should occupy
+ * at most 1/MSG_MEM_SCALE of the lowmem (see the formula in ipc/msg.c):
+ * up to 8MB       : msgmni = 16 (MSGMNI)
+ * 4 GB            : msgmni = 8K
+ * more than 16 GB : msgmni = 32K (IPCMNI)
+ */
+#define MSG_MEM_SCALE 32
+
 #define MSGMNI    16   /* <= IPCMNI */     /* max # of msg queue identifiers */
 #define MSGMAX  8192   /* <= INT_MAX */   /* max size of message (bytes) */
 #define MSGMNB 16384   /* <= INT_MAX */   /* default max size of a message queue */
 
 /* unused */
-#define MSGPOOL (MSGMNI*MSGMNB/1024)  /* size in kilobytes of message pool */
+#define MSGPOOL (MSGMNI * MSGMNB / 1024) /* size in kbytes of message pool */
 #define MSGTQL  MSGMNB            /* number of system message headers */
 #define MSGMAP  MSGMNB            /* number of entries in message map */
 #define MSGSSZ  16                /* message segment size */
-#define __MSGSEG ((MSGPOOL*1024)/ MSGSSZ) /* max no. of segments */
+#define __MSGSEG ((MSGPOOL * 1024) / MSGSSZ) /* max no. of segments */
 #define MSGSEG (__MSGSEG <= 0xffff ? __MSGSEG : 0xffff)
 
 #ifdef __KERNEL__
+#include <linux/list.h>
 
 /* one msg_msg structure for each message */
 struct msg_msg {
@@ -72,9 +83,6 @@ struct msg_msg {
 	void *security;
 	/* the actual message follows immediately */
 };
-
-#define DATALEN_MSG	(PAGE_SIZE-sizeof(struct msg_msg))
-#define DATALEN_SEG	(PAGE_SIZE-sizeof(struct msg_msgseg))
 
 /* one msq_queue structure for each present queue on the system */
 struct msg_queue {
@@ -93,10 +101,11 @@ struct msg_queue {
 	struct list_head q_senders;
 };
 
-asmlinkage long sys_msgget (key_t key, int msgflg);
-asmlinkage long sys_msgsnd (int msqid, struct msgbuf __user *msgp, size_t msgsz, int msgflg);
-asmlinkage long sys_msgrcv (int msqid, struct msgbuf __user *msgp, size_t msgsz, long msgtyp, int msgflg);
-asmlinkage long sys_msgctl (int msqid, int cmd, struct msqid_ds __user *buf);
+/* Helper routines for sys_msgsnd and sys_msgrcv */
+extern long do_msgsnd(int msqid, long mtype, void __user *mtext,
+			size_t msgsz, int msgflg);
+extern long do_msgrcv(int msqid, long *pmtype, void __user *mtext,
+			size_t msgsz, long msgtyp, int msgflg);
 
 #endif /* __KERNEL__ */
 

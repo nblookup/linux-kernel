@@ -2,10 +2,10 @@
  * ldm - Part of the Linux-NTFS project.
  *
  * Copyright (C) 2001,2002 Richard Russon <ldm@flatcap.org>
- * Copyright (C) 2001      Anton Altaparmakov <aia21@cantab.net>
+ * Copyright (c) 2001-2007 Anton Altaparmakov
  * Copyright (C) 2001,2002 Jakob Kemi <jakob.kemi@telia.com>
  *
- * Documentation is available at http://linux-ntfs.sf.net/ldm
+ * Documentation is available at http://www.linux-ntfs.org/doku.php?id=downloads 
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -68,7 +68,7 @@ struct parsed_partitions;
 #define VBLK_SIZE_DSK3		12
 #define VBLK_SIZE_DSK4		45
 #define VBLK_SIZE_PRT3		28
-#define VBLK_SIZE_VOL5		59
+#define VBLK_SIZE_VOL5		58
 
 /* component types */
 #define COMP_STRIPE		0x01		/* Stripe-set */
@@ -93,15 +93,10 @@ struct parsed_partitions;
 
 #define OFF_VMDB		17		/* List of partitions. */
 
-#define WIN2K_DYNAMIC_PARTITION	0x42		/* Formerly SFS (Landis). */
+#define LDM_PARTITION		0x42		/* Formerly SFS (Landis). */
 
 #define TOC_BITMAP1		"config"	/* Names of the two defined */
 #define TOC_BITMAP2		"log"		/* bitmaps in the TOCBLOCK. */
-
-/* Most numbers we deal with are big-endian and won't be aligned. */
-#define BE16(x)			((u16)be16_to_cpu(get_unaligned((u16*)(x))))
-#define BE32(x)			((u32)be32_to_cpu(get_unaligned((u32*)(x))))
-#define BE64(x)			((u64)be64_to_cpu(get_unaligned((u64*)(x))))
 
 /* Borrowed from msdos.c */
 #define SYS_IND(p)		(get_unaligned(&(p)->sys_ind))
@@ -214,7 +209,7 @@ struct ldmdb {				/* Cache of the database */
 	struct list_head v_part;
 };
 
-int ldm_partition (struct parsed_partitions *state, struct block_device *bdev);
+int ldm_partition(struct parsed_partitions *state);
 
 #endif /* _FS_PT_LDM_H_ */
 

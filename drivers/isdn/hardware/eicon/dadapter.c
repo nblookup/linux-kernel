@@ -44,7 +44,7 @@ static didd_adapter_change_notification_t\
   Array to held adapter information
    -------------------------------------------------------------------------- */
 static DESCRIPTOR  HandleTable[NEW_MAX_DESCRIPTORS];
-dword Adapters = 0; /* Number of adapters */
+static dword Adapters = 0; /* Number of adapters */
 /* --------------------------------------------------------------------------
   Shadow IDI_DIMAINT
   and 'shadow' debug stuff
@@ -106,7 +106,7 @@ void diva_didd_load_time_finit (void) {
   return adapter handle (> 0) on success
   return -1 adapter array overflow
   -------------------------------------------------------------------------- */
-int diva_didd_add_descriptor (DESCRIPTOR* d) {
+static int diva_didd_add_descriptor (DESCRIPTOR* d) {
  diva_os_spin_lock_magic_t      irql;
  int i;
  if (d->type == IDI_DIMAINT) {
@@ -143,7 +143,7 @@ int diva_didd_add_descriptor (DESCRIPTOR* d) {
   return adapter handle (> 0) on success
   return 0 on success
   -------------------------------------------------------------------------- */
-int diva_didd_remove_descriptor (IDI_CALL request) {
+static int diva_didd_remove_descriptor (IDI_CALL request) {
  diva_os_spin_lock_magic_t      irql;
  int i;
  if (request == MAdapter.request) {
@@ -171,7 +171,7 @@ int diva_didd_remove_descriptor (IDI_CALL request) {
   Read adapter array
   return 1 if not enough space to save all available adapters
    -------------------------------------------------------------------------- */
-int diva_didd_read_adapter_array (DESCRIPTOR* buffer, int length) {
+static int diva_didd_read_adapter_array (DESCRIPTOR* buffer, int length) {
  diva_os_spin_lock_magic_t      irql;
  int src, dst;
  memset (buffer, 0x00, length);
@@ -293,8 +293,8 @@ static void diva_remove_adapter_callback (dword handle) {
  diva_os_spin_lock_magic_t irql;
  if (handle && ((--handle) < DIVA_DIDD_MAX_NOTIFICATIONS)) {
   diva_os_enter_spin_lock (&didd_spin, &irql, "didd_nfy_rm");
-  NotificationTable[handle].callback = 0;
-  NotificationTable[handle].context  = 0;
+  NotificationTable[handle].callback = NULL;
+  NotificationTable[handle].context  = NULL;
   diva_os_leave_spin_lock (&didd_spin, &irql, "didd_nfy_rm");
   DBG_TRC(("Remove adapter notification[%d]", (int)(handle+1)))
   return;

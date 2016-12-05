@@ -53,48 +53,42 @@
 #include <linux/delay.h>  
 #include <linux/uio.h>  
 #include <linux/init.h>  
+#include <linux/wait.h>
+#include <linux/slab.h>
 #include <asm/system.h>  
 #include <asm/io.h>  
 #include <asm/atomic.h>  
 #include <asm/uaccess.h>  
 #include <asm/string.h>  
 #include <asm/byteorder.h>  
-#include <linux/vmalloc.h>  
+#include <linux/vmalloc.h>
+#include <linux/jiffies.h>
 #include "iphase.h"		  
 #include "suni.h"		  
-#define swap(x) (((x & 0xff) << 8) | ((x & 0xff00) >> 8))  
-struct suni_priv {
-        struct k_sonet_stats sonet_stats; /* link diagnostics */
-        unsigned char loop_mode;        /* loopback mode */
-        struct atm_dev *dev;            /* device back-pointer */
-        struct suni_priv *next;         /* next SUNI */
-}; 
+#define swap_byte_order(x) (((x & 0xff) << 8) | ((x & 0xff00) >> 8))
+
 #define PRIV(dev) ((struct suni_priv *) dev->phy_data)
 
 static unsigned char ia_phy_get(struct atm_dev *dev, unsigned long addr);
+static void desc_dbg(IADEV *iadev);
 
 static IADEV *ia_dev[8];
 static struct atm_dev *_ia_dev[8];
 static int iadev_count;
 static void ia_led_timer(unsigned long arg);
-static struct timer_list ia_timer = TIMER_INITIALIZER(ia_led_timer, 0, 0);
-struct atm_vcc *vcc_close_que[100];
+static DEFINE_TIMER(ia_timer, ia_led_timer, 0, 0);
 static int IA_TX_BUF = DFL_TX_BUFFERS, IA_TX_BUF_SZ = DFL_TX_BUF_SZ;
 static int IA_RX_BUF = DFL_RX_BUFFERS, IA_RX_BUF_SZ = DFL_RX_BUF_SZ;
-static u32 IADebugFlag = /* IF_IADBG_ERR | IF_IADBG_CBR| IF_IADBG_INIT_ADAPTER
+static uint IADebugFlag = /* IF_IADBG_ERR | IF_IADBG_CBR| IF_IADBG_INIT_ADAPTER
             |IF_IADBG_ABR | IF_IADBG_EVENT*/ 0; 
 
-MODULE_PARM(IA_TX_BUF, "i");
-MODULE_PARM(IA_TX_BUF_SZ, "i");
-MODULE_PARM(IA_RX_BUF, "i");
-MODULE_PARM(IA_RX_BUF_SZ, "i");
-MODULE_PARM(IADebugFlag, "i");
+module_param(IA_TX_BUF, int, 0);
+module_param(IA_TX_BUF_SZ, int, 0);
+module_param(IA_RX_BUF, int, 0);
+module_param(IA_RX_BUF_SZ, int, 0);
+module_param(IADebugFlag, uint, 0644);
 
 MODULE_LICENSE("GPL");
-
-#if BITS_PER_LONG != 32
-#  error FIXME: this driver only works on 32-bit platforms
-#endif
 
 /**************************** IA_LIB **********************************/
 
@@ -147,7 +141,6 @@ static void ia_hack_tcq(IADEV *dev) {
   u_short 		desc1;
   u_short		tcq_wr;
   struct ia_vcc         *iavcc_r = NULL; 
-  extern void desc_dbg(IADEV *iadev);
 
   tcq_wr = readl(dev->seg_reg+TCQ_WR_PTR) & 0xffff;
   while (dev->host_tcq_wr != tcq_wr) {
@@ -164,8 +157,8 @@ static void ia_hack_tcq(IADEV *dev) {
         }
         iavcc_r->vc_desc_cnt--;
         dev->desc_tbl[desc1 -1].timestamp = 0;
-        IF_EVENT(printk("ia_hack: return_q skb = 0x%x desc = %d\n", 
-                                   (u32)dev->desc_tbl[desc1 -1].txskb, desc1);)
+        IF_EVENT(printk("ia_hack: return_q skb = 0x%p desc = %d\n",
+                                   dev->desc_tbl[desc1 -1].txskb, desc1);)
         if (iavcc_r->pcr < dev->rate_limit) {
            IA_SKB_STATE (dev->desc_tbl[desc1-1].txskb) |= IA_TX_DONE;
            if (ia_enque_rtn_q(&dev->tx_return_q, dev->desc_tbl[desc1 -1]) < 0)
@@ -187,10 +180,9 @@ static u16 get_desc (IADEV *dev, struct ia_vcc *iavcc) {
   unsigned long delta;
   static unsigned long timer = 0;
   int ltimeout;
-  extern void desc_dbg(IADEV *iadev);
 
   ia_hack_tcq (dev);
-  if(((jiffies - timer)>50)||((dev->ffL.tcq_rd==dev->host_tcq_wr))){      
+  if((time_after(jiffies,timer+50)) || ((dev->ffL.tcq_rd==dev->host_tcq_wr))) {
      timer = jiffies; 
      i=0;
      while (i < dev->num_tx_desc) {
@@ -228,7 +220,7 @@ static u16 get_desc (IADEV *dev, struct ia_vcc *iavcc) {
   while (!desc_num || (dev->desc_tbl[desc_num -1]).timestamp) {
      dev->ffL.tcq_rd += 2;
      if (dev->ffL.tcq_rd > dev->ffL.tcq_ed) 
-     dev->ffL.tcq_rd = dev->ffL.tcq_st;
+	dev->ffL.tcq_rd = dev->ffL.tcq_st;
      if (dev->ffL.tcq_rd == dev->host_tcq_wr) 
         return 0xFFFF; 
      desc_num = *(u_short *)(dev->seg_ram + dev->ffL.tcq_rd);
@@ -306,7 +298,7 @@ static void clear_lockup (struct atm_vcc *vcc, IADEV *dev) {
 **  |  R | NZ |  5-bit exponent  |        9-bit mantissa         |
 **  +----+----+------------------+-------------------------------+
 ** 
-**    R = reserverd (written as 0)
+**    R = reserved (written as 0)
 **    NZ = 0 if 0 cells/sec; 1 otherwise
 **
 **    if NZ = 1, rate = 1.mmmmmmmmm x 2^(eeeee) cells/sec
@@ -536,8 +528,8 @@ static int ia_cbr_setup (IADEV *dev, struct atm_vcc *vcc) {
       inc = 0;
       testSlot = idealSlot;
       TstSchedTbl = (u16*)(SchedTbl+testSlot);  //set index and read in value
-      IF_CBR(printk("CBR Testslot 0x%x AT Location 0x%x, NumToAssign=%d\n",
-                                testSlot, (u32)TstSchedTbl,toBeAssigned);) 
+      IF_CBR(printk("CBR Testslot 0x%x AT Location 0x%p, NumToAssign=%d\n",
+                                testSlot, TstSchedTbl,toBeAssigned);)
       memcpy((caddr_t)&cbrVC,(caddr_t)TstSchedTbl,sizeof(cbrVC));
       while (cbrVC)  // If another VC at this location, we have to keep looking
       {
@@ -545,8 +537,8 @@ static int ia_cbr_setup (IADEV *dev, struct atm_vcc *vcc) {
           testSlot = idealSlot - inc;
           if (testSlot < 0) { // Wrap if necessary
              testSlot += dev->CbrTotEntries;
-             IF_CBR(printk("Testslot Wrap. STable Start=0x%x,Testslot=%d\n",
-                                                       (u32)SchedTbl,testSlot);)
+             IF_CBR(printk("Testslot Wrap. STable Start=0x%p,Testslot=%d\n",
+                                                       SchedTbl,testSlot);)
           }
           TstSchedTbl = (u16 *)(SchedTbl + testSlot);  // set table index
           memcpy((caddr_t)&cbrVC,(caddr_t)TstSchedTbl,sizeof(cbrVC)); 
@@ -561,12 +553,12 @@ static int ia_cbr_setup (IADEV *dev, struct atm_vcc *vcc) {
           } 
           // set table index and read in value
           TstSchedTbl = (u16*)(SchedTbl + testSlot);
-          IF_CBR(printk("Reading CBR Tbl from 0x%x, CbrVal=0x%x Iteration %d\n",
-                          (u32)TstSchedTbl,cbrVC,inc);) 
+          IF_CBR(printk("Reading CBR Tbl from 0x%p, CbrVal=0x%x Iteration %d\n",
+                          TstSchedTbl,cbrVC,inc);)
           memcpy((caddr_t)&cbrVC,(caddr_t)TstSchedTbl,sizeof(cbrVC));
        } /* while */
        // Move this VCI number into this location of the CBR Sched table.
-       memcpy((caddr_t)TstSchedTbl, (caddr_t)&vcIndex,sizeof(TstSchedTbl));
+       memcpy((caddr_t)TstSchedTbl, (caddr_t)&vcIndex, sizeof(*TstSchedTbl));
        dev->CbrRemEntries--;
        toBeAssigned--;
    } /* while */ 
@@ -615,12 +607,13 @@ static int ia_avail_descs(IADEV *iadev) {
    return tmp;
 }    
 
+static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb);
+
 static int ia_que_tx (IADEV *iadev) { 
    struct sk_buff *skb;
    int num_desc;
    struct atm_vcc *vcc;
    struct ia_vcc *iavcc;
-   static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb);
    num_desc = ia_avail_descs(iadev);
 
    while (num_desc && (skb = skb_dequeue(&iadev->tx_backlog))) {
@@ -643,7 +636,7 @@ static int ia_que_tx (IADEV *iadev) {
    return 0;
 }
 
-void ia_tx_poll (IADEV *iadev) {
+static void ia_tx_poll (IADEV *iadev) {
    struct atm_vcc *vcc = NULL;
    struct sk_buff *skb = NULL, *skb1 = NULL;
    struct ia_vcc *iavcc;
@@ -860,7 +853,7 @@ static void IaFrontEndIntr(IADEV *iadev) {
   return;
 }
 
-void ia_mb25_init (IADEV *iadev)
+static void ia_mb25_init (IADEV *iadev)
 {
    volatile ia_mb25_t  *mb25 = (ia_mb25_t*)iadev->phy;
 #if 0
@@ -875,7 +868,7 @@ void ia_mb25_init (IADEV *iadev)
    return;
 }                   
 
-void ia_suni_pm7345_init (IADEV *iadev)
+static void ia_suni_pm7345_init (IADEV *iadev)
 {
    volatile suni_pm7345_t *suni_pm7345 = (suni_pm7345_t *)iadev->phy;
    if (iadev->phy_type & FE_DS3_PHY)
@@ -958,9 +951,9 @@ void ia_suni_pm7345_init (IADEV *iadev)
 
 /***************************** IA_LIB END *****************************/
     
-/* pwang_test debug utility */
-int tcnter = 0, rcnter = 0;
-void xdump( u_char*  cp, int  length, char*  prefix )
+#ifdef CONFIG_ATM_IA_DEBUG
+static int tcnter = 0;
+static void xdump( u_char*  cp, int  length, char*  prefix )
 {
     int col, count;
     u_char prntBuf[120];
@@ -985,14 +978,13 @@ void xdump( u_char*  cp, int  length, char*  prefix )
             else
                 pBuf += sprintf( pBuf, "." );
                 }
-        sprintf( pBuf, "\n" );
-        // SPrint(prntBuf);
-        printk(prntBuf);
+        printk("%s\n", prntBuf);
         count += col;
         pBuf = prntBuf;
     }
 
 }  /* close xdump(... */
+#endif /* CONFIG_ATM_IA_DEBUG */
 
   
 static struct atm_dev *ia_boards = NULL;  
@@ -1007,10 +999,11 @@ static struct atm_dev *ia_boards = NULL;
   
 /*-- some utilities and memory allocation stuff will come here -------------*/  
   
-void desc_dbg(IADEV *iadev) {
+static void desc_dbg(IADEV *iadev) {
 
   u_short tcq_wr_ptr, tcq_st_ptr, tcq_ed_ptr;
-  u32 tmp, i;
+  u32 i;
+  void __iomem *tmp;
   // regval = readl((u32)ia_cmds->maddr);
   tcq_wr_ptr =  readw(iadev->seg_reg+TCQ_WR_PTR);
   printk("B_tcq_wr = 0x%x desc = %d last desc = %d\n",
@@ -1024,7 +1017,7 @@ void desc_dbg(IADEV *iadev) {
   i = 0;
   while (tcq_st_ptr != tcq_ed_ptr) {
       tmp = iadev->seg_ram+tcq_st_ptr;
-      printk("TCQ slot %d desc = %d  Addr = 0x%x\n", i++, readw(tmp), tmp);
+      printk("TCQ slot %d desc = %d  Addr = %p\n", i++, readw(tmp), tmp);
       tcq_st_ptr += 2;
   }
   for(i=0; i <iadev->num_tx_desc; i++)
@@ -1032,7 +1025,7 @@ void desc_dbg(IADEV *iadev) {
 } 
   
   
-/*----------------------------- Recieving side stuff --------------------------*/  
+/*----------------------------- Receiving side stuff --------------------------*/  
  
 static void rx_excp_rcvd(struct atm_dev *dev)  
 {  
@@ -1080,7 +1073,7 @@ static int rx_pkt(struct atm_dev *dev)
 	IADEV *iadev;  
 	struct atm_vcc *vcc;  
 	unsigned short status;  
-	struct rx_buf_desc *buf_desc_ptr;  
+	struct rx_buf_desc __iomem *buf_desc_ptr;  
 	int desc;   
 	struct dle* wr_ptr;  
 	int len;  
@@ -1095,7 +1088,7 @@ static int rx_pkt(struct atm_dev *dev)
 	}  
 	/* mask 1st 3 bits to get the actual descno. */  
 	desc = readw(iadev->reass_ram+iadev->rfL.pcq_rd) & 0x1fff;  
-        IF_RX(printk("reass_ram = 0x%x iadev->rfL.pcq_rd = 0x%x desc = %d\n", 
+        IF_RX(printk("reass_ram = %p iadev->rfL.pcq_rd = 0x%x desc = %d\n", 
                                     iadev->reass_ram, iadev->rfL.pcq_rd, desc);
               printk(" pcq_wr_ptr = 0x%x\n",
                                readw(iadev->reass_reg+PCQ_WR_PTR)&0xffff);)
@@ -1109,7 +1102,7 @@ static int rx_pkt(struct atm_dev *dev)
 	/* get the buffer desc entry.  
 		update stuff. - doesn't seem to be any update necessary  
 	*/  
-	buf_desc_ptr = (struct rx_buf_desc *)iadev->RX_DESC_BASE_ADDR;
+	buf_desc_ptr = iadev->RX_DESC_BASE_ADDR;
 	/* make the ptr point to the corresponding buffer desc entry */  
 	buf_desc_ptr += desc;	  
         if (!desc || (desc > iadev->num_rx_desc) || 
@@ -1140,7 +1133,7 @@ static int rx_pkt(struct atm_dev *dev)
                     IF_ERR(printk(" cause: packet time out\n");)
                 }
                 else {
-                    IF_ERR(printk(" cause: buffer over flow\n");)
+                    IF_ERR(printk(" cause: buffer overflow\n");)
                 }
 		goto out_free_desc;
 	}  
@@ -1202,7 +1195,7 @@ static void rx_intr(struct atm_dev *dev)
   if (status & RX_PKT_RCVD)  
   {  
 	/* do something */  
-	/* Basically recvd an interrupt for receving a packet.  
+	/* Basically recvd an interrupt for receiving a packet.  
 	A descriptor would have been written to the packet complete   
 	queue. Get all the descriptors and set up dma to move the   
 	packets till the packet complete queue is empty..  
@@ -1223,7 +1216,7 @@ static void rx_intr(struct atm_dev *dev)
         iadev->rx_tmp_jif = jiffies; 
         iadev->rxing = 0;
      } 
-     else if (((jiffies - iadev->rx_tmp_jif) > 50) && 
+     else if ((time_after(jiffies, iadev->rx_tmp_jif + 50)) &&
                ((iadev->rx_pkt_cnt - iadev->rx_tmp_cnt) == 0)) {
         for (i = 1; i <= iadev->num_rx_desc; i++)
                free_desc(dev, i);
@@ -1312,7 +1305,7 @@ static void rx_dle_intr(struct atm_dev *dev)
           // get real pkt length  pwang_test
           trailer = (struct cpcs_trailer*)((u_char *)skb->data +
                                  skb->len - sizeof(*trailer));
-          length =  swap(trailer->length);
+	  length = swap_byte_order(trailer->length);
           if ((length > iadev->rx_buf_sz) || (length > 
                               (skb->len - sizeof(struct cpcs_trailer))))
           {
@@ -1358,8 +1351,8 @@ INCR_DLE:
 static int open_rx(struct atm_vcc *vcc)  
 {  
 	IADEV *iadev;  
-	u_short *vc_table;  
-	u_short *reass_ptr;  
+	u_short __iomem *vc_table;  
+	u_short __iomem *reass_ptr;  
 	IF_EVENT(printk("iadev: open_rx %d.%d\n", vcc->vpi, vcc->vci);)
 
 	if (vcc->qos.rxtp.traffic_class == ATM_NONE) return 0;    
@@ -1372,8 +1365,8 @@ static int open_rx(struct atm_vcc *vcc)
         }
 	/* Make only this VCI in the vc table valid and let all   
 		others be invalid entries */  
-	vc_table = (u_short *)(iadev->reass_ram+RX_VC_TABLE*iadev->memSize);  
-	vc_table += vcc->vci;  
+	vc_table = iadev->reass_ram+RX_VC_TABLE*iadev->memSize;
+	vc_table += vcc->vci;
 	/* mask the last 6 bits and OR it with 3 for 1K VCs */  
 
         *vc_table = vcc->vci << 6;
@@ -1387,9 +1380,8 @@ static int open_rx(struct atm_vcc *vcc)
                 ia_open_abr_vc(iadev, &srv_p, vcc, 0);
 	} 
        	else {  /* for UBR  later may need to add CBR logic */
-        	reass_ptr = (u_short *)
-                           (iadev->reass_ram+REASS_TABLE*iadev->memSize);
-           	reass_ptr += vcc->vci;  
+        	reass_ptr = iadev->reass_ram+REASS_TABLE*iadev->memSize;
+           	reass_ptr += vcc->vci;
            	*reass_ptr = NO_AAL5_PKT;
        	}
 	
@@ -1403,13 +1395,12 @@ static int open_rx(struct atm_vcc *vcc)
 static int rx_init(struct atm_dev *dev)  
 {  
 	IADEV *iadev;  
-	struct rx_buf_desc *buf_desc_ptr;  
+	struct rx_buf_desc __iomem *buf_desc_ptr;  
 	unsigned long rx_pkt_start = 0;  
 	void *dle_addr;  
 	struct abr_vc_table  *abr_vc_table; 
 	u16 *vc_table;  
 	u16 *reass_table;  
-        u16 *ptr16;
 	int i,j, vcsize_sel;  
 	u_short freeq_st_adr;  
 	u_short *freeq_start;  
@@ -1424,21 +1415,22 @@ static int rx_init(struct atm_dev *dev)
 		printk(KERN_ERR DEV_LABEL "can't allocate DLEs\n");
 		goto err_out;
 	}
-	iadev->rx_dle_q.start = (struct dle*)dle_addr;  
+	iadev->rx_dle_q.start = (struct dle *)dle_addr;
 	iadev->rx_dle_q.read = iadev->rx_dle_q.start;  
 	iadev->rx_dle_q.write = iadev->rx_dle_q.start;  
-	iadev->rx_dle_q.end = (struct dle*)((u32)dle_addr+sizeof(struct dle)*DLE_ENTRIES);  
+	iadev->rx_dle_q.end = (struct dle*)((unsigned long)dle_addr+sizeof(struct dle)*DLE_ENTRIES);
 	/* the end of the dle q points to the entry after the last  
 	DLE that can be used. */  
   
 	/* write the upper 20 bits of the start address to rx list address register */  
+	/* We know this is 32bit bus addressed so the following is safe */
 	writel(iadev->rx_dle_dma & 0xfffff000,
 	       iadev->dma + IPHASE5575_RX_LIST_ADDR);  
-	IF_INIT(printk("Tx Dle list addr: 0x%08x value: 0x%0x\n", 
-                      (u32)(iadev->dma+IPHASE5575_TX_LIST_ADDR), 
+	IF_INIT(printk("Tx Dle list addr: 0x%p value: 0x%0x\n",
+                      iadev->dma+IPHASE5575_TX_LIST_ADDR,
                       *(u32*)(iadev->dma+IPHASE5575_TX_LIST_ADDR));  
-	printk("Rx Dle list addr: 0x%08x value: 0x%0x\n", 
-                      (u32)(iadev->dma+IPHASE5575_RX_LIST_ADDR), 
+	printk("Rx Dle list addr: 0x%p value: 0x%0x\n",
+                      iadev->dma+IPHASE5575_RX_LIST_ADDR,
                       *(u32*)(iadev->dma+IPHASE5575_RX_LIST_ADDR));)  
   
 	writew(0xffff, iadev->reass_reg+REASS_MASK_REG);  
@@ -1465,19 +1457,19 @@ static int rx_init(struct atm_dev *dev)
   
 	/* Initialize each entry in the Buffer Descriptor Table */  
         iadev->RX_DESC_BASE_ADDR = iadev->reass_ram+RX_DESC_BASE*iadev->memSize;
-	buf_desc_ptr =(struct rx_buf_desc *)iadev->RX_DESC_BASE_ADDR;
-	memset((caddr_t)buf_desc_ptr, 0, sizeof(*buf_desc_ptr));  
+	buf_desc_ptr = iadev->RX_DESC_BASE_ADDR;
+	memset_io(buf_desc_ptr, 0, sizeof(*buf_desc_ptr));
 	buf_desc_ptr++;  
 	rx_pkt_start = iadev->rx_pkt_ram;  
 	for(i=1; i<=iadev->num_rx_desc; i++)  
 	{  
-		memset((caddr_t)buf_desc_ptr, 0, sizeof(*buf_desc_ptr));  
+		memset_io(buf_desc_ptr, 0, sizeof(*buf_desc_ptr));  
 		buf_desc_ptr->buf_start_hi = rx_pkt_start >> 16;  
 		buf_desc_ptr->buf_start_lo = rx_pkt_start & 0x0000ffff;  
 		buf_desc_ptr++;		  
 		rx_pkt_start += iadev->rx_buf_sz;  
 	}  
-	IF_INIT(printk("Rx Buffer desc ptr: 0x%0x\n", (u32)(buf_desc_ptr));)  
+	IF_INIT(printk("Rx Buffer desc ptr: 0x%p\n", buf_desc_ptr);)
         i = FREE_BUF_DESC_Q*iadev->memSize; 
 	writew(i >> 16,  iadev->reass_reg+REASS_QUEUE_BASE); 
         writew(i, iadev->reass_reg+FREEQ_ST_ADR);
@@ -1494,7 +1486,7 @@ static int rx_init(struct atm_dev *dev)
 		*freeq_start = (u_short)i;  
 		freeq_start++;  
 	}  
-	IF_INIT(printk("freeq_start: 0x%0x\n", (u32)freeq_start);)  
+	IF_INIT(printk("freeq_start: 0x%p\n", freeq_start);)
         /* Packet Complete Queue */
         i = (PKT_COMP_Q * iadev->memSize) & 0xffff;
         writew(i, iadev->reass_reg+PCQ_ST_ADR);
@@ -1585,11 +1577,12 @@ static int rx_init(struct atm_dev *dev)
 	   Set Packet Aging Interval count register to overflow in about 4 us
  	*/  
         writew(0xF6F8, iadev->reass_reg+PKT_TM_CNT );
-        ptr16 = (u16*)j;
-        i = ((u32)ptr16 >> 6) & 0xff;
-	ptr16  += j - 1;
-	i |=(((u32)ptr16 << 2) & 0xff00);
+
+        i = (j >> 6) & 0xFF;
+        j += 2 * (j - 1);
+        i |= ((j << 2) & 0xFF00);
         writew(i, iadev->reass_reg+TMOUT_RANGE);
+
         /* initiate the desc_tble */
         for(i=0; i<iadev->num_tx_desc;i++)
             iadev->desc_tbl[i].timestamp = 0;
@@ -1602,14 +1595,14 @@ static int rx_init(struct atm_dev *dev)
   
 	skb_queue_head_init(&iadev->rx_dma_q);  
 	iadev->rx_free_desc_qhead = NULL;   
-	iadev->rx_open = kmalloc(4*iadev->num_vc,GFP_KERNEL);
-	if (!iadev->rx_open)  
-	{  
+
+	iadev->rx_open = kzalloc(4 * iadev->num_vc, GFP_KERNEL);
+	if (!iadev->rx_open) {
 		printk(KERN_ERR DEV_LABEL "itf %d couldn't get free page\n",
 		dev->number);  
 		goto err_free_dle;
 	}  
-	memset(iadev->rx_open, 0, 4*iadev->num_vc);  
+
         iadev->rxing = 1;
         iadev->rx_pkt_cnt = 0;
 	/* Mode Register */  
@@ -1719,7 +1712,7 @@ static void tx_dle_intr(struct atm_dev *dev)
                IA_SKB_STATE(skb) |= IA_DLED;
                skb_queue_tail(&iavcc->txing_skb, skb);
             }
-            IF_EVENT(printk("tx_dle_intr: enque skb = 0x%x \n", (u32)skb);)
+            IF_EVENT(printk("tx_dle_intr: enque skb = 0x%p \n", skb);)
             if (++dle == iadev->tx_dle_q.end)
                  dle = iadev->tx_dle_q.start;
         }
@@ -1754,7 +1747,7 @@ static int open_tx(struct atm_vcc *vcc)
                          (iadev->tx_buf_sz - sizeof(struct cpcs_trailer))){
            printk("IA:  SDU size over (%d) the configured SDU size %d\n",
 		  vcc->qos.txtp.max_sdu,iadev->tx_buf_sz);
-	   INPH_IA_VCC(vcc) = NULL;  
+	   vcc->dev_data = NULL;
            kfree(ia_vcc);
            return -EINVAL; 
         }
@@ -1779,16 +1772,18 @@ static int open_tx(struct atm_vcc *vcc)
         if (ia_vcc->pcr < iadev->rate_limit)
            skb_queue_head_init (&ia_vcc->txing_skb);
         if (ia_vcc->pcr < iadev->rate_limit) {
-           if (vcc->qos.txtp.max_sdu != 0) {
+	   struct sock *sk = sk_atm(vcc);
+
+	   if (vcc->qos.txtp.max_sdu != 0) {
                if (ia_vcc->pcr > 60000)
-                  vcc->sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 5;
+                  sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 5;
                else if (ia_vcc->pcr > 2000)
-                  vcc->sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 4;
+                  sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 4;
                else
-                 vcc->sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 3;
+                 sk->sk_sndbuf = vcc->qos.txtp.max_sdu * 3;
            }
            else
-             vcc->sk->sk_sndbuf = 24576;
+             sk->sk_sndbuf = 24576;
         }
            
 	vc = (struct main_vc *)iadev->MAIN_VC_TABLE_ADDR;  
@@ -1860,7 +1855,7 @@ static int open_tx(struct atm_vcc *vcc)
                     return -EINVAL; 
                 }
                 if (vcc->qos.txtp.max_pcr > iadev->LineRate) {
-                   IF_CBR(printk("PCR is not availble\n");)
+                   IF_CBR(printk("PCR is not available\n");)
                    return -1;
                 }
                 vc->type = CBR;
@@ -1910,7 +1905,7 @@ static int tx_init(struct atm_dev *dev)
 	iadev->tx_dle_q.start = (struct dle*)dle_addr;  
 	iadev->tx_dle_q.read = iadev->tx_dle_q.start;  
 	iadev->tx_dle_q.write = iadev->tx_dle_q.start;  
-	iadev->tx_dle_q.end = (struct dle*)((u32)dle_addr+sizeof(struct dle)*DLE_ENTRIES);  
+	iadev->tx_dle_q.end = (struct dle*)((unsigned long)dle_addr+sizeof(struct dle)*DLE_ENTRIES);
 
 	/* write the upper 20 bits of the start address to tx list address register */  
 	writel(iadev->tx_dle_dma & 0xfffff000,
@@ -2048,15 +2043,14 @@ static int tx_init(struct atm_dev *dev)
         writew(tmp16, iadev->seg_reg+CBR_TAB_END+1); // CBR_PTR;
         tmp16 = (CBR_SCHED_TABLE*iadev->memSize + iadev->num_vc*6 - 2) >> 1;
         writew(tmp16, iadev->seg_reg+CBR_TAB_END);
-        IF_INIT(printk("iadev->seg_reg = 0x%x CBR_PTR_BASE = 0x%x\n",
-               (u32)iadev->seg_reg, readw(iadev->seg_reg+CBR_PTR_BASE));)
+        IF_INIT(printk("iadev->seg_reg = 0x%p CBR_PTR_BASE = 0x%x\n",
+               iadev->seg_reg, readw(iadev->seg_reg+CBR_PTR_BASE));)
         IF_INIT(printk("CBR_TAB_BEG = 0x%x, CBR_TAB_END = 0x%x, CBR_PTR = 0x%x\n",
           readw(iadev->seg_reg+CBR_TAB_BEG), readw(iadev->seg_reg+CBR_TAB_END),
           readw(iadev->seg_reg+CBR_TAB_END+1));)
-        tmp16 = (iadev->seg_ram+CBR_SCHED_TABLE*iadev->memSize);
 
         /* Initialize the CBR Schedualing Table */
-        memset((caddr_t)(iadev->seg_ram+CBR_SCHED_TABLE*iadev->memSize), 
+        memset_io(iadev->seg_ram+CBR_SCHED_TABLE*iadev->memSize, 
                                                           0, iadev->num_vc*6); 
         iadev->CbrRemEntries = iadev->CbrTotEntries = iadev->num_vc*3;
         iadev->CbrEntryPt = 0;
@@ -2069,7 +2063,7 @@ static int tx_init(struct atm_dev *dev)
 		- UBR Table size is 4K  
 		- UBR wait queue is 4K  
 	   since the table and wait queues are contiguous, all the bytes   
-	   can be initialized by one memeset.  
+	   can be initialized by one memeset.
 	*/  
         
         vcsize_sel = 0;
@@ -2095,7 +2089,7 @@ static int tx_init(struct atm_dev *dev)
 		- ABR Table size is 2K  
 		- ABR wait queue is 2K  
 	   since the table and wait queues are contiguous, all the bytes   
-	   can be intialized by one memeset.  
+	   can be initialized by one memeset.
 	*/  
         i = ABR_SCHED_TABLE * iadev->memSize;
         writew((i >> 11) & 0xffff, iadev->seg_reg+ABR_SBPTR_BASE);
@@ -2195,7 +2189,7 @@ err_out:
 	return -ENOMEM;
 }   
    
-static irqreturn_t ia_int(int irq, void *dev_id, struct pt_regs *regs)  
+static irqreturn_t ia_int(int irq, void *dev_id)  
 {  
    struct atm_dev *dev;  
    IADEV *iadev;  
@@ -2284,12 +2278,12 @@ static int reset_sar(struct atm_dev *dev)
 }  
 	  
 	  
-static int __init ia_init(struct atm_dev *dev)
+static int __devinit ia_init(struct atm_dev *dev)
 {  
 	IADEV *iadev;  
-	unsigned long real_base, base;  
+	unsigned long real_base;
+	void __iomem *base;
 	unsigned short command;  
-	unsigned char revision;  
 	int error, i; 
 	  
 	/* The device has been identified and registered. Now we read   
@@ -2304,16 +2298,14 @@ static int __init ia_init(struct atm_dev *dev)
 	real_base = pci_resource_start (iadev->pci, 0);
 	iadev->irq = iadev->pci->irq;
 		  
-	if ((error = pci_read_config_word(iadev->pci, PCI_COMMAND,&command))   
-		    || (error = pci_read_config_byte(iadev->pci,   
-				PCI_REVISION_ID,&revision)))   
-	{  
+	error = pci_read_config_word(iadev->pci, PCI_COMMAND, &command);
+	if (error) {
 		printk(KERN_ERR DEV_LABEL "(itf %d): init error 0x%x\n",  
 				dev->number,error);  
 		return -EINVAL;  
 	}  
 	IF_INIT(printk(DEV_LABEL "(itf %d): rev.%d,realbase=0x%lx,irq=%d\n",  
-			dev->number, revision, real_base, iadev->irq);)  
+			dev->number, iadev->pci->revision, real_base, iadev->irq);)
 	  
 	/* find mapping size of board */  
 	  
@@ -2343,7 +2335,7 @@ static int __init ia_init(struct atm_dev *dev)
 	udelay(10);  
 	  
 	/* mapping the physical address to a virtual address in address space */  
-	base=(unsigned long)ioremap((unsigned long)real_base,iadev->pci_map_size);  /* ioremap is not resolved ??? */  
+	base = ioremap(real_base,iadev->pci_map_size);  /* ioremap is not resolved ??? */  
 	  
 	if (!base)  
 	{  
@@ -2351,39 +2343,38 @@ static int __init ia_init(struct atm_dev *dev)
 			    dev->number);  
 		return error;  
 	}  
-	IF_INIT(printk(DEV_LABEL " (itf %d): rev.%d,base=0x%lx,irq=%d\n",  
-			dev->number, revision, base, iadev->irq);)  
+	IF_INIT(printk(DEV_LABEL " (itf %d): rev.%d,base=%p,irq=%d\n",  
+			dev->number, iadev->pci->revision, base, iadev->irq);)
 	  
 	/* filling the iphase dev structure */  
 	iadev->mem = iadev->pci_map_size /2;  
-	iadev->base_diff = real_base - base;  
 	iadev->real_base = real_base;  
 	iadev->base = base;  
 		  
 	/* Bus Interface Control Registers */  
-	iadev->reg = (u32 *) (base + REG_BASE);  
+	iadev->reg = base + REG_BASE;
 	/* Segmentation Control Registers */  
-	iadev->seg_reg = (u32 *) (base + SEG_BASE);  
+	iadev->seg_reg = base + SEG_BASE;
 	/* Reassembly Control Registers */  
-	iadev->reass_reg = (u32 *) (base + REASS_BASE);  
+	iadev->reass_reg = base + REASS_BASE;  
 	/* Front end/ DMA control registers */  
-	iadev->phy = (u32 *) (base + PHY_BASE);  
-	iadev->dma = (u32 *) (base + PHY_BASE);  
+	iadev->phy = base + PHY_BASE;  
+	iadev->dma = base + PHY_BASE;  
 	/* RAM - Segmentation RAm and Reassembly RAM */  
-	iadev->ram = (u32 *) (base + ACTUAL_RAM_BASE);  
-	iadev->seg_ram =  (base + ACTUAL_SEG_RAM_BASE);  
-	iadev->reass_ram = (base + ACTUAL_REASS_RAM_BASE);  
+	iadev->ram = base + ACTUAL_RAM_BASE;  
+	iadev->seg_ram = base + ACTUAL_SEG_RAM_BASE;  
+	iadev->reass_ram = base + ACTUAL_REASS_RAM_BASE;  
   
 	/* lets print out the above */  
-	IF_INIT(printk("Base addrs: %08x %08x %08x \n %08x %08x %08x %08x\n", 
-          (u32)iadev->reg,(u32)iadev->seg_reg,(u32)iadev->reass_reg, 
-          (u32)iadev->phy, (u32)iadev->ram, (u32)iadev->seg_ram, 
-          (u32)iadev->reass_ram);) 
+	IF_INIT(printk("Base addrs: %p %p %p \n %p %p %p %p\n", 
+          iadev->reg,iadev->seg_reg,iadev->reass_reg, 
+          iadev->phy, iadev->ram, iadev->seg_ram, 
+          iadev->reass_ram);) 
 	  
 	/* lets try reading the MAC address */  
 	error = get_esi(dev);  
 	if (error) {
-	  iounmap((void *) iadev->base);
+	  iounmap(iadev->base);
 	  return error;  
 	}
         printk("IA: ");
@@ -2393,7 +2384,7 @@ static int __init ia_init(struct atm_dev *dev)
   
         /* reset SAR */  
         if (reset_sar(dev)) {
-	   iounmap((void *) iadev->base);
+	   iounmap(iadev->base);
            printk("IA: reset SAR fail, please try again\n");
            return 1;
         }
@@ -2480,7 +2471,7 @@ static void ia_free_rx(IADEV *iadev)
 			  iadev->rx_dle_dma);  
 }
 
-static int __init ia_start(struct atm_dev *dev)
+static int __devinit ia_start(struct atm_dev *dev)
 {  
 	IADEV *iadev;  
 	int error;  
@@ -2488,7 +2479,7 @@ static int __init ia_start(struct atm_dev *dev)
 	u32 ctrl_reg;  
 	IF_EVENT(printk(">ia_start\n");)  
 	iadev = INPH_IA_DEV(dev);  
-        if (request_irq(iadev->irq, &ia_int, SA_SHIRQ, DEV_LABEL, dev)) {  
+        if (request_irq(iadev->irq, &ia_int, IRQF_SHARED, DEV_LABEL, dev)) {
                 printk(KERN_ERR DEV_LABEL "(itf %d): IRQ%d is already in use\n",  
                     dev->number, iadev->irq);  
 		error = -EAGAIN;
@@ -2562,17 +2553,11 @@ static int __init ia_start(struct atm_dev *dev)
 		error = suni_init(dev);
 		if (error)
 			goto err_free_rx;
-		/* 
-		 * Enable interrupt on loss of signal
-		 * SUNI_RSOP_CIE - 0x10
-		 * SUNI_RSOP_CIE_LOSE - 0x04
-		 */
-		ia_phy_put(dev, ia_phy_get(dev, 0x10) | 0x04, 0x10);
-#ifndef MODULE
-		error = dev->phy->start(dev);
-		if (error)
-			goto err_free_rx;
-#endif
+		if (dev->phy->start) {
+			error = dev->phy->start(dev);
+			if (error)
+				goto err_free_rx;
+		}
 		/* Get iadev->carrier_detect status */
 		IaFrontEndIntr(iadev);
 	}
@@ -2589,14 +2574,14 @@ err_out:
 }  
   
 static void ia_close(struct atm_vcc *vcc)  
-{  
+{
+	DEFINE_WAIT(wait);
         u16 *vc_table;
         IADEV *iadev;
         struct ia_vcc *ia_vcc;
         struct sk_buff *skb = NULL;
         struct sk_buff_head tmp_tx_backlog, tmp_vcc_backlog;
         unsigned long closetime, flags;
-        int ctimeout;
 
         iadev = INPH_IA_DEV(vcc->dev);
         ia_vcc = INPH_IA_VCC(vcc);
@@ -2609,7 +2594,9 @@ static void ia_close(struct atm_vcc *vcc)
         skb_queue_head_init (&tmp_vcc_backlog); 
         if (vcc->qos.txtp.traffic_class != ATM_NONE) {
            iadev->close_pending++;
-           sleep_on_timeout(&iadev->timeout_wait, 50);
+	   prepare_to_wait(&iadev->timeout_wait, &wait, TASK_UNINTERRUPTIBLE);
+	   schedule_timeout(50);
+	   finish_wait(&iadev->timeout_wait, &wait);
            spin_lock_irqsave(&iadev->tx_lock, flags); 
            while((skb = skb_dequeue(&iadev->tx_backlog))) {
               if (ATM_SKB(skb)->vcc == vcc){ 
@@ -2622,17 +2609,12 @@ static void ia_close(struct atm_vcc *vcc)
            while((skb = skb_dequeue(&tmp_tx_backlog))) 
              skb_queue_tail(&iadev->tx_backlog, skb);
            IF_EVENT(printk("IA TX Done decs_cnt = %d\n", ia_vcc->vc_desc_cnt);) 
-           closetime = jiffies;
-           ctimeout = 300000 / ia_vcc->pcr;
-           if (ctimeout == 0)
-              ctimeout = 1;
-           while (ia_vcc->vc_desc_cnt > 0){
-              if ((jiffies - closetime) >= ctimeout) 
-                 break;
-              spin_unlock_irqrestore(&iadev->tx_lock, flags);
-              sleep_on(&iadev->close_wait);
-              spin_lock_irqsave(&iadev->tx_lock, flags);
-           }    
+           closetime = 300000 / ia_vcc->pcr;
+           if (closetime == 0)
+              closetime = 1;
+           spin_unlock_irqrestore(&iadev->tx_lock, flags);
+           wait_event_timeout(iadev->close_wait, (ia_vcc->vc_desc_cnt <= 0), closetime);
+           spin_lock_irqsave(&iadev->tx_lock, flags);
            iadev->close_pending--;
            iadev->testTable[vcc->vci]->lastTime = 0;
            iadev->testTable[vcc->vci]->fract = 0; 
@@ -2659,7 +2641,7 @@ static void ia_close(struct atm_vcc *vcc)
            vc_table += vcc->vci;
            *vc_table = (vcc->vci << 6) | 15;
            if (vcc->qos.rxtp.traffic_class == ATM_ABR) {
-              struct abr_vc_table *abr_vc_table = (struct abr_vc_table *)
+              struct abr_vc_table __iomem *abr_vc_table = 
                                 (iadev->reass_ram+ABR_VC_TABLE*iadev->memSize);
               abr_vc_table +=  vcc->vci;
               abr_vc_table->rdf = 0x0003;
@@ -2667,11 +2649,11 @@ static void ia_close(struct atm_vcc *vcc)
            }                                 
            // Drain the packets
            rx_dle_intr(vcc->dev); 
-           iadev->rx_open[vcc->vci] = 0;
+           iadev->rx_open[vcc->vci] = NULL;
         }
 	kfree(INPH_IA_VCC(vcc));  
         ia_vcc = NULL;
-        INPH_IA_VCC(vcc) = NULL;  
+        vcc->dev_data = NULL;
         clear_bit(ATM_VF_ADDR,&vcc->flags);
         return;        
 }  
@@ -2684,7 +2666,7 @@ static int ia_open(struct atm_vcc *vcc)
 	if (!test_bit(ATM_VF_PARTIAL,&vcc->flags))  
 	{  
 		IF_EVENT(printk("ia: not partially allocated resources\n");)  
-		INPH_IA_VCC(vcc) = NULL;  
+		vcc->dev_data = NULL;
 	}  
 	iadev = INPH_IA_DEV(vcc->dev);  
 	if (vcc->vci != ATM_VPI_UNSPEC && vcc->vpi != ATM_VCI_UNSPEC)  
@@ -2700,7 +2682,7 @@ static int ia_open(struct atm_vcc *vcc)
 	/* Device dependent initialization */  
 	ia_vcc = kmalloc(sizeof(*ia_vcc), GFP_KERNEL);  
 	if (!ia_vcc) return -ENOMEM;  
-	INPH_IA_VCC(vcc) = ia_vcc;  
+	vcc->dev_data = ia_vcc;
   
 	if ((error = open_rx(vcc)))  
 	{  
@@ -2738,12 +2720,12 @@ static int ia_change_qos(struct atm_vcc *vcc, struct atm_qos *qos, int flags)
 	return 0;  
 }  
   
-static int ia_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)  
+static int ia_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)  
 {  
    IA_CMDBUF ia_cmds;
    IADEV *iadev;
    int i, board;
-   u16 *tmps;
+   u16 __user *tmps;
    IF_EVENT(printk(">ia_ioctl\n");)  
    if (cmd != IA_CMD) {
       if (!dev->phy->ioctl) return -EINVAL;
@@ -2766,7 +2748,7 @@ static int ia_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
              break;
           case MEMDUMP_SEGREG:
 	     if (!capable(CAP_NET_ADMIN)) return -EPERM;
-             tmps = (u16 *)ia_cmds.buf;
+             tmps = (u16 __user *)ia_cmds.buf;
              for(i=0; i<0x80; i+=2, tmps++)
                 if(put_user((u16)(readl(iadev->seg_reg+i) & 0xffff), tmps)) return -EFAULT;
              ia_cmds.status = 0;
@@ -2774,7 +2756,7 @@ static int ia_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
              break;
           case MEMDUMP_REASSREG:
 	     if (!capable(CAP_NET_ADMIN)) return -EPERM;
-             tmps = (u16 *)ia_cmds.buf;
+             tmps = (u16 __user *)ia_cmds.buf;
              for(i=0; i<0x80; i+=2, tmps++)
                 if(put_user((u16)(readl(iadev->reass_reg+i) & 0xffff), tmps)) return -EFAULT;
              ia_cmds.status = 0;
@@ -2874,14 +2856,14 @@ static int ia_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
 }  
   
 static int ia_getsockopt(struct atm_vcc *vcc, int level, int optname,   
-	void *optval, int optlen)  
+	void __user *optval, int optlen)  
 {  
 	IF_EVENT(printk(">ia_getsockopt\n");)  
 	return -EINVAL;  
 }  
   
 static int ia_setsockopt(struct atm_vcc *vcc, int level, int optname,   
-	void *optval, int optlen)  
+	void __user *optval, unsigned int optlen)  
 {  
 	IF_EVENT(printk(">ia_setsockopt\n");)  
 	return -EINVAL;  
@@ -2890,7 +2872,7 @@ static int ia_setsockopt(struct atm_vcc *vcc, int level, int optname,
 static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
         IADEV *iadev;
         struct dle *wr_ptr;
-        struct tx_buf_desc *buf_desc_ptr;
+        struct tx_buf_desc __iomem *buf_desc_ptr;
         int desc;
         int comp_code;
         int total_len;
@@ -2916,7 +2898,7 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
                  dev_kfree_skb_any(skb);
           return 0;
         }
-        if ((u32)skb->data & 3) {
+        if ((unsigned long)skb->data & 3) {
            printk("Misaligned SKB\n");
            if (vcc->pop)
                  vcc->pop(vcc, skb);
@@ -2980,8 +2962,8 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
  
 	/* Put the packet in a tx buffer */   
 	trailer = iadev->tx_buf[desc-1].cpcs;
-        IF_TX(printk("Sent: skb = 0x%x skb->data: 0x%x len: %d, desc: %d\n",
-                  (u32)skb, (u32)skb->data, skb->len, desc);)
+        IF_TX(printk("Sent: skb = 0x%p skb->data: 0x%p len: %d, desc: %d\n",
+                  skb, skb->data, skb->len, desc);)
 	trailer->control = 0; 
         /*big endian*/ 
 	trailer->length = ((skb->len & 0xff) << 8) | ((skb->len & 0xff00) >> 8);
@@ -2994,7 +2976,7 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
         printk("\n");)
 
 	/* Build the buffer descriptor */  
-	buf_desc_ptr = (struct tx_buf_desc *)(iadev->seg_ram+TX_DESC_BASE);  
+	buf_desc_ptr = iadev->seg_ram+TX_DESC_BASE;
 	buf_desc_ptr += desc;	/* points to the corresponding entry */  
 	buf_desc_ptr->desc_mode = AAL5 | EOM_EN | APP_CRC32 | CMPL_INT;   
 	/* Huh ? p.115 of users guide describes this as a read-only register */
@@ -3012,7 +2994,7 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
 		skb->len, PCI_DMA_TODEVICE);
 	wr_ptr->local_pkt_addr = (buf_desc_ptr->buf_start_hi << 16) | 
                                                   buf_desc_ptr->buf_start_lo;  
-	/* wr_ptr->bytes = swap(total_len);	didn't seem to affect ?? */  
+	/* wr_ptr->bytes = swap_byte_order(total_len); didn't seem to affect?? */
 	wr_ptr->bytes = skb->len;  
 
         /* hw bug - DLEs of 0x2d, 0x2e, 0x2f cause DMA lockup */
@@ -3174,15 +3156,14 @@ static int __devinit ia_init_one(struct pci_dev *pdev,
 {  
 	struct atm_dev *dev;  
 	IADEV *iadev;  
-        unsigned long flags;
 	int ret;
 
-	iadev = kmalloc(sizeof(*iadev), GFP_KERNEL); 
+	iadev = kzalloc(sizeof(*iadev), GFP_KERNEL);
 	if (!iadev) {
 		ret = -ENOMEM;
 		goto err_out;
 	}
-	memset(iadev, 0, sizeof(*iadev));
+
 	iadev->pci = pdev;
 
 	IF_INIT(printk("ia detected at bus:%d dev: %d function:%d\n",
@@ -3191,38 +3172,33 @@ static int __devinit ia_init_one(struct pci_dev *pdev,
 		ret = -ENODEV;
 		goto err_out_free_iadev;
 	}
-	dev = atm_dev_register(DEV_LABEL, &ops, -1, NULL);
+	dev = atm_dev_register(DEV_LABEL, &pdev->dev, &ops, -1, NULL);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto err_out_disable_dev;
 	}
-	INPH_IA_DEV(dev) = iadev; 
+	dev->dev_data = iadev;
 	IF_INIT(printk(DEV_LABEL "registered at (itf :%d)\n", dev->number);)
-	IF_INIT(printk("dev_id = 0x%x iadev->LineRate = %d \n", (u32)dev,
+	IF_INIT(printk("dev_id = 0x%p iadev->LineRate = %d \n", dev,
 		iadev->LineRate);)
+
+	pci_set_drvdata(pdev, dev);
 
 	ia_dev[iadev_count] = iadev;
 	_ia_dev[iadev_count] = dev;
 	iadev_count++;
-	spin_lock_init(&iadev->misc_lock);
-	/* First fixes first. I don't want to think about this now. */
-	spin_lock_irqsave(&iadev->misc_lock, flags); 
 	if (ia_init(dev) || ia_start(dev)) {  
 		IF_INIT(printk("IA register failed!\n");)
 		iadev_count--;
 		ia_dev[iadev_count] = NULL;
 		_ia_dev[iadev_count] = NULL;
-		spin_unlock_irqrestore(&iadev->misc_lock, flags); 
 		ret = -EINVAL;
 		goto err_out_deregister_dev;
 	}
-	spin_unlock_irqrestore(&iadev->misc_lock, flags); 
 	IF_EVENT(printk("iadev_count = %d\n", iadev_count);)
 
 	iadev->next_board = ia_boards;  
 	ia_boards = dev;  
-
-	pci_set_drvdata(pdev, dev);
 
 	return 0;
 
@@ -3241,18 +3217,23 @@ static void __devexit ia_remove_one(struct pci_dev *pdev)
 	struct atm_dev *dev = pci_get_drvdata(pdev);
 	IADEV *iadev = INPH_IA_DEV(dev);
 
-	ia_phy_put(dev, ia_phy_get(dev,0x10) & ~(0x4), 0x10); 
+	/* Disable phy interrupts */
+	ia_phy_put(dev, ia_phy_get(dev, SUNI_RSOP_CIE) & ~(SUNI_RSOP_CIE_LOSE),
+				   SUNI_RSOP_CIE);
 	udelay(1);
+
+	if (dev->phy && dev->phy->stop)
+		dev->phy->stop(dev);
 
 	/* De-register device */  
       	free_irq(iadev->irq, dev);
 	iadev_count--;
 	ia_dev[iadev_count] = NULL;
 	_ia_dev[iadev_count] = NULL;
+	IF_EVENT(printk("deregistering iav at (itf:%d)\n", dev->number);)
 	atm_dev_deregister(dev);
-	IF_EVENT(printk("iav deregistered at (itf:%d)\n", dev->number);)
 
-      	iounmap((void *) iadev->base);  
+      	iounmap(iadev->base);  
 	pci_disable_device(pdev);
 
 	ia_free_rx(iadev);
@@ -3279,7 +3260,7 @@ static int __init ia_module_init(void)
 {
 	int ret;
 
-	ret = pci_module_init(&ia_driver);
+	ret = pci_register_driver(&ia_driver);
 	if (ret >= 0) {
 		ia_timer.expires = jiffies + 3*HZ;
 		add_timer(&ia_timer); 

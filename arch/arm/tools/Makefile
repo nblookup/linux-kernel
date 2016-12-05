@@ -4,6 +4,7 @@
 # Copyright (C) 2001 Russell King
 #
 
-include/asm-arm/mach-types.h: $(obj)/mach-types $(obj)/gen-mach-types
+include/generated/mach-types.h: $(src)/gen-mach-types $(src)/mach-types
 	@echo '  Generating $@'
-	@$(AWK) -f $(obj)/gen-mach-types $(obj)/mach-types > $@
+	@mkdir -p $(dir $@)
+	$(Q)$(AWK) -f $^ > $@ || { rm -f $@; /bin/false; }

@@ -7,7 +7,11 @@
  */
 #include <linux/init.h>
 #include <linux/mm.h>
+#include <linux/bootmem.h>
+#include <linux/highmem.h>
+#include <asm/fixmap.h>
 #include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 
 void pgd_init(unsigned long page)
 {
@@ -28,19 +32,20 @@ void pgd_init(unsigned long page)
 
 void __init pagetable_init(void)
 {
-#ifdef CONFIG_HIGHMEM
 	unsigned long vaddr;
-	pgd_t *pgd, *pgd_base;
+	pgd_t *pgd_base;
+#ifdef CONFIG_HIGHMEM
+	pgd_t *pgd;
+	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
 #endif
 
 	/* Initialize the entire pgd.  */
 	pgd_init((unsigned long)swapper_pg_dir);
-	pgd_init((unsigned long)swapper_pg_dir +
-	         sizeof(pgd_t ) * USER_PTRS_PER_PGD);
+	pgd_init((unsigned long)swapper_pg_dir
+		 + sizeof(pgd_t) * USER_PTRS_PER_PGD);
 
-#ifdef CONFIG_HIGHMEM
 	pgd_base = swapper_pg_dir;
 
 	/*
@@ -49,6 +54,7 @@ void __init pagetable_init(void)
 	vaddr = __fix_to_virt(__end_of_fixed_addresses - 1) & PMD_MASK;
 	fixrange_init(vaddr, 0, pgd_base);
 
+#ifdef CONFIG_HIGHMEM
 	/*
 	 * Permanent kmaps:
 	 */
@@ -56,7 +62,8 @@ void __init pagetable_init(void)
 	fixrange_init(vaddr, vaddr + PAGE_SIZE*LAST_PKMAP, pgd_base);
 
 	pgd = swapper_pg_dir + __pgd_offset(vaddr);
-	pmd = pmd_offset(pgd, vaddr);
+	pud = pud_offset(pgd, vaddr);
+	pmd = pmd_offset(pud, vaddr);
 	pte = pte_offset_kernel(pmd, vaddr);
 	pkmap_page_table = pte;
 #endif

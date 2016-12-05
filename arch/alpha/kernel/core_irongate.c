@@ -9,26 +9,22 @@
  * Code common to all IRONGATE core logic chips.
  */
 
-#include <linux/kernel.h>
-#include <linux/types.h>
-#include <linux/pci.h>
-#include <linux/sched.h>
-#include <linux/init.h>
-#include <linux/initrd.h>
-
-#include <asm/ptrace.h>
-#include <asm/system.h>
-#include <asm/pci.h>
-#include <asm/hwrpb.h>
-#include <asm/cacheflush.h>
-#include <asm/tlbflush.h>
-
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
 #include <asm/core_irongate.h>
 #undef __EXTERN_INLINE
 
+#include <linux/types.h>
+#include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/init.h>
+#include <linux/initrd.h>
 #include <linux/bootmem.h>
+
+#include <asm/ptrace.h>
+#include <asm/pci.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -245,7 +241,8 @@ albacore_init_arch(void)
 				       size / 1024);
 		}
 #endif
-		reserve_bootmem_node(NODE_DATA(0), pci_mem, memtop - pci_mem);
+		reserve_bootmem_node(NODE_DATA(0), pci_mem, memtop -
+				pci_mem, BOOTMEM_DEFAULT);
 		printk("irongate_init_arch: temporarily reserving "
 			"region %08lx-%08lx for PCI\n", pci_mem, memtop - 1);
 	}
@@ -291,9 +288,9 @@ irongate_init_arch(void)
 	hose->sparse_mem_base = 0;
 	hose->sparse_io_base = 0;
 	hose->dense_mem_base
-	  = (IRONGATE_MEM & 0xffffffffff) | 0x80000000000;
+	  = (IRONGATE_MEM & 0xffffffffffUL) | 0x80000000000UL;
 	hose->dense_io_base
-	  = (IRONGATE_IO & 0xffffffffff) | 0x80000000000;
+	  = (IRONGATE_IO & 0xffffffffffUL) | 0x80000000000UL;
 
 	hose->sg_isa = hose->sg_pci = NULL;
 	__direct_map_base = 0;
@@ -314,7 +311,7 @@ irongate_init_arch(void)
 #define GET_GATT_OFF(addr) ((addr & 0x003ff000) >> 12) 
 #define GET_GATT(addr) (gatt_pages[GET_PAGE_DIR_IDX(addr)])
 
-unsigned long
+void __iomem *
 irongate_ioremap(unsigned long addr, unsigned long size)
 {
 	struct vm_struct *area;
@@ -324,7 +321,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 	unsigned long gart_bus_addr;
 
 	if (!alpha_agpgart_size)
-		return addr + IRONGATE_MEM;
+		return (void __iomem *)(addr + IRONGATE_MEM);
 
 	gart_bus_addr = (unsigned long)IRONGATE0->bar0 &
 			PCI_BASE_ADDRESS_MEM_MASK; 
@@ -343,7 +340,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 		/*
 		 * Not found - assume legacy ioremap
 		 */
-		return addr + IRONGATE_MEM;
+		return (void __iomem *)(addr + IRONGATE_MEM);
 	} while(0);
 
 	mmio_regs = (u32 *)(((unsigned long)IRONGATE0->bar1 &
@@ -357,7 +354,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 	if (addr & ~PAGE_MASK) {
 		printk("AGP ioremap failed... addr not page aligned (0x%lx)\n",
 		       addr);
-		return addr + IRONGATE_MEM;
+		return (void __iomem *)(addr + IRONGATE_MEM);
 	}
 	last = addr + size - 1;
 	size = PAGE_ALIGN(last) - addr;
@@ -382,7 +379,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 	 * Map it
 	 */
 	area = get_vm_area(size, VM_IOREMAP);
-	if (!area) return (unsigned long)NULL;
+	if (!area) return NULL;
 
 	for(baddr = addr, vaddr = (unsigned long)area->addr; 
 	    baddr <= last; 
@@ -395,7 +392,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 					     pte, PAGE_SIZE, 0)) {
 			printk("AGP ioremap: FAILED to map...\n");
 			vfree(area->addr);
-			return (unsigned long)NULL;
+			return NULL;
 		}
 	}
 
@@ -406,13 +403,17 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 	printk("irongate_ioremap(0x%lx, 0x%lx) returning 0x%lx\n",
 	       addr, size, vaddr);
 #endif
-	return vaddr;
+	return (void __iomem *)vaddr;
 }
+EXPORT_SYMBOL(irongate_ioremap);
 
 void
-irongate_iounmap(unsigned long addr)
+irongate_iounmap(volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	if (((long)addr >> 41) == -2)
 		return;	/* kseg map, nothing to do */
-	if (addr) return vfree((void *)(PAGE_MASK & addr)); 
+	if (addr)
+		return vfree((void *)(PAGE_MASK & addr)); 
 }
+EXPORT_SYMBOL(irongate_iounmap);

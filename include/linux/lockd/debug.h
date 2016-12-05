@@ -23,7 +23,7 @@
 
 #undef ifdebug
 #if defined(RPC_DEBUG) && defined(LOCKD_DEBUG)
-# define ifdebug(flag)		if (nlm_debug & NLMDBG_##flag)
+# define ifdebug(flag)		if (unlikely(nlm_debug & NLMDBG_##flag))
 #else
 # define ifdebug(flag)		if (0)
 #endif
@@ -43,6 +43,5 @@
 #define NLMDBG_HOSTCACHE	0x0080
 #define NLMDBG_XDR		0x0100
 #define NLMDBG_ALL		0x7fff
-
 
 #endif /* LINUX_LOCKD_DEBUG_H */

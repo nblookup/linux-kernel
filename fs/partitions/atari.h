@@ -15,8 +15,8 @@ struct partition_info
 {
   u8 flg;			/* bit 0: active; bit 7: bootable */
   char id[3];			/* "GEM", "BGM", "XGM", or other */
-  u32 st;			/* start of partition */
-  u32 siz;			/* length of partition */
+  __be32 st;			/* start of partition */
+  __be32 siz;			/* length of partition */
 };
 
 struct rootsector
@@ -31,4 +31,4 @@ struct rootsector
   u16 checksum;			/* checksum for bootable disks */
 } __attribute__((__packed__));
 
-int atari_partition(struct parsed_partitions *state, struct block_device *bdev);
+int atari_partition(struct parsed_partitions *state);

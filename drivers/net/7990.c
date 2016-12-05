@@ -1,7 +1,7 @@
-/* 
- * 7990.c -- LANCE ethernet IC generic routines. 
+/*
+ * 7990.c -- LANCE ethernet IC generic routines.
  * This is an attempt to separate out the bits of various ethernet
- * drivers that are common because they all use the AMD 7990 LANCE 
+ * drivers that are common because they all use the AMD 7990 LANCE
  * (Local Area Network Controller for Ethernet) chip.
  *
  * Copyright (C) 05/1998 Peter Maydell <pmaydell@chiark.greenend.org.uk>
@@ -9,12 +9,11 @@
  * Most of this stuff was obtained by looking at other LANCE drivers,
  * in particular a2065.[ch]. The AMD C-LANCE datasheet was also helpful.
  * NB: this was made easy by the fact that Jes Sorensen had cleaned up
- * most of a2025 and sunlance with the aim of merging them, so the 
+ * most of a2025 and sunlance with the aim of merging them, so the
  * common code was pretty obvious.
  */
 #include <linux/crc32.h>
 #include <linux/delay.h>
-#include <linux/dio.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -27,29 +26,69 @@
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/route.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/skbuff.h>
+#include <asm/irq.h>
 /* Used for the temporal inet entries and routing */
 #include <linux/socket.h>
+#include <linux/bitops.h>
 
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/pgtable.h>
+#ifdef CONFIG_HP300
+#include <asm/blinken.h>
+#endif
 
 #include "7990.h"
 
+#define WRITERAP(lp,x) out_be16(lp->base + LANCE_RAP, (x))
+#define WRITERDP(lp,x) out_be16(lp->base + LANCE_RDP, (x))
+#define READRDP(lp) in_be16(lp->base + LANCE_RDP)
+
+#if defined(CONFIG_HPLANCE) || defined(CONFIG_HPLANCE_MODULE)
+#include "hplance.h"
+
+#undef WRITERAP
+#undef WRITERDP
+#undef READRDP
+
+#if defined(CONFIG_MVME147_NET) || defined(CONFIG_MVME147_NET_MODULE)
+
 /* Lossage Factor Nine, Mr Sulu. */
-#define WRITERAP(x) (lp->writerap(lp,x))
-#define WRITERDP(x) (lp->writerdp(lp,x))
-#define READRDP() (lp->readrdp(lp))
-/* These used to be ll->rap = x, ll->rdp = x, and (ll->rdp). Sigh. 
- * If you want to switch them back then 
- * #define DECLARE_LL volatile struct lance_regs *ll = lp->ll
- */
-#define DECLARE_LL /* nothing to declare */
+#define WRITERAP(lp,x) (lp->writerap(lp,x))
+#define WRITERDP(lp,x) (lp->writerdp(lp,x))
+#define READRDP(lp) (lp->readrdp(lp))
+
+#else
+
+/* These inlines can be used if only CONFIG_HPLANCE is defined */
+static inline void WRITERAP(struct lance_private *lp, __u16 value)
+{
+	do {
+		out_be16(lp->base + HPLANCE_REGOFF + LANCE_RAP, value);
+	} while ((in_8(lp->base + HPLANCE_STATUS) & LE_ACK) == 0);
+}
+
+static inline void WRITERDP(struct lance_private *lp, __u16 value)
+{
+	do {
+		out_be16(lp->base + HPLANCE_REGOFF + LANCE_RDP, value);
+	} while ((in_8(lp->base + HPLANCE_STATUS) & LE_ACK) == 0);
+}
+
+static inline __u16 READRDP(struct lance_private *lp)
+{
+	__u16 value;
+	do {
+		value = in_be16(lp->base + HPLANCE_REGOFF + LANCE_RDP);
+	} while ((in_8(lp->base + HPLANCE_STATUS) & LE_ACK) == 0);
+	return value;
+}
+
+#endif
+#endif /* CONFIG_HPLANCE || CONFIG_HPLANCE_MODULE */
 
 /* debugging output macros, various flavours */
 /* #define TEST_HITS */
@@ -69,29 +108,28 @@ do { \
                        ib->btx_ring[t].length,\
                        ib->btx_ring[t].misc, ib->btx_ring[t].tmd1_bits);\
         }\
-} while (0) 
+} while (0)
 #else
 #define PRINT_RINGS()
-#endif        
+#endif
 
 /* Load the CSR registers. The LANCE has to be STOPped when we do this! */
 static void load_csrs (struct lance_private *lp)
 {
         volatile struct lance_init_block *aib = lp->lance_init_block;
         int leptr;
-        DECLARE_LL;
 
         leptr = LANCE_ADDR (aib);
 
-        WRITERAP(LE_CSR1);                        /* load address of init block */
-        WRITERDP(leptr & 0xFFFF);
-        WRITERAP(LE_CSR2);
-        WRITERDP(leptr >> 16);
-        WRITERAP(LE_CSR3);
-        WRITERDP(lp->busmaster_regval);           /* set byteswap/ALEctrl/byte ctrl */
+        WRITERAP(lp, LE_CSR1);                    /* load address of init block */
+        WRITERDP(lp, leptr & 0xFFFF);
+        WRITERAP(lp, LE_CSR2);
+        WRITERDP(lp, leptr >> 16);
+        WRITERAP(lp, LE_CSR3);
+        WRITERDP(lp, lp->busmaster_regval);       /* set byteswap/ALEctrl/byte ctrl */
 
         /* Point back to csr0 */
-        WRITERAP(LE_CSR0);
+        WRITERAP(lp, LE_CSR0);
 }
 
 /* #define to 0 or 1 appropriately */
@@ -99,7 +137,7 @@ static void load_csrs (struct lance_private *lp)
 /* Set up the Lance Rx and Tx rings and the init block */
 static void lance_init_ring (struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *) dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
         volatile struct lance_init_block *ib = lp->init_block;
         volatile struct lance_init_block *aib; /* for LANCE_ADDR computations */
         int leptr;
@@ -118,7 +156,7 @@ static void lance_init_ring (struct net_device *dev)
          * a2065 and atarilance do the byteswap and lance.c (PC) doesn't.
          * However, the datasheet says that the BSWAP bit doesn't affect
          * the init block, so surely it should be low byte first for
-         * everybody? Um.] 
+         * everybody? Um.]
          * We could define the ib->physaddr as three 16bit values and
          * use (addr[1] << 8) | addr[0] & co, but this is more efficient.
          */
@@ -132,11 +170,11 @@ static void lance_init_ring (struct net_device *dev)
 #else
         for (i=0; i<6; i++)
            ib->phys_addr[i] = dev->dev_addr[i];
-#endif        
+#endif
 
         if (DEBUG_IRING)
                 printk ("TX rings:\n");
-    
+
 	lp->tx_full = 0;
         /* Setup the Tx ring entries */
         for (i = 0; i < (1<<lp->lance_log_tx_bufs); i++) {
@@ -146,7 +184,7 @@ static void lance_init_ring (struct net_device *dev)
                 ib->btx_ring [i].tmd1_bits = 0;
                 ib->btx_ring [i].length    = 0xf000; /* The ones required by tmd2 */
                 ib->btx_ring [i].misc      = 0;
-                if (DEBUG_IRING) 
+                if (DEBUG_IRING)
                    printk ("%d: 0x%8.8x\n", i, leptr);
         }
 
@@ -167,14 +205,14 @@ static void lance_init_ring (struct net_device *dev)
         }
 
         /* Setup the initialization block */
-    
+
         /* Setup rx descriptor pointer */
         leptr = LANCE_ADDR(&aib->brx_ring);
         ib->rx_len = (lp->lance_log_rx_bufs << 13) | (leptr >> 16);
         ib->rx_ptr = leptr;
         if (DEBUG_IRING)
                 printk ("RX ptr: %8.8x\n", leptr);
-    
+
         /* Setup tx descriptor pointer */
         leptr = LANCE_ADDR(&aib->btx_ring);
         ib->tx_len = (lp->lance_log_tx_bufs << 13) | (leptr >> 16);
@@ -192,41 +230,39 @@ static void lance_init_ring (struct net_device *dev)
 static int init_restart_lance (struct lance_private *lp)
 {
         int i;
-        DECLARE_LL;
 
-        WRITERAP(LE_CSR0);
-        WRITERDP(LE_C0_INIT);
+        WRITERAP(lp, LE_CSR0);
+        WRITERDP(lp, LE_C0_INIT);
 
         /* Need a hook here for sunlance ledma stuff */
 
         /* Wait for the lance to complete initialization */
-        for (i = 0; (i < 100) && !(READRDP() & (LE_C0_ERR | LE_C0_IDON)); i++)
+        for (i = 0; (i < 100) && !(READRDP(lp) & (LE_C0_ERR | LE_C0_IDON)); i++)
                 barrier();
-        if ((i == 100) || (READRDP() & LE_C0_ERR)) {
-                printk ("LANCE unopened after %d ticks, csr0=%4.4x.\n", i, READRDP());
+        if ((i == 100) || (READRDP(lp) & LE_C0_ERR)) {
+                printk ("LANCE unopened after %d ticks, csr0=%4.4x.\n", i, READRDP(lp));
                 return -1;
         }
 
         /* Clear IDON by writing a "1", enable interrupts and start lance */
-        WRITERDP(LE_C0_IDON);
-        WRITERDP(LE_C0_INEA | LE_C0_STRT);
+        WRITERDP(lp, LE_C0_IDON);
+        WRITERDP(lp, LE_C0_INEA | LE_C0_STRT);
 
         return 0;
 }
 
 static int lance_reset (struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *)dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
         int status;
-        DECLARE_LL;
-    
+
         /* Stop the lance */
-        WRITERAP(LE_CSR0);
-        WRITERDP(LE_C0_STOP);
+        WRITERAP(lp, LE_CSR0);
+        WRITERDP(lp, LE_C0_STOP);
 
         load_csrs (lp);
         lance_init_ring (dev);
-        dev->trans_start = jiffies;
+        dev->trans_start = jiffies; /* prevent tx timeout */
         status = init_restart_lance (lp);
 #ifdef DEBUG_DRIVER
         printk ("Lance restart=%d\n", status);
@@ -236,16 +272,13 @@ static int lance_reset (struct net_device *dev)
 
 static int lance_rx (struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *) dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
         volatile struct lance_init_block *ib = lp->init_block;
         volatile struct lance_rx_desc *rd;
         unsigned char bits;
-        int len = 0;                    /* XXX shut up gcc warnings */
-        struct sk_buff *skb = 0;        /* XXX shut up gcc warnings */
 #ifdef TEST_HITS
         int i;
 #endif
-        DECLARE_LL;
 
 #ifdef TEST_HITS
         printk ("[");
@@ -259,51 +292,51 @@ static int lance_rx (struct net_device *dev)
         }
         printk ("]");
 #endif
-    
-        WRITERDP(LE_C0_RINT | LE_C0_INEA);     /* ack Rx int, reenable ints */
+#ifdef CONFIG_HP300
+	blinken_leds(0x40, 0);
+#endif
+        WRITERDP(lp, LE_C0_RINT | LE_C0_INEA);     /* ack Rx int, reenable ints */
         for (rd = &ib->brx_ring [lp->rx_new];     /* For each Rx ring we own... */
              !((bits = rd->rmd1_bits) & LE_R1_OWN);
              rd = &ib->brx_ring [lp->rx_new]) {
 
                 /* We got an incomplete frame? */
                 if ((bits & LE_R1_POK) != LE_R1_POK) {
-                        lp->stats.rx_over_errors++;
-                        lp->stats.rx_errors++;
+                        dev->stats.rx_over_errors++;
+                        dev->stats.rx_errors++;
                         continue;
                 } else if (bits & LE_R1_ERR) {
                         /* Count only the end frame as a rx error,
                          * not the beginning
                          */
-                        if (bits & LE_R1_BUF) lp->stats.rx_fifo_errors++;
-                        if (bits & LE_R1_CRC) lp->stats.rx_crc_errors++;
-                        if (bits & LE_R1_OFL) lp->stats.rx_over_errors++;
-                        if (bits & LE_R1_FRA) lp->stats.rx_frame_errors++;
-                        if (bits & LE_R1_EOP) lp->stats.rx_errors++;
+                        if (bits & LE_R1_BUF) dev->stats.rx_fifo_errors++;
+                        if (bits & LE_R1_CRC) dev->stats.rx_crc_errors++;
+                        if (bits & LE_R1_OFL) dev->stats.rx_over_errors++;
+                        if (bits & LE_R1_FRA) dev->stats.rx_frame_errors++;
+                        if (bits & LE_R1_EOP) dev->stats.rx_errors++;
                 } else {
-                        len = (rd->mblength & 0xfff) - 4;
-                        skb = dev_alloc_skb (len+2);
+			int len = (rd->mblength & 0xfff) - 4;
+			struct sk_buff *skb = dev_alloc_skb (len+2);
 
-                        if (skb == 0) {
+                        if (!skb) {
                                 printk ("%s: Memory squeeze, deferring packet.\n",
                                         dev->name);
-                                lp->stats.rx_dropped++;
+                                dev->stats.rx_dropped++;
                                 rd->mblength = 0;
                                 rd->rmd1_bits = LE_R1_OWN;
                                 lp->rx_new = (lp->rx_new + 1) & lp->rx_ring_mod_mask;
                                 return 0;
                         }
-            
-                        skb->dev = dev;
+
                         skb_reserve (skb, 2);           /* 16 byte align */
                         skb_put (skb, len);             /* make room */
-                        eth_copy_and_sum(skb,
+                        skb_copy_to_linear_data(skb,
                                          (unsigned char *)&(ib->rx_buf [lp->rx_new][0]),
-                                         len, 0);
+                                         len);
                         skb->protocol = eth_type_trans (skb, dev);
 			netif_rx (skb);
-			dev->last_rx = jiffies;
-			lp->stats.rx_packets++;
-			lp->stats.rx_bytes += len;
+			dev->stats.rx_packets++;
+			dev->stats.rx_bytes += len;
                 }
 
                 /* Return the packet to the pool */
@@ -316,15 +349,17 @@ static int lance_rx (struct net_device *dev)
 
 static int lance_tx (struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *) dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
         volatile struct lance_init_block *ib = lp->init_block;
         volatile struct lance_tx_desc *td;
         int i, j;
         int status;
-        DECLARE_LL;
 
+#ifdef CONFIG_HP300
+	blinken_leds(0x80, 0);
+#endif
         /* csr0 is 2f3 */
-        WRITERDP(LE_C0_TINT | LE_C0_INEA);
+        WRITERDP(lp, LE_C0_TINT | LE_C0_INEA);
         /* csr0 is 73 */
 
         j = lp->tx_old;
@@ -334,23 +369,23 @@ static int lance_tx (struct net_device *dev)
                 /* If we hit a packet not owned by us, stop */
                 if (td->tmd1_bits & LE_T1_OWN)
                         break;
-                
+
                 if (td->tmd1_bits & LE_T1_ERR) {
                         status = td->misc;
-            
-                        lp->stats.tx_errors++;
-                        if (status & LE_T3_RTY)  lp->stats.tx_aborted_errors++;
-                        if (status & LE_T3_LCOL) lp->stats.tx_window_errors++;
+
+                        dev->stats.tx_errors++;
+                        if (status & LE_T3_RTY)  dev->stats.tx_aborted_errors++;
+                        if (status & LE_T3_LCOL) dev->stats.tx_window_errors++;
 
                         if (status & LE_T3_CLOS) {
-                                lp->stats.tx_carrier_errors++;
+                                dev->stats.tx_carrier_errors++;
                                 if (lp->auto_select) {
                                         lp->tpe = 1 - lp->tpe;
                                         printk("%s: Carrier Lost, trying %s\n",
                                                dev->name, lp->tpe?"TPE":"AUI");
                                         /* Stop the lance */
-                                        WRITERAP(LE_CSR0);
-                                        WRITERDP(LE_C0_STOP);
+                                        WRITERAP(lp, LE_CSR0);
+                                        WRITERDP(lp, LE_C0_STOP);
                                         lance_init_ring (dev);
                                         load_csrs (lp);
                                         init_restart_lance (lp);
@@ -361,13 +396,13 @@ static int lance_tx (struct net_device *dev)
                         /* buffer errors and underflows turn off the transmitter */
                         /* Restart the adapter */
                         if (status & (LE_T3_BUF|LE_T3_UFL)) {
-                                lp->stats.tx_fifo_errors++;
+                                dev->stats.tx_fifo_errors++;
 
                                 printk ("%s: Tx: ERR_BUF|ERR_UFL, restarting\n",
                                         dev->name);
                                 /* Stop the lance */
-                                WRITERAP(LE_CSR0);
-                                WRITERDP(LE_C0_STOP);
+                                WRITERAP(lp, LE_CSR0);
+                                WRITERDP(lp, LE_C0_STOP);
                                 lance_init_ring (dev);
                                 load_csrs (lp);
                                 init_restart_lance (lp);
@@ -381,48 +416,47 @@ static int lance_tx (struct net_device *dev)
 
                         /* One collision before packet was sent. */
                         if (td->tmd1_bits & LE_T1_EONE)
-                                lp->stats.collisions++;
+                                dev->stats.collisions++;
 
                         /* More than one collision, be optimistic. */
                         if (td->tmd1_bits & LE_T1_EMORE)
-                                lp->stats.collisions += 2;
+                                dev->stats.collisions += 2;
 
-                        lp->stats.tx_packets++;
+                        dev->stats.tx_packets++;
                 }
-        
+
                 j = (j + 1) & lp->tx_ring_mod_mask;
         }
         lp->tx_old = j;
-        WRITERDP(LE_C0_TINT | LE_C0_INEA);
+        WRITERDP(lp, LE_C0_TINT | LE_C0_INEA);
         return 0;
 }
 
 static irqreturn_t
-lance_interrupt (int irq, void *dev_id, struct pt_regs *regs)
+lance_interrupt (int irq, void *dev_id)
 {
         struct net_device *dev = (struct net_device *)dev_id;
-        struct lance_private *lp = (struct lance_private *)dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
         int csr0;
-        DECLARE_LL;
 
 	spin_lock (&lp->devlock);
 
-        WRITERAP(LE_CSR0);              /* LANCE Controller Status */
-        csr0 = READRDP();
+        WRITERAP(lp, LE_CSR0);              /* LANCE Controller Status */
+        csr0 = READRDP(lp);
 
         PRINT_RINGS();
-        
+
         if (!(csr0 & LE_C0_INTR)) {     /* Check if any interrupt has */
-		spin_lock (&lp->devlock);
+		spin_unlock (&lp->devlock);
                 return IRQ_NONE;        /* been generated by the Lance. */
 	}
 
         /* Acknowledge all the interrupt sources ASAP */
-        WRITERDP(csr0 & ~(LE_C0_INEA|LE_C0_TDMD|LE_C0_STOP|LE_C0_STRT|LE_C0_INIT));
+        WRITERDP(lp, csr0 & ~(LE_C0_INEA|LE_C0_TDMD|LE_C0_STOP|LE_C0_STRT|LE_C0_INIT));
 
         if ((csr0 & LE_C0_ERR)) {
                 /* Clear the error condition */
-                WRITERDP(LE_C0_BABL|LE_C0_ERR|LE_C0_MISS|LE_C0_INEA);
+                WRITERDP(lp, LE_C0_BABL|LE_C0_ERR|LE_C0_MISS|LE_C0_INEA);
         }
 
         if (csr0 & LE_C0_RINT)
@@ -433,23 +467,23 @@ lance_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 
         /* Log misc errors. */
         if (csr0 & LE_C0_BABL)
-                lp->stats.tx_errors++;       /* Tx babble. */
+                dev->stats.tx_errors++;       /* Tx babble. */
         if (csr0 & LE_C0_MISS)
-                lp->stats.rx_errors++;       /* Missed a Rx frame. */
+                dev->stats.rx_errors++;       /* Missed a Rx frame. */
         if (csr0 & LE_C0_MERR) {
-                printk("%s: Bus master arbitration failure, status %4.4x.\n", 
+                printk("%s: Bus master arbitration failure, status %4.4x.\n",
                        dev->name, csr0);
                 /* Restart the chip. */
-                WRITERDP(LE_C0_STRT);
+                WRITERDP(lp, LE_C0_STRT);
         }
 
         if (lp->tx_full && netif_queue_stopped(dev) && (TX_BUFFS_AVAIL >= 0)) {
 		lp->tx_full = 0;
 		netif_wake_queue (dev);
         }
-        
-        WRITERAP(LE_CSR0);
-        WRITERDP(LE_C0_BABL|LE_C0_CERR|LE_C0_MISS|LE_C0_MERR|LE_C0_IDON|LE_C0_INEA);
+
+        WRITERAP(lp, LE_CSR0);
+        WRITERDP(lp, LE_C0_BABL|LE_C0_CERR|LE_C0_MISS|LE_C0_MERR|LE_C0_IDON|LE_C0_INEA);
 
 	spin_unlock (&lp->devlock);
 	return IRQ_HANDLED;
@@ -457,57 +491,56 @@ lance_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 
 int lance_open (struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *)dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
 	int res;
-        DECLARE_LL;
-        
+
         /* Install the Interrupt handler. Or we could shunt this out to specific drivers? */
-        if (request_irq(lp->irq, lance_interrupt, 0, lp->name, dev))
+        if (request_irq(lp->irq, lance_interrupt, IRQF_SHARED, lp->name, dev))
                 return -EAGAIN;
 
         res = lance_reset(dev);
-	lp->devlock = SPIN_LOCK_UNLOCKED;
+	spin_lock_init(&lp->devlock);
 	netif_start_queue (dev);
 
 	return res;
 }
+EXPORT_SYMBOL_GPL(lance_open);
 
 int lance_close (struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *) dev->priv;
-        DECLARE_LL;
-        
+        struct lance_private *lp = netdev_priv(dev);
+
 	netif_stop_queue (dev);
 
         /* Stop the LANCE */
-        WRITERAP(LE_CSR0);
-        WRITERDP(LE_C0_STOP);
+        WRITERAP(lp, LE_CSR0);
+        WRITERDP(lp, LE_C0_STOP);
 
         free_irq(lp->irq, dev);
 
         return 0;
 }
+EXPORT_SYMBOL_GPL(lance_close);
 
 void lance_tx_timeout(struct net_device *dev)
 {
 	printk("lance_tx_timeout\n");
 	lance_reset(dev);
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 	netif_wake_queue (dev);
 }
-
+EXPORT_SYMBOL_GPL(lance_tx_timeout);
 
 int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *)dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
         volatile struct lance_init_block *ib = lp->init_block;
         int entry, skblen, len;
         static int outs;
 	unsigned long flags;
-        DECLARE_LL;
 
         if (!TX_BUFFS_AVAIL)
-                return -1;
+                return NETDEV_TX_LOCKED;
 
 	netif_stop_queue (dev);
 
@@ -517,7 +550,7 @@ int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
         /* dump the packet */
         {
                 int i;
-        
+
                 for (i = 0; i < 64; i++) {
                         if ((i % 16) == 0)
                                 printk ("\n");
@@ -529,21 +562,20 @@ int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
         entry = lp->tx_new & lp->tx_ring_mod_mask;
         ib->btx_ring [entry].length = (-len) | 0xf000;
         ib->btx_ring [entry].misc = 0;
-    
-    	if (skb->len < ETH_ZLEN)
-    		memset((char *)&ib->tx_buf[entry][0], 0, ETH_ZLEN);
-        memcpy ((char *)&ib->tx_buf [entry][0], skb->data, skblen);
-    
+
+	if (skb->len < ETH_ZLEN)
+		memset((void *)&ib->tx_buf[entry][0], 0, ETH_ZLEN);
+        skb_copy_from_linear_data(skb, (void *)&ib->tx_buf[entry][0], skblen);
+
         /* Now, give the packet to the lance */
         ib->btx_ring [entry].tmd1_bits = (LE_T1_POK|LE_T1_OWN);
         lp->tx_new = (lp->tx_new+1) & lp->tx_ring_mod_mask;
 
         outs++;
         /* Kick the lance: transmit now */
-        WRITERDP(LE_C0_INEA | LE_C0_TDMD);
-        dev->trans_start = jiffies;
+        WRITERDP(lp, LE_C0_INEA | LE_C0_TDMD);
         dev_kfree_skb (skb);
-    
+
 	spin_lock_irqsave (&lp->devlock, flags);
         if (TX_BUFFS_AVAIL)
 		netif_start_queue (dev);
@@ -551,29 +583,22 @@ int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
 		lp->tx_full = 1;
 	spin_unlock_irqrestore (&lp->devlock, flags);
 
-        return 0;
+        return NETDEV_TX_OK;
 }
-
-struct net_device_stats *lance_get_stats (struct net_device *dev)
-{
-        struct lance_private *lp = (struct lance_private *) dev->priv;
-
-        return &lp->stats;
-}
+EXPORT_SYMBOL_GPL(lance_start_xmit);
 
 /* taken from the depca driver via a2065.c */
 static void lance_load_multicast (struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *) dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
         volatile struct lance_init_block *ib = lp->init_block;
         volatile u16 *mcast_table = (u16 *)&ib->filter;
-        struct dev_mc_list *dmi=dev->mc_list;
+	struct netdev_hw_addr *ha;
         char *addrs;
-        int i;
         u32 crc;
-        
+
         /* set all multicast bits */
-        if (dev->flags & IFF_ALLMULTI){ 
+        if (dev->flags & IFF_ALLMULTI){
                 ib->filter [0] = 0xffffffff;
                 ib->filter [1] = 0xffffffff;
                 return;
@@ -583,28 +608,25 @@ static void lance_load_multicast (struct net_device *dev)
         ib->filter [1] = 0;
 
         /* Add addresses */
-        for (i = 0; i < dev->mc_count; i++){
-                addrs = dmi->dmi_addr;
-                dmi   = dmi->next;
+	netdev_for_each_mc_addr(ha, dev) {
+		addrs = ha->addr;
 
                 /* multicast address? */
                 if (!(*addrs & 1))
                         continue;
-                
+
 		crc = ether_crc_le(6, addrs);
                 crc = crc >> 26;
                 mcast_table [crc >> 4] |= 1 << (crc & 0xf);
         }
-        return;
 }
 
 
 void lance_set_multicast (struct net_device *dev)
 {
-        struct lance_private *lp = (struct lance_private *) dev->priv;
+        struct lance_private *lp = netdev_priv(dev);
         volatile struct lance_init_block *ib = lp->init_block;
 	int stopped;
-        DECLARE_LL;
 
 	stopped = netif_queue_stopped(dev);
 	if (!stopped)
@@ -613,8 +635,8 @@ void lance_set_multicast (struct net_device *dev)
         while (lp->tx_old != lp->tx_new)
                 schedule();
 
-        WRITERAP(LE_CSR0);
-        WRITERDP(LE_C0_STOP);
+        WRITERAP(lp, LE_CSR0);
+        WRITERDP(lp, LE_C0_STOP);
         lance_init_ring (dev);
 
         if (dev->flags & IFF_PROMISC) {
@@ -629,5 +651,19 @@ void lance_set_multicast (struct net_device *dev)
 	if (!stopped)
 		netif_start_queue (dev);
 }
+EXPORT_SYMBOL_GPL(lance_set_multicast);
+
+#ifdef CONFIG_NET_POLL_CONTROLLER
+void lance_poll(struct net_device *dev)
+{
+	struct lance_private *lp = netdev_priv(dev);
+
+	spin_lock (&lp->devlock);
+	WRITERAP(lp, LE_CSR0);
+	WRITERDP(lp, LE_C0_STRT);
+	spin_unlock (&lp->devlock);
+	lance_interrupt(dev->irq, dev);
+}
+#endif
 
 MODULE_LICENSE("GPL");

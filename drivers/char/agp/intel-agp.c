@@ -2,510 +2,19 @@
  * Intel AGPGART routines.
  */
 
-/*
- * Intel(R) 855GM/852GM and 865G support added by David Dawes
- * <dawes@tungstengraphics.com>.
- */
-
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/pagemap.h>
 #include <linux/agp_backend.h>
+#include <asm/smp.h>
 #include "agp.h"
+#include "intel-agp.h"
 
-static struct aper_size_info_fixed intel_i810_sizes[] =
-{
-	{64, 16384, 4},
-	/* The 32M mode still requires a 64k gatt */
-	{32, 8192, 4}
-};
-
-#define AGP_DCACHE_MEMORY	1
-#define AGP_PHYS_MEMORY		2
-
-static struct gatt_mask intel_i810_masks[] =
-{
-	{.mask = I810_PTE_VALID, .type = 0},
-	{.mask = (I810_PTE_VALID | I810_PTE_LOCAL), .type = AGP_DCACHE_MEMORY},
-	{.mask = I810_PTE_VALID, .type = 0}
-};
-
-static struct _intel_i810_private {
-	struct pci_dev *i810_dev;	/* device one */
-	volatile u8 *registers;
-	int num_dcache_entries;
-} intel_i810_private;
-
-static int intel_i810_fetch_size(void)
-{
-	u32 smram_miscc;
-	struct aper_size_info_fixed *values;
-
-	pci_read_config_dword(agp_bridge->dev, I810_SMRAM_MISCC, &smram_miscc);
-	values = A_SIZE_FIX(agp_bridge->driver->aperture_sizes);
-
-	if ((smram_miscc & I810_GMS) == I810_GMS_DISABLE) {
-		printk(KERN_WARNING PFX "i810 is disabled\n");
-		return 0;
-	}
-	if ((smram_miscc & I810_GFX_MEM_WIN_SIZE) == I810_GFX_MEM_WIN_32M) {
-		agp_bridge->previous_size =
-			agp_bridge->current_size = (void *) (values + 1);
-		agp_bridge->aperture_size_idx = 1;
-		return values[1].size;
-	} else {
-		agp_bridge->previous_size =
-			agp_bridge->current_size = (void *) (values);
-		agp_bridge->aperture_size_idx = 0;
-		return values[0].size;
-	}
-
-	return 0;
-}
-
-static int intel_i810_configure(void)
-{
-	struct aper_size_info_fixed *current_size;
-	u32 temp;
-	int i;
-
-	current_size = A_SIZE_FIX(agp_bridge->current_size);
-
-	pci_read_config_dword(intel_i810_private.i810_dev, I810_MMADDR, &temp);
-	temp &= 0xfff80000;
-
-	intel_i810_private.registers = (volatile u8 *) ioremap(temp, 128 * 4096);
-	if (!intel_i810_private.registers) {
-		printk(KERN_ERR PFX "Unable to remap memory.\n");
-		return -ENOMEM;
-	}
-
-	if ((INREG32(intel_i810_private.registers, I810_DRAM_CTL)
-		& I810_DRAM_ROW_0) == I810_DRAM_ROW_0_SDRAM) {
-		/* This will need to be dynamically assigned */
-		printk(KERN_INFO PFX "detected 4MB dedicated video ram.\n");
-		intel_i810_private.num_dcache_entries = 1024;
-	}
-	pci_read_config_dword(intel_i810_private.i810_dev, I810_GMADDR, &temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
-	OUTREG32(intel_i810_private.registers, I810_PGETBL_CTL,
-		 agp_bridge->gatt_bus_addr | I810_PGETBL_ENABLED);
-	global_cache_flush();
-
-	if (agp_bridge->driver->needs_scratch_page) {
-		for (i = 0; i < current_size->num_entries; i++) {
-			OUTREG32(intel_i810_private.registers,
-				 I810_PTE_BASE + (i * 4),
-				 agp_bridge->scratch_page);
-		}
-	}
-	return 0;
-}
-
-static void intel_i810_cleanup(void)
-{
-	OUTREG32(intel_i810_private.registers, I810_PGETBL_CTL, 0);
-	iounmap((void *) intel_i810_private.registers);
-}
-
-static void intel_i810_tlbflush(struct agp_memory *mem)
-{
-	return;
-}
-
-static void intel_i810_agp_enable(u32 mode)
-{
-	return;
-}
-
-static int intel_i810_insert_entries(struct agp_memory *mem, off_t pg_start,
-				int type)
-{
-	int i, j, num_entries;
-	void *temp;
-
-	temp = agp_bridge->current_size;
-	num_entries = A_SIZE_FIX(temp)->num_entries;
-
-	if ((pg_start + mem->page_count) > num_entries) {
-		return -EINVAL;
-	}
-	for (j = pg_start; j < (pg_start + mem->page_count); j++) {
-		if (!PGE_EMPTY(agp_bridge, agp_bridge->gatt_table[j]))
-			return -EBUSY;
-	}
-
-	if (type != 0 || mem->type != 0) {
-		if ((type == AGP_DCACHE_MEMORY) && (mem->type == AGP_DCACHE_MEMORY)) {
-			/* special insert */
-			global_cache_flush();
-			for (i = pg_start; i < (pg_start + mem->page_count); i++) {
-				OUTREG32(intel_i810_private.registers,
-					 I810_PTE_BASE + (i * 4),
-					 (i * 4096) | I810_PTE_LOCAL |
-					 I810_PTE_VALID);
-			}
-			global_cache_flush();
-			agp_bridge->driver->tlb_flush(mem);
-			return 0;
-		}
-		if((type == AGP_PHYS_MEMORY) && (mem->type == AGP_PHYS_MEMORY))
-			goto insert;
-		return -EINVAL;
-	}
-
-insert:
-	global_cache_flush();
-	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
-		OUTREG32(intel_i810_private.registers,
-			I810_PTE_BASE + (j * 4),
-			agp_bridge->driver->mask_memory(mem->memory[i], mem->type));
-	}
-	global_cache_flush();
-
-	agp_bridge->driver->tlb_flush(mem);
-	return 0;
-}
-
-static int intel_i810_remove_entries(struct agp_memory *mem, off_t pg_start,
-				int type)
-{
-	int i;
-
-	for (i = pg_start; i < (mem->page_count + pg_start); i++) {
-		OUTREG32(intel_i810_private.registers,
-			 I810_PTE_BASE + (i * 4),
-			 agp_bridge->scratch_page);
-	}
-
-	global_cache_flush();
-	agp_bridge->driver->tlb_flush(mem);
-	return 0;
-}
-
-/*
- * The i810/i830 requires a physical address to program its mouse
- * pointer into hardware.
- * However the Xserver still writes to it through the agp aperture.
- */
-static struct agp_memory *alloc_agpphysmem_i8xx(size_t pg_count, int type)
-{
-	struct agp_memory *new;
-	void *addr;
-
-	if (pg_count != 1)
-		return NULL;
-
-	addr = agp_bridge->driver->agp_alloc_page();
-	if (addr == NULL)
-		return NULL;
-
-	new = agp_create_memory(1);
-	if (new == NULL)
-		return NULL;
-
-	new->memory[0] = virt_to_phys(addr);
-	new->page_count = 1;
-	new->num_scratch_pages = 1;
-	new->type = AGP_PHYS_MEMORY;
-	new->physical = new->memory[0];
-	return new;
-}
-
-static struct agp_memory *intel_i810_alloc_by_type(size_t pg_count, int type)
-{
-	struct agp_memory *new;
-
-	if (type == AGP_DCACHE_MEMORY) {
-		if (pg_count != intel_i810_private.num_dcache_entries)
-			return NULL;
-
-		new = agp_create_memory(1);
-		if (new == NULL)
-			return NULL;
-
-		new->type = AGP_DCACHE_MEMORY;
-		new->page_count = pg_count;
-		new->num_scratch_pages = 0;
-		vfree(new->memory);
-		return new;
-	}
-	if (type == AGP_PHYS_MEMORY)
-		return(alloc_agpphysmem_i8xx(pg_count, type));
-
-	return NULL;
-}
-
-static void intel_i810_free_by_type(struct agp_memory *curr)
-{
-	agp_free_key(curr->key);
-	if(curr->type == AGP_PHYS_MEMORY) {
-		agp_bridge->driver->agp_destroy_page(phys_to_virt(curr->memory[0]));
-		vfree(curr->memory);
-	}
-	kfree(curr);
-}
-
-static unsigned long intel_i810_mask_memory(unsigned long addr, int type)
-{
-	/* Type checking must be done elsewhere */
-	return addr | agp_bridge->driver->masks[type].mask;
-}
-
-static struct aper_size_info_fixed intel_i830_sizes[] =
-{
-	{128, 32768, 5},
-	/* The 64M mode still requires a 128k gatt */
-	{64, 16384, 5}
-};
-
-static struct _intel_i830_private {
-	struct pci_dev *i830_dev;		/* device one */
-	volatile u8 *registers;
-	int gtt_entries;
-} intel_i830_private;
-
-static void intel_i830_init_gtt_entries(void)
-{
-	u16 gmch_ctrl;
-	int gtt_entries;
-	u8 rdct;
-	int local = 0;
-	static const int ddt[4] = { 0, 16, 32, 64 };
-
-	pci_read_config_word(agp_bridge->dev,I830_GMCH_CTRL,&gmch_ctrl);
-
-	if (agp_bridge->dev->device == PCI_DEVICE_ID_INTEL_82830_HB ||
-	    agp_bridge->dev->device == PCI_DEVICE_ID_INTEL_82845G_HB) {
-		switch (gmch_ctrl & I830_GMCH_GMS_MASK) {
-		case I830_GMCH_GMS_STOLEN_512:
-			gtt_entries = KB(512) - KB(132);
-			break;
-		case I830_GMCH_GMS_STOLEN_1024:
-			gtt_entries = MB(1) - KB(132);
-			break;
-		case I830_GMCH_GMS_STOLEN_8192:
-			gtt_entries = MB(8) - KB(132);
-			break;
-		case I830_GMCH_GMS_LOCAL:
-			rdct = INREG8(intel_i830_private.registers,
-				      I830_RDRAM_CHANNEL_TYPE);
-			gtt_entries = (I830_RDRAM_ND(rdct) + 1) *
-					MB(ddt[I830_RDRAM_DDT(rdct)]);
-			local = 1;
-			break;
-		default:
-			gtt_entries = 0;
-			break;
-		}
-	} else {
-		switch (gmch_ctrl & I830_GMCH_GMS_MASK) {
-		case I855_GMCH_GMS_STOLEN_1M:
-			gtt_entries = MB(1) - KB(132);
-			break;
-		case I855_GMCH_GMS_STOLEN_4M:
-			gtt_entries = MB(4) - KB(132);
-			break;
-		case I855_GMCH_GMS_STOLEN_8M:
-			gtt_entries = MB(8) - KB(132);
-			break;
-		case I855_GMCH_GMS_STOLEN_16M:
-			gtt_entries = MB(16) - KB(132);
-			break;
-		case I855_GMCH_GMS_STOLEN_32M:
-			gtt_entries = MB(32) - KB(132);
-			break;
-		default:
-			gtt_entries = 0;
-			break;
-		}
-	}
-	if (gtt_entries > 0)
-		printk(KERN_INFO PFX "Detected %dK %s memory.\n",
-		       gtt_entries / KB(1), local ? "local" : "stolen");
-	else
-		printk(KERN_INFO PFX
-		       "No pre-allocated video memory detected.\n");
-	gtt_entries /= KB(4);
-
-	intel_i830_private.gtt_entries = gtt_entries;
-}
-
-/* The intel i830 automatically initializes the agp aperture during POST.
- * Use the memory already set aside for in the GTT.
- */
-static int intel_i830_create_gatt_table(void)
-{
-	int page_order;
-	struct aper_size_info_fixed *size;
-	int num_entries;
-	u32 temp;
-
-	size = agp_bridge->current_size;
-	page_order = size->page_order;
-	num_entries = size->num_entries;
-	agp_bridge->gatt_table_real = 0;
-
-	pci_read_config_dword(intel_i830_private.i830_dev,I810_MMADDR,&temp);
-	temp &= 0xfff80000;
-
-	intel_i830_private.registers = (volatile u8 *) ioremap(temp,128 * 4096);
-	if (!intel_i830_private.registers)
-		return (-ENOMEM);
-
-	temp = INREG32(intel_i830_private.registers,I810_PGETBL_CTL) & 0xfffff000;
-	global_cache_flush();
-
-	/* we have to call this as early as possible after the MMIO base address is known */
-	intel_i830_init_gtt_entries();
-
-	agp_bridge->gatt_table = NULL;
-
-	agp_bridge->gatt_bus_addr = temp;
-
-	return(0);
-}
-
-/* Return the gatt table to a sane state. Use the top of stolen
- * memory for the GTT.
- */
-static int intel_i830_free_gatt_table(void)
-{
-	return(0);
-}
-
-static int intel_i830_fetch_size(void)
-{
-	u16 gmch_ctrl;
-	struct aper_size_info_fixed *values;
-
-	values = A_SIZE_FIX(agp_bridge->driver->aperture_sizes);
-
-	if (agp_bridge->dev->device != PCI_DEVICE_ID_INTEL_82830_HB &&
-	    agp_bridge->dev->device != PCI_DEVICE_ID_INTEL_82845G_HB) {
-		/* 855GM/852GM/865G has 128MB aperture size */
-		agp_bridge->previous_size = agp_bridge->current_size = (void *) values;
-		agp_bridge->aperture_size_idx = 0;
-		return(values[0].size);
-	}
-
-	pci_read_config_word(agp_bridge->dev,I830_GMCH_CTRL,&gmch_ctrl);
-
-	if ((gmch_ctrl & I830_GMCH_MEM_MASK) == I830_GMCH_MEM_128M) {
-		agp_bridge->previous_size = agp_bridge->current_size = (void *) values;
-		agp_bridge->aperture_size_idx = 0;
-		return(values[0].size);
-	} else {
-		agp_bridge->previous_size = agp_bridge->current_size = (void *) values;
-		agp_bridge->aperture_size_idx = 1;
-		return(values[1].size);
-	}
-
-	return(0);
-}
-
-static int intel_i830_configure(void)
-{
-	struct aper_size_info_fixed *current_size;
-	u32 temp;
-	u16 gmch_ctrl;
-	int i;
-
-	current_size = A_SIZE_FIX(agp_bridge->current_size);
-
-	pci_read_config_dword(intel_i830_private.i830_dev,I810_GMADDR,&temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
-
-	pci_read_config_word(agp_bridge->dev,I830_GMCH_CTRL,&gmch_ctrl);
-	gmch_ctrl |= I830_GMCH_ENABLED;
-	pci_write_config_word(agp_bridge->dev,I830_GMCH_CTRL,gmch_ctrl);
-
-	OUTREG32(intel_i830_private.registers,I810_PGETBL_CTL,agp_bridge->gatt_bus_addr | I810_PGETBL_ENABLED);
-	global_cache_flush();
-
-	if (agp_bridge->driver->needs_scratch_page)
-		for (i = intel_i830_private.gtt_entries; i < current_size->num_entries; i++)
-			OUTREG32(intel_i830_private.registers,I810_PTE_BASE + (i * 4),agp_bridge->scratch_page);
-
-	return (0);
-}
-
-static void intel_i830_cleanup(void)
-{
-	iounmap((void *) intel_i830_private.registers);
-}
-
-static int intel_i830_insert_entries(struct agp_memory *mem,off_t pg_start,
-				int type)
-{
-	int i,j,num_entries;
-	void *temp;
-
-	temp = agp_bridge->current_size;
-	num_entries = A_SIZE_FIX(temp)->num_entries;
-
-	if (pg_start < intel_i830_private.gtt_entries) {
-		printk (KERN_DEBUG PFX "pg_start == 0x%.8lx,intel_i830_private.gtt_entries == 0x%.8x\n",
-				pg_start,intel_i830_private.gtt_entries);
-
-		printk (KERN_INFO PFX "Trying to insert into local/stolen memory\n");
-		return (-EINVAL);
-	}
-
-	if ((pg_start + mem->page_count) > num_entries)
-		return (-EINVAL);
-
-	/* The i830 can't check the GTT for entries since its read only,
-	 * depend on the caller to make the correct offset decisions.
-	 */
-
-	if ((type != 0 && type != AGP_PHYS_MEMORY) ||
-		(mem->type != 0 && mem->type != AGP_PHYS_MEMORY))
-		return (-EINVAL);
-
-	global_cache_flush();
-
-	for (i = 0, j = pg_start; i < mem->page_count; i++, j++)
-		OUTREG32(intel_i830_private.registers,I810_PTE_BASE + (j * 4),
-			agp_bridge->driver->mask_memory(mem->memory[i], mem->type));
-
-	global_cache_flush();
-
-	agp_bridge->driver->tlb_flush(mem);
-
-	return(0);
-}
-
-static int intel_i830_remove_entries(struct agp_memory *mem,off_t pg_start,
-				int type)
-{
-	int i;
-
-	global_cache_flush();
-
-	if (pg_start < intel_i830_private.gtt_entries) {
-		printk (KERN_INFO PFX "Trying to disable local/stolen memory\n");
-		return (-EINVAL);
-	}
-
-	for (i = pg_start; i < (mem->page_count + pg_start); i++)
-		OUTREG32(intel_i830_private.registers,I810_PTE_BASE + (i * 4),agp_bridge->scratch_page);
-
-	global_cache_flush();
-
-	agp_bridge->driver->tlb_flush(mem);
-
-	return (0);
-}
-
-static struct agp_memory *intel_i830_alloc_by_type(size_t pg_count,int type)
-{
-	if (type == AGP_PHYS_MEMORY)
-		return(alloc_agpphysmem_i8xx(pg_count, type));
-
-	/* always return NULL for other allocation types for now */
-	return(NULL);
-}
+int intel_agp_enabled;
+EXPORT_SYMBOL(intel_agp_enabled);
 
 static int intel_fetch_size(void)
 {
@@ -646,7 +155,7 @@ static int intel_815_configure(void)
 	/* the Intel 815 chipset spec. says that bits 29-31 in the
 	* ATTBASE register are reserved -> try not to write them */
 	if (agp_bridge->gatt_bus_addr & INTEL_815_ATTBASE_MASK) {
-		printk (KERN_EMERG PFX "gatt bus addr too high");
+		dev_emerg(&agp_bridge->dev->dev, "gatt bus addr too high");
 		return -EINVAL;
 	}
 
@@ -654,7 +163,7 @@ static int intel_815_configure(void)
 
 	/* aperture size */
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE,
-			current_size->size_value); 
+			current_size->size_value);
 
 	/* address to map to */
 	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
@@ -666,7 +175,7 @@ static int intel_815_configure(void)
 	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, addr);
 
 	/* agpctrl */
-	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000);
 
 	/* apcont */
 	pci_read_config_byte(agp_bridge->dev, INTEL_815_APCONT, &temp2);
@@ -689,7 +198,7 @@ static void intel_820_cleanup(void)
 
 	previous_size = A_SIZE_8(agp_bridge->previous_size);
 	pci_read_config_byte(agp_bridge->dev, INTEL_I820_RDCR, &temp);
-	pci_write_config_byte(agp_bridge->dev, INTEL_I820_RDCR, 
+	pci_write_config_byte(agp_bridge->dev, INTEL_I820_RDCR,
 			temp & ~(1 << 1));
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE,
 			previous_size->size_value);
@@ -699,23 +208,23 @@ static void intel_820_cleanup(void)
 static int intel_820_configure(void)
 {
 	u32 temp;
- 	u8 temp2; 
+	u8 temp2;
 	struct aper_size_info_8 *current_size;
 
 	current_size = A_SIZE_8(agp_bridge->current_size);
 
 	/* aperture size */
-	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value); 
+	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value);
 
 	/* address to map to */
 	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
-	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, agp_bridge->gatt_bus_addr); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, agp_bridge->gatt_bus_addr);
 
 	/* agpctrl */
-	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000);
 
 	/* global enable aperture access */
 	/* This flag is not accessed through MCHCFG register as in */
@@ -723,7 +232,7 @@ static int intel_820_configure(void)
 	pci_read_config_byte(agp_bridge->dev, INTEL_I820_RDCR, &temp2);
 	pci_write_config_byte(agp_bridge->dev, INTEL_I820_RDCR, temp2 | (1 << 1));
 	/* clear any possible AGP-related error conditions */
-	pci_write_config_word(agp_bridge->dev, INTEL_I820_ERRSTS, 0x001c); 
+	pci_write_config_word(agp_bridge->dev, INTEL_I820_ERRSTS, 0x001c);
 	return 0;
 }
 
@@ -736,23 +245,23 @@ static int intel_840_configure(void)
 	current_size = A_SIZE_8(agp_bridge->current_size);
 
 	/* aperture size */
-	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value); 
+	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value);
 
 	/* address to map to */
 	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
-	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, agp_bridge->gatt_bus_addr); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, agp_bridge->gatt_bus_addr);
 
 	/* agpctrl */
-	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000);
 
 	/* mcgcfg */
 	pci_read_config_word(agp_bridge->dev, INTEL_I840_MCHCFG, &temp2);
 	pci_write_config_word(agp_bridge->dev, INTEL_I840_MCHCFG, temp2 | (1 << 9));
 	/* clear any possible error conditions */
-	pci_write_config_word(agp_bridge->dev, INTEL_I840_ERRSTS, 0xc000); 
+	pci_write_config_word(agp_bridge->dev, INTEL_I840_ERRSTS, 0xc000);
 	return 0;
 }
 
@@ -765,23 +274,29 @@ static int intel_845_configure(void)
 	current_size = A_SIZE_8(agp_bridge->current_size);
 
 	/* aperture size */
-	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value); 
+	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value);
 
-	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	if (agp_bridge->apbase_config != 0) {
+		pci_write_config_dword(agp_bridge->dev, AGP_APBASE,
+				       agp_bridge->apbase_config);
+	} else {
+		/* address to map to */
+		pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
+		agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+		agp_bridge->apbase_config = temp;
+	}
 
 	/* attbase - aperture base */
-	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, agp_bridge->gatt_bus_addr); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, agp_bridge->gatt_bus_addr);
 
 	/* agpctrl */
-	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000);
 
 	/* agpm */
 	pci_read_config_byte(agp_bridge->dev, INTEL_I845_AGPM, &temp2);
 	pci_write_config_byte(agp_bridge->dev, INTEL_I845_AGPM, temp2 | (1 << 1));
 	/* clear any possible error conditions */
-	pci_write_config_word(agp_bridge->dev, INTEL_I845_ERRSTS, 0x001c); 
+	pci_write_config_word(agp_bridge->dev, INTEL_I845_ERRSTS, 0x001c);
 	return 0;
 }
 
@@ -794,23 +309,23 @@ static int intel_850_configure(void)
 	current_size = A_SIZE_8(agp_bridge->current_size);
 
 	/* aperture size */
-	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value); 
+	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value);
 
 	/* address to map to */
 	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
-	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, agp_bridge->gatt_bus_addr); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_ATTBASE, agp_bridge->gatt_bus_addr);
 
 	/* agpctrl */
-	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000); 
+	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x0000);
 
 	/* mcgcfg */
 	pci_read_config_word(agp_bridge->dev, INTEL_I850_MCHCFG, &temp2);
 	pci_write_config_word(agp_bridge->dev, INTEL_I850_MCHCFG, temp2 | (1 << 9));
 	/* clear any possible AGP-related error conditions */
-	pci_write_config_word(agp_bridge->dev, INTEL_I850_ERRSTS, 0x001c); 
+	pci_write_config_word(agp_bridge->dev, INTEL_I850_ERRSTS, 0x001c);
 	return 0;
 }
 
@@ -896,23 +411,23 @@ static int intel_7505_configure(void)
 	/* mchcfg */
 	pci_read_config_word(agp_bridge->dev, INTEL_I7505_MCHCFG, &temp2);
 	pci_write_config_word(agp_bridge->dev, INTEL_I7505_MCHCFG, temp2 | (1 << 9));
-	
+
 	return 0;
 }
 
 /* Setup function */
-static struct gatt_mask intel_generic_masks[] =
+static const struct gatt_mask intel_generic_masks[] =
 {
 	{.mask = 0x00000017, .type = 0}
 };
 
-static struct aper_size_info_8 intel_815_sizes[2] =
+static const struct aper_size_info_8 intel_815_sizes[2] =
 {
 	{64, 16384, 4, 0},
 	{32, 8192, 3, 8},
 };
-	
-static struct aper_size_info_8 intel_8xx_sizes[7] =
+
+static const struct aper_size_info_8 intel_8xx_sizes[7] =
 {
 	{256, 65536, 6, 0},
 	{128, 32768, 5, 32},
@@ -923,7 +438,7 @@ static struct aper_size_info_8 intel_8xx_sizes[7] =
 	{4, 1024, 0, 63}
 };
 
-static struct aper_size_info_16 intel_generic_sizes[7] =
+static const struct aper_size_info_16 intel_generic_sizes[7] =
 {
 	{256, 65536, 6, 0},
 	{128, 32768, 5, 32},
@@ -934,7 +449,7 @@ static struct aper_size_info_16 intel_generic_sizes[7] =
 	{4, 1024, 0, 63}
 };
 
-static struct aper_size_info_8 intel_830mp_sizes[4] = 
+static const struct aper_size_info_8 intel_830mp_sizes[4] =
 {
 	{256, 65536, 6, 0},
 	{128, 32768, 5, 32},
@@ -942,11 +457,12 @@ static struct aper_size_info_8 intel_830mp_sizes[4] =
 	{32, 8192, 3, 56}
 };
 
-struct agp_bridge_driver intel_generic_driver = {
+static const struct agp_bridge_driver intel_generic_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_generic_sizes,
 	.size_type		= U16_APER_SIZE,
 	.num_aperture_sizes	= 7,
+	.needs_scratch_page	= true,
 	.configure		= intel_configure,
 	.fetch_size		= intel_fetch_size,
 	.cleanup		= intel_cleanup,
@@ -962,39 +478,18 @@ struct agp_bridge_driver intel_generic_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver intel_810_driver = {
-	.owner			= THIS_MODULE,
-	.aperture_sizes		= intel_i810_sizes,
-	.size_type		= FIXED_APER_SIZE,
-	.num_aperture_sizes	= 2,
-	.needs_scratch_page	= TRUE,
-	.configure		= intel_i810_configure,
-	.fetch_size		= intel_i810_fetch_size,
-	.cleanup		= intel_i810_cleanup,
-	.tlb_flush		= intel_i810_tlbflush,
-	.mask_memory		= intel_i810_mask_memory,
-	.masks			= intel_i810_masks,
-	.agp_enable		= intel_i810_agp_enable,
-	.cache_flush		= global_cache_flush,
-	.create_gatt_table	= agp_generic_create_gatt_table,
-	.free_gatt_table	= agp_generic_free_gatt_table,
-	.insert_memory		= intel_i810_insert_entries,
-	.remove_memory		= intel_i810_remove_entries,
-	.alloc_by_type		= intel_i810_alloc_by_type,
-	.free_by_type		= intel_i810_free_by_type,
-	.agp_alloc_page		= agp_generic_alloc_page,
-	.agp_destroy_page	= agp_generic_destroy_page,
-};
-
-
-struct agp_bridge_driver intel_815_driver = {
+static const struct agp_bridge_driver intel_815_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_815_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 2,
+	.needs_scratch_page	= true,
 	.configure		= intel_815_configure,
 	.fetch_size		= intel_815_fetch_size,
 	.cleanup		= intel_8xx_cleanup,
@@ -1010,39 +505,18 @@ struct agp_bridge_driver intel_815_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type	= agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver intel_830_driver = {
-	.owner			= THIS_MODULE,
-	.aperture_sizes		= intel_i830_sizes,
-	.size_type		= FIXED_APER_SIZE,
-	.num_aperture_sizes 	= 2,
-	.needs_scratch_page	= TRUE,
-	.configure		= intel_i830_configure,
-	.fetch_size		= intel_i830_fetch_size,
-	.cleanup		= intel_i830_cleanup,
-	.tlb_flush		= intel_i810_tlbflush,
-	.mask_memory		= intel_i810_mask_memory,
-	.masks			= intel_i810_masks,
-	.agp_enable		= intel_i810_agp_enable,
-	.cache_flush		= global_cache_flush,
-	.create_gatt_table	= intel_i830_create_gatt_table,
-	.free_gatt_table	= intel_i830_free_gatt_table,
-	.insert_memory		= intel_i830_insert_entries,
-	.remove_memory		= intel_i830_remove_entries,
-	.alloc_by_type		= intel_i830_alloc_by_type,
-	.free_by_type		= intel_i810_free_by_type,
-	.agp_alloc_page		= agp_generic_alloc_page,
-	.agp_destroy_page	= agp_generic_destroy_page,
-};
-
-
-struct agp_bridge_driver intel_820_driver = {
+static const struct agp_bridge_driver intel_820_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_8xx_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 7,
+	.needs_scratch_page	= true,
 	.configure		= intel_820_configure,
 	.fetch_size		= intel_8xx_fetch_size,
 	.cleanup		= intel_820_cleanup,
@@ -1058,14 +532,18 @@ struct agp_bridge_driver intel_820_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver intel_830mp_driver = {
+static const struct agp_bridge_driver intel_830mp_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_830mp_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 4,
+	.needs_scratch_page	= true,
 	.configure		= intel_830mp_configure,
 	.fetch_size		= intel_8xx_fetch_size,
 	.cleanup		= intel_8xx_cleanup,
@@ -1081,14 +559,18 @@ struct agp_bridge_driver intel_830mp_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver intel_840_driver = {
+static const struct agp_bridge_driver intel_840_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_8xx_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 7,
+	.needs_scratch_page	= true,
 	.configure		= intel_840_configure,
 	.fetch_size		= intel_8xx_fetch_size,
 	.cleanup		= intel_8xx_cleanup,
@@ -1104,14 +586,18 @@ struct agp_bridge_driver intel_840_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver intel_845_driver = {
+static const struct agp_bridge_driver intel_845_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_8xx_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 7,
+	.needs_scratch_page	= true,
 	.configure		= intel_845_configure,
 	.fetch_size		= intel_8xx_fetch_size,
 	.cleanup		= intel_8xx_cleanup,
@@ -1127,14 +613,18 @@ struct agp_bridge_driver intel_845_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver intel_850_driver = {
+static const struct agp_bridge_driver intel_850_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_8xx_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 7,
+	.needs_scratch_page	= true,
 	.configure		= intel_850_configure,
 	.fetch_size		= intel_8xx_fetch_size,
 	.cleanup		= intel_8xx_cleanup,
@@ -1150,14 +640,18 @@ struct agp_bridge_driver intel_850_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver intel_860_driver = {
+static const struct agp_bridge_driver intel_860_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_8xx_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 7,
+	.needs_scratch_page	= true,
 	.configure		= intel_860_configure,
 	.fetch_size		= intel_8xx_fetch_size,
 	.cleanup		= intel_8xx_cleanup,
@@ -1173,14 +667,18 @@ struct agp_bridge_driver intel_860_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver intel_7505_driver = {
+static const struct agp_bridge_driver intel_7505_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= intel_8xx_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 7,
+	.needs_scratch_page	= true,
 	.configure		= intel_7505_configure,
 	.fetch_size		= intel_8xx_fetch_size,
 	.cleanup		= intel_8xx_cleanup,
@@ -1196,49 +694,50 @@ struct agp_bridge_driver intel_7505_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages        = agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages      = agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-static int find_i810(u16 device, const char *name)
-{
-	struct pci_dev *i810_dev;
-
-	i810_dev = pci_find_device(PCI_VENDOR_ID_INTEL, device, NULL);
-	if (!i810_dev) {
-		printk(KERN_ERR PFX "Detected an Intel %s Chipset, "
-				"but could not find the secondary device.\n",
-				name);
-		return 0;
-	}
-	
-	intel_i810_private.i810_dev = i810_dev;
-	return 1;
-}
-
-static int find_i830(u16 device)
-{
-	struct pci_dev *i830_dev;
-
-	i830_dev = pci_find_device(PCI_VENDOR_ID_INTEL, device, NULL);
-	if (i830_dev && PCI_FUNC(i830_dev->devfn) != 0) {
-		i830_dev = pci_find_device(PCI_VENDOR_ID_INTEL,
-				device, i830_dev);
-	}
-
-	if (!i830_dev)
-		return 0;
-
-	intel_i830_private.i830_dev = i830_dev;
-	return 1;
-}
+/* Table to describe Intel GMCH and AGP/PCIE GART drivers.  At least one of
+ * driver and gmch_driver must be non-null, and find_gmch will determine
+ * which one should be used if a gmch_chip_id is present.
+ */
+static const struct intel_agp_driver_description {
+	unsigned int chip_id;
+	char *name;
+	const struct agp_bridge_driver *driver;
+} intel_agp_chipsets[] = {
+	{ PCI_DEVICE_ID_INTEL_82443LX_0, "440LX", &intel_generic_driver },
+	{ PCI_DEVICE_ID_INTEL_82443BX_0, "440BX", &intel_generic_driver },
+	{ PCI_DEVICE_ID_INTEL_82443GX_0, "440GX", &intel_generic_driver },
+	{ PCI_DEVICE_ID_INTEL_82815_MC, "i815", &intel_815_driver },
+	{ PCI_DEVICE_ID_INTEL_82820_HB, "i820", &intel_820_driver },
+	{ PCI_DEVICE_ID_INTEL_82820_UP_HB, "i820", &intel_820_driver },
+	{ PCI_DEVICE_ID_INTEL_82830_HB, "830M", &intel_830mp_driver },
+	{ PCI_DEVICE_ID_INTEL_82840_HB, "i840", &intel_840_driver },
+	{ PCI_DEVICE_ID_INTEL_82845_HB, "i845", &intel_845_driver },
+	{ PCI_DEVICE_ID_INTEL_82845G_HB, "845G", &intel_845_driver },
+	{ PCI_DEVICE_ID_INTEL_82850_HB, "i850", &intel_850_driver },
+	{ PCI_DEVICE_ID_INTEL_82854_HB, "854", &intel_845_driver },
+	{ PCI_DEVICE_ID_INTEL_82855PM_HB, "855PM", &intel_845_driver },
+	{ PCI_DEVICE_ID_INTEL_82855GM_HB, "855GM", &intel_845_driver },
+	{ PCI_DEVICE_ID_INTEL_82860_HB, "i860", &intel_860_driver },
+	{ PCI_DEVICE_ID_INTEL_82865_HB, "865", &intel_845_driver },
+	{ PCI_DEVICE_ID_INTEL_82875_HB, "i875", &intel_845_driver },
+	{ PCI_DEVICE_ID_INTEL_7505_0, "E7505", &intel_7505_driver },
+	{ PCI_DEVICE_ID_INTEL_7205_0, "E7205", &intel_7505_driver },
+	{ 0, NULL, NULL }
+};
 
 static int __devinit agp_intel_probe(struct pci_dev *pdev,
 				     const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
-	char *name = "(unknown)";
 	u8 cap_ptr = 0;
 	struct resource *r;
+	int i, err;
 
 	cap_ptr = pci_find_capability(pdev, PCI_CAP_ID_AGP);
 
@@ -1246,144 +745,50 @@ static int __devinit agp_intel_probe(struct pci_dev *pdev,
 	if (!bridge)
 		return -ENOMEM;
 
-	switch (pdev->device) {
-	case PCI_DEVICE_ID_INTEL_82443LX_0:
-		bridge->driver = &intel_generic_driver;
-		name = "440LX";
-		break;
-	case PCI_DEVICE_ID_INTEL_82443BX_0:
-		bridge->driver = &intel_generic_driver;
-		name = "440BX";
-		break;
-	case PCI_DEVICE_ID_INTEL_82443GX_0:
-		bridge->driver = &intel_generic_driver;
-		name = "440GX";
-		break;
-	case PCI_DEVICE_ID_INTEL_82810_MC1:
-		if (!find_i810(PCI_DEVICE_ID_INTEL_82810_IG1, "i810"))
-			goto fail;
-		bridge->driver = &intel_810_driver;
-		name = "i810";
-		break;
-	case PCI_DEVICE_ID_INTEL_82810_MC3:
-		if (!find_i810(PCI_DEVICE_ID_INTEL_82810_IG3, "i810 DC100"))
-			goto fail;
-		bridge->driver = &intel_810_driver;
-		name = "i810 DC100";
-		break;
-	case PCI_DEVICE_ID_INTEL_82810E_MC:
-		if (!find_i810(PCI_DEVICE_ID_INTEL_82810E_IG, "i810 E"))
-			goto fail;
-		bridge->driver = &intel_810_driver;
-		name = "i810 E";
-		break;
-	 case PCI_DEVICE_ID_INTEL_82815_MC:
-		/*
-		 * The i815 can operate either as an i810 style
-		 * integrated device, or as an AGP4X motherboard.
-		 */
-		if (find_i810(PCI_DEVICE_ID_INTEL_82815_CGC, "i815"))
-			bridge->driver = &intel_810_driver;
-		else
-			bridge->driver = &intel_815_driver;
-		name = "i815";
-		break;
-	case PCI_DEVICE_ID_INTEL_82820_HB:
-	case PCI_DEVICE_ID_INTEL_82820_UP_HB:
-		bridge->driver = &intel_820_driver;
-		name = "i820";
-		break;
-	case PCI_DEVICE_ID_INTEL_82830_HB:
-		if (find_i830(PCI_DEVICE_ID_INTEL_82830_CGC)) {
-			bridge->driver = &intel_830_driver;
-		} else {
-			bridge->driver = &intel_830mp_driver;
-		}
-		name = "830M";
-		break;
-	case PCI_DEVICE_ID_INTEL_82840_HB:
-		bridge->driver = &intel_840_driver;
-		name = "i840";
-		break;
-	case PCI_DEVICE_ID_INTEL_82845_HB:
-		bridge->driver = &intel_845_driver;
-		name = "i845";
-		break;
-	case PCI_DEVICE_ID_INTEL_82845G_HB:
-		if (find_i830(PCI_DEVICE_ID_INTEL_82845G_IG)) {
-			bridge->driver = &intel_830_driver;
-		} else {
-			bridge->driver = &intel_845_driver;
-		}
-		name = "845G";
-		break;
-	case PCI_DEVICE_ID_INTEL_82850_HB:
-		bridge->driver = &intel_850_driver;
-		name = "i850";
-		break;
-	case PCI_DEVICE_ID_INTEL_82855PM_HB:
-		bridge->driver = &intel_845_driver;
-		name = "855PM";
-		break;
-	case PCI_DEVICE_ID_INTEL_82855GM_HB:
-		if (find_i830(PCI_DEVICE_ID_INTEL_82855GM_IG)) {
-			bridge->driver = &intel_830_driver;
-			name = "855";
-		} else {
-			bridge->driver = &intel_845_driver;
-			name = "855GM";
-		}
-		break;
-	case PCI_DEVICE_ID_INTEL_82860_HB:
-		bridge->driver = &intel_860_driver;
-		name = "i860";
-		break;
-	case PCI_DEVICE_ID_INTEL_82865_HB:
-		if (find_i830(PCI_DEVICE_ID_INTEL_82865_IG)) {
-			bridge->driver = &intel_830_driver;
-		} else {
-			bridge->driver = &intel_845_driver;
-		}
-		name = "865";
-		break;
-	case PCI_DEVICE_ID_INTEL_82875_HB:
-		bridge->driver = &intel_845_driver;
-		name = "i875";
-		break;
-	case PCI_DEVICE_ID_INTEL_7505_0:
-		bridge->driver = &intel_7505_driver;
-		name =  "E7505";
-		break;
-	case PCI_DEVICE_ID_INTEL_7205_0:
-		bridge->driver = &intel_7505_driver;
-		name = "E7205";
-		break;
-	default:
-		printk(KERN_ERR PFX "Unsupported Intel chipset (device id: %04x)\n",
-			    pdev->device);
-		return -ENODEV;
-	};
-
-	bridge->dev = pdev;
 	bridge->capndx = cap_ptr;
 
-	if (bridge->driver == &intel_810_driver)
-		bridge->dev_private_data = &intel_i810_private;
-	else if (bridge->driver == &intel_830_driver)
-		bridge->dev_private_data = &intel_i830_private;
+	if (intel_gmch_probe(pdev, bridge))
+		goto found_gmch;
 
-	printk(KERN_INFO PFX "Detected an Intel %s Chipset.\n", name);
+	for (i = 0; intel_agp_chipsets[i].name != NULL; i++) {
+		/* In case that multiple models of gfx chip may
+		   stand on same host bridge type, this can be
+		   sure we detect the right IGD. */
+		if (pdev->device == intel_agp_chipsets[i].chip_id) {
+			bridge->driver = intel_agp_chipsets[i].driver;
+			break;
+		}
+	}
+
+	if (!bridge->driver) {
+		if (cap_ptr)
+			dev_warn(&pdev->dev, "unsupported Intel chipset [%04x/%04x]\n",
+				 pdev->vendor, pdev->device);
+		agp_put_bridge(bridge);
+		return -ENODEV;
+	}
+
+	bridge->dev = pdev;
+	bridge->dev_private_data = NULL;
+
+	dev_info(&pdev->dev, "Intel %s Chipset\n", intel_agp_chipsets[i].name);
 
 	/*
 	* The following fixes the case where the BIOS has "forgotten" to
 	* provide an address range for the GART.
 	* 20030610 - hamish@zot.org
+	* This happens before pci_enable_device() intentionally;
+	* calling pci_enable_device() before assigning the resource
+	* will result in the GART being disabled on machines with such
+	* BIOSs (the GART ends up with a BAR starting at 0, which
+	* conflicts a lot of other devices).
 	*/
 	r = &pdev->resource[0];
 	if (!r->start && r->end) {
-		if(pci_assign_resource(pdev, 0)) {
-			printk(KERN_ERR PFX "could not assign resource 0\n");
-			return (-ENODEV);
+		if (pci_assign_resource(pdev, 0)) {
+			dev_err(&pdev->dev, "can't assign resource 0\n");
+			agp_put_bridge(bridge);
+			return -ENODEV;
 		}
 	}
 
@@ -1393,8 +798,9 @@ static int __devinit agp_intel_probe(struct pci_dev *pdev,
 	* 20030610 - hamish@zot.org
 	*/
 	if (pci_enable_device(pdev)) {
-		printk(KERN_ERR PFX "Unable to Enable PCI device\n");
-		return (-ENODEV);
+		dev_err(&pdev->dev, "can't enable PCI device\n");
+		agp_put_bridge(bridge);
+		return -ENODEV;
 	}
 
 	/* Fill in the mode register */
@@ -1404,11 +810,12 @@ static int __devinit agp_intel_probe(struct pci_dev *pdev,
 				&bridge->mode);
 	}
 
+found_gmch:
 	pci_set_drvdata(pdev, bridge);
-	return agp_add_bridge(bridge);
- fail:
-	agp_put_bridge(bridge);
-	return -ENODEV;
+	err = agp_add_bridge(bridge);
+	if (!err)
+		intel_agp_enabled = 1;
+	return err;
 }
 
 static void __devexit agp_intel_remove(struct pci_dev *pdev)
@@ -1416,35 +823,86 @@ static void __devexit agp_intel_remove(struct pci_dev *pdev)
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
 	agp_remove_bridge(bridge);
+
+	intel_gmch_remove(pdev);
+
 	agp_put_bridge(bridge);
 }
 
-static int agp_intel_suspend(struct pci_dev *dev, u32 state)
-{
-	return 0;
-}
-
+#ifdef CONFIG_PM
 static int agp_intel_resume(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
-	if (bridge->driver == &intel_generic_driver)
-		intel_configure();
-	else if (bridge->driver == &intel_845_driver)
-		intel_845_configure();
+	bridge->driver->configure();
 
 	return 0;
 }
+#endif
 
 static struct pci_device_id agp_intel_pci_table[] = {
-	{
-	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
-	.class_mask	= ~0,
-	.vendor		= PCI_VENDOR_ID_INTEL,
-	.device		= PCI_ANY_ID,
-	.subvendor	= PCI_ANY_ID,
-	.subdevice	= PCI_ANY_ID,
-	},
+#define ID(x)						\
+	{						\
+	.class		= (PCI_CLASS_BRIDGE_HOST << 8),	\
+	.class_mask	= ~0,				\
+	.vendor		= PCI_VENDOR_ID_INTEL,		\
+	.device		= x,				\
+	.subvendor	= PCI_ANY_ID,			\
+	.subdevice	= PCI_ANY_ID,			\
+	}
+	ID(PCI_DEVICE_ID_INTEL_82443LX_0),
+	ID(PCI_DEVICE_ID_INTEL_82443BX_0),
+	ID(PCI_DEVICE_ID_INTEL_82443GX_0),
+	ID(PCI_DEVICE_ID_INTEL_82810_MC1),
+	ID(PCI_DEVICE_ID_INTEL_82810_MC3),
+	ID(PCI_DEVICE_ID_INTEL_82810E_MC),
+	ID(PCI_DEVICE_ID_INTEL_82815_MC),
+	ID(PCI_DEVICE_ID_INTEL_82820_HB),
+	ID(PCI_DEVICE_ID_INTEL_82820_UP_HB),
+	ID(PCI_DEVICE_ID_INTEL_82830_HB),
+	ID(PCI_DEVICE_ID_INTEL_82840_HB),
+	ID(PCI_DEVICE_ID_INTEL_82845_HB),
+	ID(PCI_DEVICE_ID_INTEL_82845G_HB),
+	ID(PCI_DEVICE_ID_INTEL_82850_HB),
+	ID(PCI_DEVICE_ID_INTEL_82854_HB),
+	ID(PCI_DEVICE_ID_INTEL_82855PM_HB),
+	ID(PCI_DEVICE_ID_INTEL_82855GM_HB),
+	ID(PCI_DEVICE_ID_INTEL_82860_HB),
+	ID(PCI_DEVICE_ID_INTEL_82865_HB),
+	ID(PCI_DEVICE_ID_INTEL_82875_HB),
+	ID(PCI_DEVICE_ID_INTEL_7505_0),
+	ID(PCI_DEVICE_ID_INTEL_7205_0),
+	ID(PCI_DEVICE_ID_INTEL_E7221_HB),
+	ID(PCI_DEVICE_ID_INTEL_82915G_HB),
+	ID(PCI_DEVICE_ID_INTEL_82915GM_HB),
+	ID(PCI_DEVICE_ID_INTEL_82945G_HB),
+	ID(PCI_DEVICE_ID_INTEL_82945GM_HB),
+	ID(PCI_DEVICE_ID_INTEL_82945GME_HB),
+	ID(PCI_DEVICE_ID_INTEL_PINEVIEW_M_HB),
+	ID(PCI_DEVICE_ID_INTEL_PINEVIEW_HB),
+	ID(PCI_DEVICE_ID_INTEL_82946GZ_HB),
+	ID(PCI_DEVICE_ID_INTEL_82G35_HB),
+	ID(PCI_DEVICE_ID_INTEL_82965Q_HB),
+	ID(PCI_DEVICE_ID_INTEL_82965G_HB),
+	ID(PCI_DEVICE_ID_INTEL_82965GM_HB),
+	ID(PCI_DEVICE_ID_INTEL_82965GME_HB),
+	ID(PCI_DEVICE_ID_INTEL_G33_HB),
+	ID(PCI_DEVICE_ID_INTEL_Q35_HB),
+	ID(PCI_DEVICE_ID_INTEL_Q33_HB),
+	ID(PCI_DEVICE_ID_INTEL_GM45_HB),
+	ID(PCI_DEVICE_ID_INTEL_EAGLELAKE_HB),
+	ID(PCI_DEVICE_ID_INTEL_Q45_HB),
+	ID(PCI_DEVICE_ID_INTEL_G45_HB),
+	ID(PCI_DEVICE_ID_INTEL_G41_HB),
+	ID(PCI_DEVICE_ID_INTEL_B43_HB),
+	ID(PCI_DEVICE_ID_INTEL_B43_1_HB),
+	ID(PCI_DEVICE_ID_INTEL_IRONLAKE_D_HB),
+	ID(PCI_DEVICE_ID_INTEL_IRONLAKE_M_HB),
+	ID(PCI_DEVICE_ID_INTEL_IRONLAKE_MA_HB),
+	ID(PCI_DEVICE_ID_INTEL_IRONLAKE_MC2_HB),
+	ID(PCI_DEVICE_ID_INTEL_SANDYBRIDGE_HB),
+	ID(PCI_DEVICE_ID_INTEL_SANDYBRIDGE_M_HB),
+	ID(PCI_DEVICE_ID_INTEL_SANDYBRIDGE_S_HB),
 	{ }
 };
 
@@ -1454,22 +912,17 @@ static struct pci_driver agp_intel_pci_driver = {
 	.name		= "agpgart-intel",
 	.id_table	= agp_intel_pci_table,
 	.probe		= agp_intel_probe,
-	.remove		= agp_intel_remove,
-	.suspend	= agp_intel_suspend,
+	.remove		= __devexit_p(agp_intel_remove),
+#ifdef CONFIG_PM
 	.resume		= agp_intel_resume,
+#endif
 };
 
-/* intel_agp_init() must not be declared static for explicit
-   early initialization to work (ie i810fb) */
-int __init agp_intel_init(void)
+static int __init agp_intel_init(void)
 {
-	static int agp_initialised=0;
-
-	if (agp_initialised == 1)
-		return 0;
-	agp_initialised=1;
-
-	return pci_module_init(&agp_intel_pci_driver);
+	if (agp_off)
+		return -EINVAL;
+	return pci_register_driver(&agp_intel_pci_driver);
 }
 
 static void __exit agp_intel_cleanup(void)
@@ -1480,5 +933,5 @@ static void __exit agp_intel_cleanup(void)
 module_init(agp_intel_init);
 module_exit(agp_intel_cleanup);
 
-MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
+MODULE_AUTHOR("Dave Jones <davej@redhat.com>");
 MODULE_LICENSE("GPL and additional rights");

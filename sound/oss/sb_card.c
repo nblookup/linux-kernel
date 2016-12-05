@@ -1,7 +1,7 @@
 /*
  * sound/oss/sb_card.c
  *
- * Detection routine for the ISA Sound Blaster and compatable sound
+ * Detection routine for the ISA Sound Blaster and compatible sound
  * cards.
  *
  * This file is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
@@ -22,13 +22,10 @@
  * 02-07-2003 Bug made it into first release. Take two.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/slab.h>
 #include <linux/init.h>
-#ifdef CONFIG_MCA
-#include <linux/mca.h>
-#endif /* CONFIG_MCA */
 #include "sound_config.h"
 #include "sb_mixer.h"
 #include "sb.h"
@@ -52,9 +49,10 @@ static int __initdata esstype   = 0; /* ESS chip type */
 static int __initdata acer 	= 0; /* Do acer notebook init? */
 static int __initdata sm_games 	= 0; /* Logitech soundman games? */
 
-struct sb_card_config *legacy = NULL;
+static struct sb_card_config *legacy = NULL;
 
 #ifdef CONFIG_PNP
+static int pnp_registered;
 static int __initdata pnp       = 1;
 /*
 static int __initdata uart401	= 0;
@@ -100,7 +98,14 @@ MODULE_PARM_DESC(uart401,  "When set to 1, will attempt to detect and enable"\
 /* OSS subsystem card registration shared by PnP and legacy routines */
 static int sb_register_oss(struct sb_card_config *scc, struct sb_module_options *sbmo)
 {
-	if(!sb_dsp_detect(&scc->conf, 0, 0, sbmo)) {
+	if (!request_region(scc->conf.io_base, 16, "soundblaster")) {
+		printk(KERN_ERR "sb: ports busy.\n");
+		kfree(scc);
+		return -EBUSY;
+	}
+
+	if (!sb_dsp_detect(&scc->conf, 0, 0, sbmo)) {
+		release_region(scc->conf.io_base, 16);
 		printk(KERN_ERR "sb: Failed DSP Detect.\n");
 		kfree(scc);
 		return -ENODEV;
@@ -129,15 +134,14 @@ static void sb_unload(struct sb_card_config *scc)
 }
 
 /* Register legacy card with OSS subsystem */
-static int sb_init_legacy(void)
+static int __init sb_init_legacy(void)
 {
 	struct sb_module_options sbmo = {0};
 
-	if((legacy = kmalloc(sizeof(struct sb_card_config), GFP_KERNEL)) == NULL) {
+	if((legacy = kzalloc(sizeof(struct sb_card_config), GFP_KERNEL)) == NULL) {
 		printk(KERN_ERR "sb: Error: Could not allocate memory\n");
 		return -ENOMEM;
 	}
-	memset(legacy, 0, sizeof(struct sb_card_config));
 
 	legacy->conf.io_base      = io;
 	legacy->conf.irq          = irq;
@@ -179,6 +183,13 @@ static void sb_dev2cfg(struct pnp_dev *dev, struct sb_card_config *scc)
 		scc->conf.dma       = pnp_dma(dev,0);
 		scc->conf.dma2      = pnp_dma(dev,1);
 		scc->mpucnf.io_base = pnp_port_start(dev,1);
+		return;
+	}
+	if(!strncmp("tBA",scc->card_id,3)) {
+		scc->conf.io_base   = pnp_port_start(dev,0);
+		scc->conf.irq       = pnp_irq(dev,0);
+		scc->conf.dma       = pnp_dma(dev,0);
+		scc->conf.dma2      = pnp_dma(dev,1);
 		return;
 	}
 	if(!strncmp("ESS",scc->card_id,3)) {
@@ -223,6 +234,8 @@ static void sb_dev2cfg(struct pnp_dev *dev, struct sb_card_config *scc)
 	}
 }
 
+static unsigned int sb_pnp_devices;
+
 /* Probe callback function for the PnP API */
 static int sb_pnp_probe(struct pnp_card_link *card, const struct pnp_card_device_id *card_id)
 {
@@ -234,11 +247,10 @@ static int sb_pnp_probe(struct pnp_card_link *card, const struct pnp_card_device
 		return -EBUSY;
 	}
 
-	if((scc = kmalloc(sizeof(struct sb_card_config), GFP_KERNEL)) == NULL) {
+	if((scc = kzalloc(sizeof(struct sb_card_config), GFP_KERNEL)) == NULL) {
 		printk(KERN_ERR "sb: Error: Could not allocate memory\n");
 		return -ENOMEM;
 	}
-	memset(scc, 0, sizeof(struct sb_card_config));
 
 	printk(KERN_INFO "sb: PnP: Found Card Named = \"%s\", Card PnP id = " \
 	       "%s, Device PnP id = %s\n", card->card->name, card_id->id,
@@ -253,6 +265,7 @@ static int sb_pnp_probe(struct pnp_card_link *card, const struct pnp_card_device
 	       scc->conf.dma, scc->conf.dma2);
 
 	pnp_set_card_drvdata(card, scc);
+	sb_pnp_devices++;
 
 	return sb_register_oss(scc, &sbmo);
 }
@@ -275,7 +288,16 @@ static struct pnp_card_driver sb_pnp_driver = {
 	.probe         = sb_pnp_probe,
 	.remove        = sb_pnp_remove,
 };
+MODULE_DEVICE_TABLE(pnp_card, sb_pnp_card_table);
 #endif /* CONFIG_PNP */
+
+static void sb_unregister_all(void)
+{
+#ifdef CONFIG_PNP
+	if (pnp_registered)
+		pnp_unregister_card_driver(&sb_pnp_driver);
+#endif
+}
 
 static int __init sb_init(void)
 {
@@ -295,14 +317,21 @@ static int __init sb_init(void)
 
 #ifdef CONFIG_PNP
 	if(pnp) {
-		pres = pnp_register_card_driver(&sb_pnp_driver);
+		int err = pnp_register_card_driver(&sb_pnp_driver);
+		if (!err)
+			pnp_registered = 1;
+		pres = sb_pnp_devices;
 	}
 #endif
 	printk(KERN_INFO "sb: Init: Done\n");
 
 	/* If either PnP or Legacy registered a card then return
 	 * success */
-	return (pres > 0 || lres > 0) ? 0 : -ENODEV;
+	if (pres == 0 && lres <= 0) {
+		sb_unregister_all();
+		return -ENODEV;
+	}
+	return 0;
 }
 
 static void __exit sb_exit(void)
@@ -315,14 +344,10 @@ static void __exit sb_exit(void)
 		sb_unload(legacy);
 	}
 
-#ifdef CONFIG_PNP
-	pnp_unregister_card_driver(&sb_pnp_driver);
-#endif
+	sb_unregister_all();
 
-	if (smw_free) {
-		vfree(smw_free);
-		smw_free = NULL;
-	}
+	vfree(smw_free);
+	smw_free = NULL;
 }
 
 module_init(sb_init);

@@ -1,5 +1,5 @@
 /*
- * Update: The Berkeley copyright was changed, and the change 
+ * Update: The Berkeley copyright was changed, and the change
  * is retroactive to all "true" BSD software (ie everything
  * from UCB as opposed to other peoples code that just carried
  * the same license). The new copyright doesn't clash with the
@@ -256,9 +256,9 @@ static int bsd_check (struct bsd_db *db)	/* 1=output CLEAR */
 	    db->in_count  -= (db->in_count  >> 2);
 	    db->bytes_out -= (db->bytes_out >> 2);
 	  }
-	
+
 	db->checkpoint = db->in_count + CHECK_GAP;
-	
+
 	if (db->max_ent >= db->maxmaxcode)
 	  {
 	    /* Reset the dictionary only if the ratio is worse,
@@ -274,7 +274,7 @@ static int bsd_check (struct bsd_db *db)	/* 1=output CLEAR */
 	      {
 		new_ratio /= db->bytes_out;
 	      }
-	    
+
 	    if (new_ratio < db->ratio || new_ratio < 1 * RATIO_SCALE)
 	      {
 		bsd_clear (db);
@@ -293,7 +293,7 @@ static int bsd_check (struct bsd_db *db)	/* 1=output CLEAR */
 static void bsd_comp_stats (void *state, struct compstat *stats)
   {
     struct bsd_db *db = (struct bsd_db *) state;
-    
+
     stats->unc_bytes    = db->uncomp_bytes;
     stats->unc_packets  = db->uncomp_count;
     stats->comp_bytes   = db->comp_bytes;
@@ -323,33 +323,27 @@ static void bsd_reset (void *state)
  */
 
 static void bsd_free (void *state)
-  {
-    struct bsd_db *db = (struct bsd_db *) state;
-    
-    if (db)
-      {
+{
+	struct bsd_db *db = state;
+
+	if (!db)
+		return;
+
 /*
  * Release the dictionary
  */
-	if (db->dict)
-	  {
-	    vfree (db->dict);
-	    db->dict = NULL;
-	  }
+	vfree(db->dict);
+	db->dict = NULL;
 /*
  * Release the string buffer
  */
-	if (db->lens)
-	  {
-	    vfree (db->lens);
-	    db->lens = NULL;
-	  }
+	vfree(db->lens);
+	db->lens = NULL;
 /*
  * Finally release the structure itself.
  */
-	kfree (db);
-      }
-  }
+	kfree(db);
+}
 
 /*
  * Allocate space for a (de) compressor.
@@ -401,20 +395,18 @@ static void *bsd_alloc (unsigned char *options, int opt_len, int decomp)
  * Allocate the main control structure for this instance.
  */
     maxmaxcode = MAXCODE(bits);
-    db         = (struct bsd_db *) kmalloc (sizeof (struct bsd_db),
+    db         = kzalloc(sizeof (struct bsd_db),
 					    GFP_KERNEL);
     if (!db)
       {
 	return NULL;
       }
 
-    memset (db, 0, sizeof(struct bsd_db));
 /*
  * Allocate space for the dictionary. This may be more than one page in
  * length.
  */
-    db->dict = (struct bsd_dict *) vmalloc (hsize *
-					    sizeof (struct bsd_dict));
+    db->dict = vmalloc(hsize * sizeof(struct bsd_dict));
     if (!db->dict)
       {
 	bsd_free (db);
@@ -433,12 +425,11 @@ static void *bsd_alloc (unsigned char *options, int opt_len, int decomp)
  */
     else
       {
-        db->lens = (unsigned short *) vmalloc ((maxmaxcode + 1) *
-					       sizeof (db->lens[0]));
+        db->lens = vmalloc((maxmaxcode + 1) * sizeof(db->lens[0]));
 	if (!db->lens)
 	  {
 	    bsd_free (db);
-	    return (NULL);
+	    return NULL;
 	  }
       }
 /*
@@ -474,7 +465,7 @@ static int bsd_init (void *state, unsigned char *options,
   {
     struct bsd_db *db = state;
     int indx;
-    
+
     if ((opt_len != 3) || (options[0] != CI_BSD_COMPRESS) || (options[1] != 3)
 	|| (BSD_VERSION(options[2]) != BSD_CURRENT_VERSION)
 	|| (BSD_NBITS(options[2]) != db->maxbits)
@@ -506,9 +497,9 @@ static int bsd_init (void *state, unsigned char *options,
     if (debug)
 #endif
       db->debug = 1;
-    
+
     bsd_reset(db);
-    
+
     return 1;
   }
 
@@ -666,7 +657,7 @@ static int bsd_compress (void *state, unsigned char *rptr, unsigned char *obuf,
 	fcode = BSD_KEY  (ent, c);
 	hval  = BSD_HASH (ent, c, hshift);
 	dictp = dict_ptr (db, hval);
-	
+
 	/* Validate and then check the entry. */
 	if (dictp->codem1 >= max_ent)
 	  {
@@ -678,7 +669,7 @@ static int bsd_compress (void *state, unsigned char *rptr, unsigned char *obuf,
 	    ent = dictp->codem1 + 1;
 	    continue;	/* found (prefix,suffix) */
 	  }
-	
+
 	/* continue probing until a match or invalid entry */
 	disp = (hval == 0) ? 1 : hval;
 
@@ -699,10 +690,10 @@ static int bsd_compress (void *state, unsigned char *rptr, unsigned char *obuf,
 
 	ent = dictp->codem1 + 1;	/* finally found (prefix,suffix) */
 	continue;
-	
+
 nomatch:
 	OUTPUT(ent);		/* output the prefix */
-	
+
 	/* code -> hashtable */
 	if (max_ent < db->maxmaxcode)
 	  {
@@ -716,7 +707,7 @@ nomatch:
 		db->n_bits = ++n_bits;
 		mxcode     = MAXCODE (n_bits);
 	      }
-	    
+
 	    /* Invalidate old hash table entry using
 	     * this code, and then take it over.
 	     */
@@ -744,7 +735,7 @@ nomatch:
 	  }
 	ent = c;
       }
-    
+
     OUTPUT(ent);		/* output the last code */
 
     db->bytes_out    += olen - PPP_HDRLEN - BSD_OVHD;
@@ -766,7 +757,7 @@ nomatch:
       {
 	OUTPUT (CLEAR);
       }
-    
+
     /*
      * Pad dribble bits of last code with ones.
      * Do not emit a completely useless byte of ones.
@@ -776,7 +767,7 @@ nomatch:
       {
 	PUTBYTE((accm | (0xff << (bitno-8))) >> 24);
       }
-    
+
     /*
      * Increase code size if we would have without the packet
      * boundary because the decompressor will do so.
@@ -862,7 +853,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
     bitno    = 32;		/* 1st valid bit in accm */
     n_bits   = db->n_bits;
     tgtbitno = 32 - n_bits;	/* bitno when we have a code */
-    
+
     /*
      * Save the address/control from the PPP header
      * and then get the sequence number.
@@ -875,7 +866,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 
     ibuf += (PPP_HDRLEN + 2);
     ilen  = isize - (PPP_HDRLEN + 2);
-    
+
     /*
      * Check the sequence number and give up if it differs from
      * the value we're expecting.
@@ -903,7 +894,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
     *wptr++ = adrs;
     *wptr++ = ctrl;
     *wptr++ = 0;
-    
+
     oldcode = CLEAR;
     explen  = 3;
 
@@ -940,7 +931,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 	/*
 	 * The dictionary must only be cleared at the end of a packet.
 	 */
-	
+
 	if (incode == CLEAR)
 	  {
 	    if (ilen > 0)
@@ -951,7 +942,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 		  }
 		return DECOMP_FATALERROR;	/* probably a bug */
 	      }
-	    
+
 	    bsd_clear(db);
 	    break;
 	  }
@@ -968,7 +959,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 	      }
 	    return DECOMP_FATALERROR;	/* probably a bug */
 	  }
-	
+
 	/* Special case for KwKwK string. */
 	if (incode > max_ent)
 	  {
@@ -980,7 +971,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 	    finchar = incode;
 	    extra   = 0;
 	  }
-	
+
 	codelen = *(lens_ptr (db, finchar));
 	explen += codelen + extra;
 	if (explen > osize)
@@ -995,7 +986,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 	      }
 	    return DECOMP_FATALERROR;
 	  }
-	
+
 	/*
 	 * Decode this code and install it in the decompressed buffer.
 	 */
@@ -1005,7 +996,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 	while (finchar > LAST)
 	  {
 	    struct bsd_dict *dictp2 = dict_ptr (db, finchar);
-	    
+
 	    dictp = dict_ptr (db, dictp2->cptr);
 #ifdef DEBUG
 	    if (--codelen <= 0 || dictp->codem1 != finchar-1)
@@ -1035,7 +1026,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 	    finchar = dictp->f.hs.prefix;
 	  }
 	*--p = finchar;
-	
+
 #ifdef DEBUG
 	if (--codelen != 0)
 	  {
@@ -1043,12 +1034,12 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 		   db->unit, codelen, incode, max_ent);
 	  }
 #endif
-	
+
 	if (extra)		/* the KwKwK case again */
 	  {
 	    *wptr++ = finchar;
 	  }
-	
+
 	/*
 	 * If not first code in a packet, and
 	 * if not out of code space, then allocate a new code.
@@ -1063,11 +1054,11 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 	    unsigned short  *lens1,  *lens2;
 	    unsigned long fcode;
 	    int hval, disp, indx;
-	    
+
 	    fcode = BSD_KEY(oldcode,finchar);
 	    hval  = BSD_HASH(oldcode,finchar,db->hshift);
 	    dictp = dict_ptr (db, hval);
-	    
+
 	    /* look for a free hash table entry */
 	    if (dictp->codem1 < max_ent)
 	      {
@@ -1083,7 +1074,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 		  }
 		while (dictp->codem1 < max_ent);
 	      }
-	    
+
 	    /*
 	     * Invalidate previous hash table entry
 	     * assigned this code, and then take it over
@@ -1107,7 +1098,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
 	    lens1  = lens_ptr (db, max_ent);
 	    lens2  = lens_ptr (db, oldcode);
 	    *lens1 = *lens2 + 1;
-	    
+
 	    /* Expand code size if needed. */
 	    if (max_ent >= MAXCODE(n_bits) && max_ent < db->maxmaxcode)
 	      {
@@ -1133,7 +1124,7 @@ static int bsd_decompress (void *state, unsigned char *ibuf, int isize,
       }
     return explen;
   }
-     
+
 /*************************************************************
  * Table of addresses for the BSD compression module
  *************************************************************/
@@ -1160,7 +1151,7 @@ static struct compressor ppp_bsd_compress = {
  * Module support routines
  *************************************************************/
 
-int __init bsdcomp_init(void)
+static int __init bsdcomp_init(void)
 {
 	int answer = ppp_register_compressor(&ppp_bsd_compress);
 	if (answer == 0)
@@ -1168,7 +1159,7 @@ int __init bsdcomp_init(void)
 	return answer;
 }
 
-void __exit bsdcomp_cleanup(void)
+static void __exit bsdcomp_cleanup(void)
 {
 	ppp_unregister_compressor(&ppp_bsd_compress);
 }
@@ -1176,3 +1167,4 @@ void __exit bsdcomp_cleanup(void)
 module_init(bsdcomp_init);
 module_exit(bsdcomp_cleanup);
 MODULE_LICENSE("Dual BSD/GPL");
+MODULE_ALIAS("ppp-compress-" __stringify(CI_BSD_COMPRESS));

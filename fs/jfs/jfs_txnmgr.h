@@ -1,18 +1,18 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2004
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or 
+ *   the Free Software Foundation; either version 2 of the License, or
  *   (at your option) any later version.
- * 
+ *
  *   This program is distributed in the hope that it will be useful,
  *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
  *   the GNU General Public License for more details.
  *
  *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software 
+ *   along with this program;  if not, write to the Free Software
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 #ifndef _H_JFS_TXNMGR
@@ -53,7 +53,7 @@ struct tblock {
 	u32 logtid;		/* log transaction id */
 
 	/* commit management */
-	struct tblock *cqnext;	/* commit queue link */
+	struct list_head cqueue;	/* commit queue list */
 	s32 clsn;		/* commit lsn */
 	struct lbuf *bp;
 	s32 pn;			/* commit record log page number */
@@ -62,7 +62,11 @@ struct tblock {
 					 * ready transactions wait on this
 					 * event for group commit completion.
 					 */
-	struct inode *ip;	/* inode being created or deleted */
+	union {
+		struct inode *ip; /* inode being deleted */
+		pxd_t ixpxd;	/* pxd of inode extent for created inode */
+	} u;
+	u32 ino;		/* inode number being created */
 };
 
 extern struct tblock *TxBlock;	/* transaction block table */
@@ -89,16 +93,16 @@ extern struct tblock *TxBlock;	/* transaction block table */
  *	transaction lock
  */
 struct tlock {
-	lid_t next;		/* index next lockword on tid locklist
-				 *          next lockword on freelist
+	lid_t next;		/* 2: index next lockword on tid locklist
+				 *	    next lockword on freelist
 				 */
-	tid_t tid;		/* transaction id holding lock */
+	tid_t tid;		/* 2: transaction id holding lock */
 
 	u16 flag;		/* 2: lock control */
 	u16 type;		/* 2: log type */
 
-	struct metapage *mp;	/* 4: object page buffer locked */
-	struct inode *ip;	/* 4: object */
+	struct metapage *mp;	/* 4/8: object page buffer locked */
+	struct inode *ip;	/* 4/8: object */
 	/* (16) */
 
 	s16 lock[24];		/* 48: overlay area */
@@ -118,6 +122,7 @@ extern struct tlock *TxLock;	/* transaction lock table */
 #define tlckLOG			0x0800
 /* updateMap state */
 #define	tlckUPDATEMAP		0x0080
+#define	tlckDIRECTORY		0x0040
 /* freeLock state */
 #define tlckFREELOCK		0x0008
 #define tlckWRITEPAGE		0x0004
@@ -163,7 +168,7 @@ struct lv {
 #define	TLOCKLONG	28
 
 struct linelock {
-	u16 next;		/* 2: next linelock */
+	lid_t next;		/* 2: next linelock */
 
 	s8 maxcnt;		/* 1: */
 	s8 index;		/* 1: */
@@ -174,12 +179,12 @@ struct linelock {
 	/* (8) */
 
 	struct lv lv[20];	/* 40: */
-}; 				/* (48) */
+};				/* (48) */
 
 #define dt_lock	linelock
 
 struct xtlock {
-	u16 next;		/* 2: */
+	lid_t next;		/* 2: */
 
 	s8 maxcnt;		/* 1: */
 	s8 index;		/* 1: */
@@ -206,11 +211,11 @@ struct xtlock {
  * at tlock.lock/linelock: watch for alignment;
  * N.B. next field may be set by linelock, and should not
  * be modified by maplock;
- * N.B. index of the first pxdlock specifies index of next 
- * free maplock (i.e., number of maplock) in the tlock; 
+ * N.B. index of the first pxdlock specifies index of next
+ * free maplock (i.e., number of maplock) in the tlock;
  */
 struct maplock {
-	u16 next;		/* 2: */
+	lid_t next;		/* 2: */
 
 	u8 maxcnt;		/* 2: */
 	u8 index;		/* 2: next free maplock index */
@@ -238,7 +243,7 @@ struct maplock {
 #define	pxd_lock	maplock
 
 struct xdlistlock {
-	u16 next;		/* 2: */
+	lid_t next;		/* 2: */
 
 	u8 maxcnt;		/* 2: */
 	u8 index;		/* 2: */
@@ -281,34 +286,26 @@ struct commit {
 /*
  * external declarations
  */
-extern struct tlock *txLock(tid_t tid, struct inode *ip, struct metapage *mp,
-			    int flag);
+extern int jfs_tlocks_low;
 
-extern struct tlock *txMaplock(tid_t tid, struct inode *ip, int flag);
-
-extern int txCommit(tid_t tid, int nip, struct inode **iplist, int flag);
-
-extern tid_t txBegin(struct super_block *sb, int flag);
-
-extern void txBeginAnon(struct super_block *sb);
-
-extern void txEnd(tid_t tid);
-
-extern void txAbort(tid_t tid, int dirty);
-
-extern struct linelock *txLinelock(struct linelock * tlock);
-
-extern void txFreeMap(struct inode *ip, struct maplock * maplock,
-		      struct tblock * tblk, int maptype);
-
-extern void txEA(tid_t tid, struct inode *ip, dxd_t * oldea, dxd_t * newea);
-
-extern void txFreelock(struct inode *ip);
-
-extern int lmLog(struct jfs_log * log, struct tblock * tblk, struct lrd * lrd,
-		 struct tlock * tlck);
-
-extern void txQuiesce(struct super_block *sb);
-
-extern void txResume(struct super_block *sb);
+extern int txInit(void);
+extern void txExit(void);
+extern struct tlock *txLock(tid_t, struct inode *, struct metapage *, int);
+extern struct tlock *txMaplock(tid_t, struct inode *, int);
+extern int txCommit(tid_t, int, struct inode **, int);
+extern tid_t txBegin(struct super_block *, int);
+extern void txBeginAnon(struct super_block *);
+extern void txEnd(tid_t);
+extern void txAbort(tid_t, int);
+extern struct linelock *txLinelock(struct linelock *);
+extern void txFreeMap(struct inode *, struct maplock *, struct tblock *, int);
+extern void txEA(tid_t, struct inode *, dxd_t *, dxd_t *);
+extern void txFreelock(struct inode *);
+extern int lmLog(struct jfs_log *, struct tblock *, struct lrd *,
+		 struct tlock *);
+extern void txQuiesce(struct super_block *);
+extern void txResume(struct super_block *);
+extern void txLazyUnlock(struct tblock *);
+extern int jfs_lazycommit(void *);
+extern int jfs_sync(void *);
 #endif				/* _H_JFS_TXNMGR */

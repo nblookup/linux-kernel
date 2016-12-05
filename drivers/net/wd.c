@@ -43,11 +43,12 @@ static const char version[] =
 
 #include "8390.h"
 
+#define DRV_NAME "wd"
+
 /* A zero-terminated list of I/O addresses to be probed. */
 static unsigned int wd_portlist[] __initdata =
 {0x300, 0x280, 0x380, 0x240, 0};
 
-int wd_probe(struct net_device *dev);
 static int wd_probe1(struct net_device *dev, int ioaddr);
 
 static int wd_open(struct net_device *dev);
@@ -60,7 +61,7 @@ static void wd_block_output(struct net_device *dev, int count,
 							const unsigned char *buf, int start_page);
 static int wd_close(struct net_device *dev);
 
-
+
 #define WD_START_PG		0x00	/* First page of TX buffer */
 #define WD03_STOP_PG	0x20	/* Last page +1 of RX ring */
 #define WD13_STOP_PG	0x40	/* Last page +1 of RX ring */
@@ -74,7 +75,7 @@ static int wd_close(struct net_device *dev);
 #define WD_NIC_OFFSET	16		/* Offset to the 8390 from the base_addr. */
 #define WD_IO_EXTENT	32
 
-
+
 /*	Probe for the WD8003 and WD8013.  These cards have the station
 	address PROM at I/O ports <base>+8 to <base>+13, with a checksum
 	following. A Soundblaster can have the same checksum as an WDethercard,
@@ -83,20 +84,21 @@ static int wd_close(struct net_device *dev);
 	The wd_probe1() routine initializes the card and fills the
 	station address field. */
 
-int __init wd_probe(struct net_device *dev)
+static int __init do_wd_probe(struct net_device *dev)
 {
 	int i;
 	struct resource *r;
 	int base_addr = dev->base_addr;
-
-	SET_MODULE_OWNER(dev);
+	int irq = dev->irq;
+	int mem_start = dev->mem_start;
+	int mem_end = dev->mem_end;
 
 	if (base_addr > 0x1ff) {	/* Check a user specified location. */
 		r = request_region(base_addr, WD_IO_EXTENT, "wd-probe");
 		if ( r == NULL)
 			return -EBUSY;
 		i = wd_probe1(dev, base_addr);
-		if (i != 0)  
+		if (i != 0)
 			release_region(base_addr, WD_IO_EXTENT);
 		else
 			r->name = dev->name;
@@ -115,14 +117,55 @@ int __init wd_probe(struct net_device *dev)
 			return 0;
 		}
 		release_region(ioaddr, WD_IO_EXTENT);
+		dev->irq = irq;
+		dev->mem_start = mem_start;
+		dev->mem_end = mem_end;
 	}
 
 	return -ENODEV;
 }
 
+#ifndef MODULE
+struct net_device * __init wd_probe(int unit)
+{
+	struct net_device *dev = alloc_ei_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_wd_probe(dev);
+	if (err)
+		goto out;
+	return dev;
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
+
+static const struct net_device_ops wd_netdev_ops = {
+	.ndo_open		= wd_open,
+	.ndo_stop		= wd_close,
+	.ndo_start_xmit		= ei_start_xmit,
+	.ndo_tx_timeout		= ei_tx_timeout,
+	.ndo_get_stats		= ei_get_stats,
+	.ndo_set_multicast_list = ei_set_multicast_list,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller 	= ei_poll,
+#endif
+};
+
 static int __init wd_probe1(struct net_device *dev, int ioaddr)
 {
 	int i;
+	int err;
 	int checksum = 0;
 	int ancient = 0;			/* An old card without config registers. */
 	int word16 = 0;				/* 0 = 8 bit, 1 = 16 bit */
@@ -146,9 +189,11 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 	if (ei_debug  &&  version_printed++ == 0)
 		printk(version);
 
-	printk("%s: WD80x3 at %#3x,", dev->name, ioaddr);
 	for (i = 0; i < 6; i++)
-		printk(" %2.2X", dev->dev_addr[i] = inb(ioaddr + 8 + i));
+		dev->dev_addr[i] = inb(ioaddr + 8 + i);
+
+	printk("%s: WD80x3 at %#3x, %pM",
+	       dev->name, ioaddr, dev->dev_addr);
 
 	/* The following PureData probe code was contributed by
 	   Mike Jagdis <jaggy@purplet.demon.co.uk>. Puredata does software
@@ -230,7 +275,7 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 	dev->base_addr = ioaddr+WD_NIC_OFFSET;
 
 	if (dev->irq < 2) {
-		int irqmap[] = {9,3,5,7,10,11,15,4};
+		static const int irqmap[] = {9, 3, 5, 7, 10, 11, 15, 4};
 		int reg1 = inb(ioaddr+1);
 		int reg4 = inb(ioaddr+4);
 		if (ancient || reg1 == 0xff) {	/* Ack!! No way to read the IRQ! */
@@ -242,7 +287,7 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 			   a reliable way to trigger an interrupt. */
 			outb_p(E8390_NODMA + E8390_STOP, nic_addr);
 			outb(0x00, nic_addr+EN0_IMR);	/* Disable all intrs. */
-			
+
 			irq_mask = probe_irq_on();
 			outb_p(0xff, nic_addr + EN0_IMR);	/* Enable all interrupts. */
 			outb_p(0x00, nic_addr + EN0_RCNTLO);
@@ -250,7 +295,7 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 			outb(E8390_RREAD+E8390_START, nic_addr); /* Trigger it... */
 			mdelay(20);
 			dev->irq = probe_irq_off(irq_mask);
-			
+
 			outb_p(0x00, nic_addr+EN0_IMR);	/* Mask all intrs. again. */
 
 			if (ei_debug > 2)
@@ -262,19 +307,11 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 	} else if (dev->irq == 2)		/* Fixup bogosity: IRQ2 is really IRQ9 */
 		dev->irq = 9;
 
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk (" unable to get memory for dev->priv.\n");
-		return -ENOMEM;
-	}
-
 	/* Snarf the interrupt now.  There's no point in waiting since we cannot
 	   share and the board will usually be enabled. */
-	i = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev);
+	i = request_irq(dev->irq, ei_interrupt, 0, DRV_NAME, dev);
 	if (i) {
 		printk (" unable to get IRQ %d.\n", dev->irq);
-		kfree(dev->priv);
-		dev->priv = NULL;
 		return i;
 	}
 
@@ -285,26 +322,32 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 	ei_status.rx_start_page = WD_START_PG + TX_PAGES;
 
 	/* Don't map in the shared memory until the board is actually opened. */
-	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
 
 	/* Some cards (eg WD8003EBT) can be jumpered for more (32k!) memory. */
 	if (dev->mem_end != 0) {
 		ei_status.stop_page = (dev->mem_end - dev->mem_start)/256;
+		ei_status.priv = dev->mem_end - dev->mem_start;
 	} else {
 		ei_status.stop_page = word16 ? WD13_STOP_PG : WD03_STOP_PG;
 		dev->mem_end = dev->mem_start + (ei_status.stop_page - WD_START_PG)*256;
+		ei_status.priv = (ei_status.stop_page - WD_START_PG)*256;
 	}
-	ei_status.rmem_end = dev->mem_end;
+
+	ei_status.mem = ioremap(dev->mem_start, ei_status.priv);
+	if (!ei_status.mem) {
+		free_irq(dev->irq, dev);
+		return -ENOMEM;
+	}
 
 	printk(" %s, IRQ %d, shared memory at %#lx-%#lx.\n",
 		   model_name, dev->irq, dev->mem_start, dev->mem_end-1);
 
-	ei_status.reset_8390 = &wd_reset_8390;
-	ei_status.block_input = &wd_block_input;
-	ei_status.block_output = &wd_block_output;
-	ei_status.get_8390_hdr = &wd_get_8390_hdr;
-	dev->open = &wd_open;
-	dev->stop = &wd_close;
+	ei_status.reset_8390 = wd_reset_8390;
+	ei_status.block_input = wd_block_input;
+	ei_status.block_output = wd_block_output;
+	ei_status.get_8390_hdr = wd_get_8390_hdr;
+
+	dev->netdev_ops = &wd_netdev_ops;
 	NS8390_init(dev, 0);
 
 #if 1
@@ -314,7 +357,12 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 		outb(inb(ioaddr+4)|0x80, ioaddr+4);
 #endif
 
-	return 0;
+	err = register_netdev(dev);
+	if (err) {
+		free_irq(dev->irq, dev);
+		iounmap(ei_status.mem);
+	}
+	return err;
 }
 
 static int
@@ -331,8 +379,7 @@ wd_open(struct net_device *dev)
 	  outb(ei_status.reg5, ioaddr+WD_CMDREG5);
   outb(ei_status.reg0, ioaddr); /* WD_CMDREG */
 
-  ei_open(dev);
-  return 0;
+  return ei_open(dev);
 }
 
 static void
@@ -350,7 +397,6 @@ wd_reset_8390(struct net_device *dev)
 		outb(NIC16 | ((dev->mem_start>>19) & 0x1f), wd_cmd_port+WD_CMDREG5);
 
 	if (ei_debug > 1) printk("reset done\n");
-	return;
 }
 
 /* Grab the 8390 specific header. Similar to the block_input routine, but
@@ -362,7 +408,7 @@ wd_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page
 {
 
 	int wd_cmdreg = dev->base_addr - WD_NIC_OFFSET; /* WD_CMDREG */
-	unsigned long hdr_start = dev->mem_start + ((ring_page - WD_START_PG)<<8);
+	void __iomem *hdr_start = ei_status.mem + ((ring_page - WD_START_PG)<<8);
 
 	/* We'll always get a 4 byte header read followed by a packet read, so
 	   we enable 16 bit mode before the header, and disable after the body. */
@@ -372,10 +418,10 @@ wd_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page
 #ifdef __BIG_ENDIAN
 	/* Officially this is what we are doing, but the readl() is faster */
 	/* unfortunately it isn't endian aware of the struct               */
-	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	hdr->count = le16_to_cpu(hdr->count);
 #else
-	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
+	((unsigned int*)hdr)[0] = readl(hdr_start);
 #endif
 }
 
@@ -388,17 +434,18 @@ static void
 wd_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	int wd_cmdreg = dev->base_addr - WD_NIC_OFFSET; /* WD_CMDREG */
-	unsigned long xfer_start = dev->mem_start + ring_offset - (WD_START_PG<<8);
+	unsigned long offset = ring_offset - (WD_START_PG<<8);
+	void __iomem *xfer_start = ei_status.mem + offset;
 
-	if (xfer_start + count > ei_status.rmem_end) {
+	if (offset + count > ei_status.priv) {
 		/* We must wrap the input move. */
-		int semi_count = ei_status.rmem_end - xfer_start;
-		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
+		int semi_count = ei_status.priv - offset;
+		memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
+		memcpy_fromio(skb->data + semi_count, ei_status.mem + TX_PAGES * 256, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
-		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		memcpy_fromio(skb->data, xfer_start, count);
 	}
 
 	/* Turn off 16 bit access so that reboot works.	 ISA brain-damage */
@@ -411,16 +458,16 @@ wd_block_output(struct net_device *dev, int count, const unsigned char *buf,
 				int start_page)
 {
 	int wd_cmdreg = dev->base_addr - WD_NIC_OFFSET; /* WD_CMDREG */
-	long shmem = dev->mem_start + ((start_page - WD_START_PG)<<8);
+	void __iomem *shmem = ei_status.mem + ((start_page - WD_START_PG)<<8);
 
 
 	if (ei_status.word16) {
 		/* Turn on and off 16 bit access so that reboot works. */
 		outb(ISA16 | ei_status.reg5, wd_cmdreg+WD_CMDREG5);
-		isa_memcpy_toio(shmem, buf, count);
+		memcpy_toio(shmem, buf, count);
 		outb(ei_status.reg5, wd_cmdreg+WD_CMDREG5);
 	} else
-		isa_memcpy_toio(shmem, buf, count);
+		memcpy_toio(shmem, buf, count);
 }
 
 
@@ -443,19 +490,19 @@ wd_close(struct net_device *dev)
 	return 0;
 }
 
-
+
 #ifdef MODULE
 #define MAX_WD_CARDS	4	/* Max number of wd cards per module */
-static struct net_device dev_wd[MAX_WD_CARDS];
+static struct net_device *dev_wd[MAX_WD_CARDS];
 static int io[MAX_WD_CARDS];
 static int irq[MAX_WD_CARDS];
 static int mem[MAX_WD_CARDS];
 static int mem_end[MAX_WD_CARDS];	/* for non std. mem size */
 
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
-MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
-MODULE_PARM(mem_end, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(mem, int, NULL, 0);
+module_param_array(mem_end, int, NULL, 0);
 MODULE_PARM_DESC(io, "I/O base address(es)");
 MODULE_PARM_DESC(irq, "IRQ number(s) (ignored for PureData boards)");
 MODULE_PARM_DESC(mem, "memory base address(es)(ignored for PureData boards)");
@@ -465,48 +512,55 @@ MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
-int
-init_module(void)
+
+int __init init_module(void)
 {
+	struct net_device *dev;
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_WD_CARDS; this_dev++) {
-		struct net_device *dev = &dev_wd[this_dev];
-		dev->irq = irq[this_dev];
-		dev->base_addr = io[this_dev];
-		dev->mem_start = mem[this_dev];
-		dev->mem_end = mem_end[this_dev];
-		dev->init = wd_probe;
 		if (io[this_dev] == 0)  {
 			if (this_dev != 0) break; /* only autoprobe 1st one */
 			printk(KERN_NOTICE "wd.c: Presently autoprobing (not recommended) for a single card.\n");
 		}
-		if (register_netdev(dev) != 0) {
-			printk(KERN_WARNING "wd.c: No wd80x3 card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) {	/* Got at least one. */
-				return 0;
-			}
-			return -ENXIO;
+		dev = alloc_ei_netdev();
+		if (!dev)
+			break;
+		dev->irq = irq[this_dev];
+		dev->base_addr = io[this_dev];
+		dev->mem_start = mem[this_dev];
+		dev->mem_end = mem_end[this_dev];
+		if (do_wd_probe(dev) == 0) {
+			dev_wd[found++] = dev;
+			continue;
 		}
-		found++;
+		free_netdev(dev);
+		printk(KERN_WARNING "wd.c: No wd80x3 card found (i/o = 0x%x).\n", io[this_dev]);
+		break;
 	}
-	return 0;
+	if (found)
+		return 0;
+	return -ENXIO;
 }
 
-void
+static void cleanup_card(struct net_device *dev)
+{
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr - WD_NIC_OFFSET, WD_IO_EXTENT);
+	iounmap(ei_status.mem);
+}
+
+void __exit
 cleanup_module(void)
 {
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_WD_CARDS; this_dev++) {
-		struct net_device *dev = &dev_wd[this_dev];
-		if (dev->priv != NULL) {
-			void *priv = dev->priv;
-			int ioaddr = dev->base_addr - WD_NIC_OFFSET;
-			free_irq(dev->irq, dev);
-			release_region(ioaddr, WD_IO_EXTENT);
+		struct net_device *dev = dev_wd[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
-			kfree(priv);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }

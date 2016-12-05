@@ -1,4 +1,4 @@
-/* $Id: capifunc.h,v 1.10 2003/08/25 10:06:37 schindler Exp $
+/* $Id: capifunc.h,v 1.11.4.1 2004/08/28 20:03:53 armin Exp $
  *
  * ISDN interface module for Eicon active cards DIVA.
  * CAPI Interface common functions
@@ -13,8 +13,6 @@
 #ifndef __CAPIFUNC_H__
 #define __CAPIFUNC_H__
 
-#define MAX_DESCRIPTORS  32
-
 #define DRRELMAJOR  2
 #define DRRELMINOR  0
 #define DRRELEXTRA  ""
@@ -24,8 +22,9 @@
 extern char DRIVERRELEASE_CAPI[];
 
 typedef struct _diva_card {
+	struct list_head list;
+	int remove_in_progress;
 	int Id;
-	struct _diva_card *next;
 	struct capi_ctr capi_ctrl;
 	DIVA_CAPI_ADAPTER *adapter;
 	DESCRIPTOR d;

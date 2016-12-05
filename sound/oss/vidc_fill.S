@@ -11,7 +11,7 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/hardware/iomd.h>
 
 		.text
@@ -133,10 +133,6 @@ ENTRY(vidc_clear)
  *  ip = corrupted
  */
 
-%%%%%%%%%%%%%%%%%%%
-fixme!  This funtion needs to return IRQ_HANDLED
-%%%%%%%%%%%%%%%%%%%
-
 ENTRY(vidc_sound_dma_irq)
 		stmfd	sp!, {r4 - r8, lr}
 		ldr	r8, =dma_start
@@ -189,6 +185,7 @@ ENTRY(vidc_sound_dma_irq)
 		mov	r0, #0x10
 		strneb	r0, [ip, #IOMD_SD0CR]
 		ldmfd	sp!, {r4 - r8, lr}
+		mov	r0, #1				@ IRQ_HANDLED
 		teq	r1, #0				@ If we have no more
 		movne	pc, lr
 		teq	r3, #0

@@ -18,7 +18,7 @@
  *     published by the Free Software Foundation; either version 2 of
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is
  *     provided "AS-IS" and at no charge.
  *
@@ -29,6 +29,7 @@
 #include <linux/if_ether.h>
 #include <linux/netdevice.h>
 #include <linux/irda.h>
+#include <linux/slab.h>
 
 #include <net/pkt_sched.h>
 #include <net/sock.h>
@@ -42,6 +43,9 @@
 #include <net/irda/timer.h>
 #include <net/irda/irlap_frame.h>
 #include <net/irda/qos.h>
+
+static void irlap_send_i_frame(struct irlap_cb *self, struct sk_buff *skb,
+			       int command);
 
 /*
  * Function irlap_insert_info (self, skb)
@@ -90,11 +94,20 @@ void irlap_queue_xmit(struct irlap_cb *self, struct sk_buff *skb)
 {
 	/* Some common init stuff */
 	skb->dev = self->netdev;
-	skb->h.raw = skb->nh.raw = skb->mac.raw = skb->data;
+	skb_reset_mac_header(skb);
+	skb_reset_network_header(skb);
+	skb_reset_transport_header(skb);
 	skb->protocol = htons(ETH_P_IRDA);
 	skb->priority = TC_PRIO_BESTEFFORT;
 
 	irlap_insert_info(self, skb);
+
+	if (unlikely(self->mode & IRDA_MODE_MONITOR)) {
+		IRDA_DEBUG(3, "%s(): %s is in monitor mode\n", __func__,
+			   self->netdev->name);
+		dev_kfree_skb(skb);
+		return;
+	}
 
 	dev_queue_xmit(skb);
 }
@@ -110,11 +123,13 @@ void irlap_send_snrm_frame(struct irlap_cb *self, struct qos_info *qos)
 	struct snrm_frame *frame;
 	int ret;
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
 
 	/* Allocate frame */
-	tx_skb = dev_alloc_skb(64);
+	tx_skb = alloc_skb(sizeof(struct snrm_frame) +
+			   IRLAP_NEGOCIATION_PARAMS_LEN,
+			   GFP_ATOMIC);
 	if (!tx_skb)
 		return;
 
@@ -130,10 +145,10 @@ void irlap_send_snrm_frame(struct irlap_cb *self, struct qos_info *qos)
 	frame->control = SNRM_CMD | PF_BIT;
 
 	/*
-	 *  If we are establishing a connection then insert QoS paramerters
+	 *  If we are establishing a connection then insert QoS parameters
 	 */
 	if (qos) {
-		skb_put(tx_skb, 9); /* 21 left */
+		skb_put(tx_skb, 9); /* 25 left */
 		frame->saddr = cpu_to_le32(self->saddr);
 		frame->daddr = cpu_to_le32(self->daddr);
 
@@ -168,7 +183,7 @@ static void irlap_recv_snrm_cmd(struct irlap_cb *self, struct sk_buff *skb,
 		/* Check if the new connection address is valid */
 		if ((info->caddr == 0x00) || (info->caddr == 0xfe)) {
 			IRDA_DEBUG(3, "%s(), invalid connection address!\n",
-				   __FUNCTION__);
+				   __func__);
 			return;
 		}
 
@@ -179,7 +194,7 @@ static void irlap_recv_snrm_cmd(struct irlap_cb *self, struct sk_buff *skb,
 		/* Only accept if addressed directly to us */
 		if (info->saddr != self->saddr) {
 			IRDA_DEBUG(2, "%s(), not addressed to us!\n",
-				   __FUNCTION__);
+				   __func__);
 			return;
 		}
 		irlap_do_event(self, RECV_SNRM_CMD, skb, info);
@@ -201,13 +216,15 @@ void irlap_send_ua_response_frame(struct irlap_cb *self, struct qos_info *qos)
 	struct ua_frame *frame;
 	int ret;
 
-	IRDA_DEBUG(2, "%s() <%ld>\n", __FUNCTION__, jiffies);
+	IRDA_DEBUG(2, "%s() <%ld>\n", __func__, jiffies);
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
 
 	/* Allocate frame */
-	tx_skb = dev_alloc_skb(64);
+	tx_skb = alloc_skb(sizeof(struct ua_frame) +
+			   IRLAP_NEGOCIATION_PARAMS_LEN,
+			   GFP_ATOMIC);
 	if (!tx_skb)
 		return;
 
@@ -242,23 +259,23 @@ void irlap_send_ua_response_frame(struct irlap_cb *self, struct qos_info *qos)
 void irlap_send_dm_frame( struct irlap_cb *self)
 {
 	struct sk_buff *tx_skb = NULL;
-	__u8 *frame;
+	struct dm_frame *frame;
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
 
-	tx_skb = dev_alloc_skb(32);
+	tx_skb = alloc_skb(sizeof(struct dm_frame), GFP_ATOMIC);
 	if (!tx_skb)
 		return;
 
-	frame = skb_put(tx_skb, 2);
+	frame = (struct dm_frame *)skb_put(tx_skb, 2);
 
 	if (self->state == LAP_NDM)
-		frame[0] = CBROADCAST;
+		frame->caddr = CBROADCAST;
 	else
-		frame[0] = self->caddr;
+		frame->caddr = self->caddr;
 
-	frame[1] = DM_RSP | PF_BIT;
+	frame->control = DM_RSP | PF_BIT;
 
 	irlap_queue_xmit(self, tx_skb);
 }
@@ -272,21 +289,21 @@ void irlap_send_dm_frame( struct irlap_cb *self)
 void irlap_send_disc_frame(struct irlap_cb *self)
 {
 	struct sk_buff *tx_skb = NULL;
-	__u8 *frame;
+	struct disc_frame *frame;
 
-	IRDA_DEBUG(3, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(3, "%s()\n", __func__);
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
 
-	tx_skb = dev_alloc_skb(16);
+	tx_skb = alloc_skb(sizeof(struct disc_frame), GFP_ATOMIC);
 	if (!tx_skb)
 		return;
 
-	frame = skb_put(tx_skb, 2);
+	frame = (struct disc_frame *)skb_put(tx_skb, 2);
 
-	frame[0] = self->caddr | CMD_FRAME;
-	frame[1] = DISC_CMD | PF_BIT;
+	frame->caddr = self->caddr | CMD_FRAME;
+	frame->control = DISC_CMD | PF_BIT;
 
 	irlap_queue_xmit(self, tx_skb);
 }
@@ -305,14 +322,15 @@ void irlap_send_discovery_xid_frame(struct irlap_cb *self, int S, __u8 s,
 	__u32 bcast = BROADCAST;
 	__u8 *info;
 
-	IRDA_DEBUG(4, "%s(), s=%d, S=%d, command=%d\n", __FUNCTION__,
+	IRDA_DEBUG(4, "%s(), s=%d, S=%d, command=%d\n", __func__,
 		   s, S, command);
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
-	ASSERT(discovery != NULL, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(discovery != NULL, return;);
 
-	tx_skb = dev_alloc_skb(64);
+	tx_skb = alloc_skb(sizeof(struct xid_frame) + IRLAP_DISCOVERY_INFO_LEN,
+			   GFP_ATOMIC);
 	if (!tx_skb)
 		return;
 
@@ -397,16 +415,16 @@ static void irlap_recv_discovery_xid_rsp(struct irlap_cb *self,
 	__u8 *discovery_info;
 	char *text;
 
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, "%s()\n", __func__);
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
 
 	if (!pskb_may_pull(skb, sizeof(struct xid_frame))) {
-		ERROR("%s: frame to short!\n", __FUNCTION__);
+		IRDA_ERROR("%s: frame too short!\n", __func__);
 		return;
 	}
-		
+
 	xid = (struct xid_frame *) skb->data;
 
 	info->daddr = le32_to_cpu(xid->saddr);
@@ -415,21 +433,20 @@ static void irlap_recv_discovery_xid_rsp(struct irlap_cb *self,
 	/* Make sure frame is addressed to us */
 	if ((info->saddr != self->saddr) && (info->saddr != BROADCAST)) {
 		IRDA_DEBUG(0, "%s(), frame is not addressed to us!\n",
-			   __FUNCTION__);
+			   __func__);
 		return;
 	}
 
-	if ((discovery = kmalloc(sizeof(discovery_t), GFP_ATOMIC)) == NULL) {
-		WARNING("%s: kmalloc failed!\n", __FUNCTION__);
+	if ((discovery = kzalloc(sizeof(discovery_t), GFP_ATOMIC)) == NULL) {
+		IRDA_WARNING("%s: kmalloc failed!\n", __func__);
 		return;
 	}
-	memset(discovery, 0, sizeof(discovery_t));
 
 	discovery->data.daddr = info->daddr;
 	discovery->data.saddr = self->saddr;
 	discovery->timestamp = jiffies;
 
-	IRDA_DEBUG(4, "%s(), daddr=%08x\n", __FUNCTION__,
+	IRDA_DEBUG(4, "%s(), daddr=%08x\n", __func__,
 		   discovery->data.daddr);
 
 	discovery_info = skb_pull(skb, sizeof(struct xid_frame));
@@ -475,10 +492,10 @@ static void irlap_recv_discovery_xid_cmd(struct irlap_cb *self,
 	char *text;
 
 	if (!pskb_may_pull(skb, sizeof(struct xid_frame))) {
-		ERROR("%s: frame to short!\n", __FUNCTION__);
+		IRDA_ERROR("%s: frame too short!\n", __func__);
 		return;
 	}
-	
+
 	xid = (struct xid_frame *) skb->data;
 
 	info->daddr = le32_to_cpu(xid->saddr);
@@ -487,7 +504,7 @@ static void irlap_recv_discovery_xid_cmd(struct irlap_cb *self,
 	/* Make sure frame is addressed to us */
 	if ((info->saddr != self->saddr) && (info->saddr != BROADCAST)) {
 		IRDA_DEBUG(0, "%s(), frame is not addressed to us!\n",
-			   __FUNCTION__);
+			   __func__);
 		return;
 	}
 
@@ -517,9 +534,10 @@ static void irlap_recv_discovery_xid_cmd(struct irlap_cb *self,
 	 */
 	if (info->s == 0xff) {
 		/* Check if things are sane at this point... */
-		if((discovery_info == NULL) || 
+		if((discovery_info == NULL) ||
 		   !pskb_may_pull(skb, 3)) {
-			ERROR("%s: discovery frame to short!\n", __FUNCTION__);
+			IRDA_ERROR("%s: discovery frame too short!\n",
+				   __func__);
 			return;
 		}
 
@@ -528,7 +546,7 @@ static void irlap_recv_discovery_xid_cmd(struct irlap_cb *self,
 		 */
 		discovery = kmalloc(sizeof(discovery_t), GFP_ATOMIC);
 		if (!discovery) {
-			WARNING("%s: unable to malloc!\n", __FUNCTION__);
+			IRDA_WARNING("%s: unable to malloc!\n", __func__);
 			return;
 		}
 
@@ -570,18 +588,18 @@ static void irlap_recv_discovery_xid_cmd(struct irlap_cb *self,
 void irlap_send_rr_frame(struct irlap_cb *self, int command)
 {
 	struct sk_buff *tx_skb;
-	__u8 *frame;
+	struct rr_frame *frame;
 
-	tx_skb = dev_alloc_skb(16);
+	tx_skb = alloc_skb(sizeof(struct rr_frame), GFP_ATOMIC);
 	if (!tx_skb)
 		return;
 
-	frame = skb_put(tx_skb, 2);
+	frame = (struct rr_frame *)skb_put(tx_skb, 2);
 
-	frame[0] = self->caddr;
-	frame[0] |= (command) ? CMD_FRAME : 0;
+	frame->caddr = self->caddr;
+	frame->caddr |= (command) ? CMD_FRAME : 0;
 
-	frame[1] = RR | PF_BIT | (self->vr << 5);
+	frame->control = RR | PF_BIT | (self->vr << 5);
 
 	irlap_queue_xmit(self, tx_skb);
 }
@@ -595,16 +613,16 @@ void irlap_send_rr_frame(struct irlap_cb *self, int command)
 void irlap_send_rd_frame(struct irlap_cb *self)
 {
 	struct sk_buff *tx_skb;
-	__u8 *frame;
+	struct rd_frame *frame;
 
-	tx_skb = dev_alloc_skb(16);
+	tx_skb = alloc_skb(sizeof(struct rd_frame), GFP_ATOMIC);
 	if (!tx_skb)
 		return;
 
-	frame = skb_put(tx_skb, 2);
+	frame = (struct rd_frame *)skb_put(tx_skb, 2);
 
-	frame[0] = self->caddr;
-	frame[1] = RD_RSP | PF_BIT;
+	frame->caddr = self->caddr;
+	frame->caddr = RD_RSP | PF_BIT;
 
 	irlap_queue_xmit(self, tx_skb);
 }
@@ -629,34 +647,6 @@ static inline void irlap_recv_rr_frame(struct irlap_cb *self,
 		irlap_do_event(self, RECV_RR_RSP, skb, info);
 }
 
-void irlap_send_frmr_frame( struct irlap_cb *self, int command)
-{
-	struct sk_buff *tx_skb = NULL;
-	__u8 *frame;
-
-	ASSERT( self != NULL, return;);
-	ASSERT( self->magic == LAP_MAGIC, return;);
-
-	tx_skb = dev_alloc_skb( 32);
-	if (!tx_skb)
-		return;
-
-	frame = skb_put(tx_skb, 2);
-
-	frame[0] = self->caddr;
-	frame[0] |= (command) ? CMD_FRAME : 0;
-
-	frame[1]  = (self->vs << 1);
-	frame[1] |= PF_BIT;
-	frame[1] |= (self->vr << 5);
-
-	frame[2] = 0;
-
-	IRDA_DEBUG(4, "%s(), vr=%d, %ld\n", __FUNCTION__, self->vr, jiffies);
-
-	irlap_queue_xmit(self, tx_skb);
-}
-
 /*
  * Function irlap_recv_rnr_frame (self, skb, info)
  *
@@ -668,7 +658,7 @@ static void irlap_recv_rnr_frame(struct irlap_cb *self, struct sk_buff *skb,
 {
 	info->nr = skb->data[1] >> 5;
 
-	IRDA_DEBUG(4, "%s(), nr=%d, %ld\n", __FUNCTION__, info->nr, jiffies);
+	IRDA_DEBUG(4, "%s(), nr=%d, %ld\n", __func__, info->nr, jiffies);
 
 	if (command)
 		irlap_do_event(self, RECV_RNR_CMD, skb, info);
@@ -679,7 +669,7 @@ static void irlap_recv_rnr_frame(struct irlap_cb *self, struct sk_buff *skb,
 static void irlap_recv_rej_frame(struct irlap_cb *self, struct sk_buff *skb,
 				 struct irlap_info *info, int command)
 {
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __func__);
 
 	info->nr = skb->data[1] >> 5;
 
@@ -693,7 +683,7 @@ static void irlap_recv_rej_frame(struct irlap_cb *self, struct sk_buff *skb,
 static void irlap_recv_srej_frame(struct irlap_cb *self, struct sk_buff *skb,
 				  struct irlap_info *info, int command)
 {
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __func__);
 
 	info->nr = skb->data[1] >> 5;
 
@@ -707,7 +697,7 @@ static void irlap_recv_srej_frame(struct irlap_cb *self, struct sk_buff *skb,
 static void irlap_recv_disc_frame(struct irlap_cb *self, struct sk_buff *skb,
 				  struct irlap_info *info, int command)
 {
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, "%s()\n", __func__);
 
 	/* Check if this is a command or a response frame */
 	if (command)
@@ -766,7 +756,7 @@ void irlap_send_data_primary(struct irlap_cb *self, struct sk_buff *skb)
 
 		irlap_send_i_frame( self, tx_skb, CMD_FRAME);
 	} else {
-		IRDA_DEBUG(4, "%s(), sending unreliable frame\n", __FUNCTION__);
+		IRDA_DEBUG(4, "%s(), sending unreliable frame\n", __func__);
 		irlap_send_ui_frame(self, skb_get(skb), self->caddr, CMD_FRAME);
 		self->window -= 1;
 	}
@@ -779,6 +769,7 @@ void irlap_send_data_primary(struct irlap_cb *self, struct sk_buff *skb)
 void irlap_send_data_primary_poll(struct irlap_cb *self, struct sk_buff *skb)
 {
 	struct sk_buff *tx_skb;
+	int transmission_time;
 
 	/* Stop P timer */
 	del_timer(&self->poll_timer);
@@ -815,27 +806,66 @@ void irlap_send_data_primary_poll(struct irlap_cb *self, struct sk_buff *skb)
 		self->vs = (self->vs + 1) % 8;
 		self->ack_required = FALSE;
 
+		irlap_next_state(self, LAP_NRM_P);
 		irlap_send_i_frame(self, tx_skb, CMD_FRAME);
 	} else {
-		IRDA_DEBUG(4, "%s(), sending unreliable frame\n", __FUNCTION__);
+		IRDA_DEBUG(4, "%s(), sending unreliable frame\n", __func__);
 
 		if (self->ack_required) {
 			irlap_send_ui_frame(self, skb_get(skb), self->caddr, CMD_FRAME);
+			irlap_next_state(self, LAP_NRM_P);
 			irlap_send_rr_frame(self, CMD_FRAME);
 			self->ack_required = FALSE;
 		} else {
 			skb->data[1] |= PF_BIT;
+			irlap_next_state(self, LAP_NRM_P);
 			irlap_send_ui_frame(self, skb_get(skb), self->caddr, CMD_FRAME);
 		}
 	}
 
+	/* How much time we took for transmission of all frames.
+	 * We don't know, so let assume we used the full window. Jean II */
+	transmission_time = self->final_timeout;
+
+	/* Reset parameter so that we can fill next window */
 	self->window = self->window_size;
+
 #ifdef CONFIG_IRDA_DYNAMIC_WINDOW
+	/* Remove what we have not used. Just do a prorata of the
+	 * bytes left in window to window capacity.
+	 * See max_line_capacities[][] in qos.c for details. Jean II */
+	transmission_time -= (self->final_timeout * self->bytes_left
+			      / self->line_capacity);
+	IRDA_DEBUG(4, "%s() adjusting transmission_time : ft=%d, bl=%d, lc=%d -> tt=%d\n", __func__, self->final_timeout, self->bytes_left, self->line_capacity, transmission_time);
+
 	/* We are allowed to transmit a maximum number of bytes again. */
 	self->bytes_left = self->line_capacity;
 #endif /* CONFIG_IRDA_DYNAMIC_WINDOW */
 
-	irlap_start_final_timer(self, self->final_timeout);
+	/*
+	 * The network layer has a intermediate buffer between IrLAP
+	 * and the IrDA driver which can contain 8 frames. So, even
+	 * though IrLAP is currently sending the *last* frame of the
+	 * tx-window, the driver most likely has only just started
+	 * sending the *first* frame of the same tx-window.
+	 * I.e. we are always at the very beginning of or Tx window.
+	 * Now, we are supposed to set the final timer from the end
+	 * of our tx-window to let the other peer reply. So, we need
+	 * to add extra time to compensate for the fact that we
+	 * are really at the start of tx-window, otherwise the final timer
+	 * might expire before he can answer...
+	 * Jean II
+	 */
+	irlap_start_final_timer(self, self->final_timeout + transmission_time);
+
+	/*
+	 * The clever amongst you might ask why we do this adjustement
+	 * only here, and not in all the other cases in irlap_event.c.
+	 * In all those other case, we only send a very short management
+	 * frame (few bytes), so the adjustement would be lost in the
+	 * noise...
+	 * The exception of course is irlap_resend_rejected_frame().
+	 * Jean II */
 }
 
 /*
@@ -849,9 +879,9 @@ void irlap_send_data_secondary_final(struct irlap_cb *self,
 {
 	struct sk_buff *tx_skb = NULL;
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
-	ASSERT(skb != NULL, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(skb != NULL, return;);
 
 	/* Is this reliable or unreliable data? */
 	if (skb->data[1] == I_FRAME) {
@@ -953,17 +983,12 @@ void irlap_resend_rejected_frames(struct irlap_cb *self, int command)
 {
 	struct sk_buff *tx_skb;
 	struct sk_buff *skb;
-	int count;
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
-
-	/* Initialize variables */
-	count = skb_queue_len(&self->wx_list);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
 
 	/*  Resend unacknowledged frame(s) */
-	skb = skb_peek(&self->wx_list);
-	while (skb != NULL) {
+	skb_queue_walk(&self->wx_list, skb) {
 		irlap_wait_min_turn_around(self, &self->qos_tx);
 
 		/* We copy the skb to be retransmitted since we will have to
@@ -972,12 +997,9 @@ void irlap_resend_rejected_frames(struct irlap_cb *self, int command)
 		/* tx_skb = skb_clone( skb, GFP_ATOMIC); */
 		tx_skb = skb_copy(skb, GFP_ATOMIC);
 		if (!tx_skb) {
-			IRDA_DEBUG(0, "%s(), unable to copy\n", __FUNCTION__);
+			IRDA_DEBUG(0, "%s(), unable to copy\n", __func__);
 			return;
 		}
-		/* Unlink tx_skb from list */
-		tx_skb->next = tx_skb->prev = NULL;
-		tx_skb->list = NULL;
 
 		/* Clear old Nr field + poll bit */
 		tx_skb->data[1] &= 0x0f;
@@ -985,41 +1007,30 @@ void irlap_resend_rejected_frames(struct irlap_cb *self, int command)
 		/*
 		 *  Set poll bit on the last frame retransmitted
 		 */
-		if (count-- == 1)
+		if (skb_queue_is_last(&self->wx_list, skb))
 			tx_skb->data[1] |= PF_BIT; /* Set p/f bit */
 		else
 			tx_skb->data[1] &= ~PF_BIT; /* Clear p/f bit */
 
 		irlap_send_i_frame(self, tx_skb, command);
-
-		/*
-		 *  If our skb is the last buffer in the list, then
-		 *  we are finished, if not, move to the next sk-buffer
-		 */
-		if (skb == skb_peek_tail(&self->wx_list))
-			skb = NULL;
-		else
-			skb = skb->next;
 	}
 #if 0 /* Not yet */
 	/*
-	 *  We can now fill the window with additinal data frames
+	 *  We can now fill the window with additional data frames
 	 */
-	while (skb_queue_len( &self->txq) > 0) {
+	while (!skb_queue_empty(&self->txq)) {
 
-		IRDA_DEBUG(0, "%s(), sending additional frames!\n", __FUNCTION__);
-		if ((skb_queue_len( &self->txq) > 0) &&
-		    (self->window > 0)) {
+		IRDA_DEBUG(0, "%s(), sending additional frames!\n", __func__);
+		if (self->window > 0) {
 			skb = skb_dequeue( &self->txq);
-			ASSERT(skb != NULL, return;);
+			IRDA_ASSERT(skb != NULL, return;);
 
 			/*
 			 *  If send window > 1 then send frame with pf
 			 *  bit cleared
 			 */
 			if ((self->window > 1) &&
-			    skb_queue_len(&self->txq) > 0)
-			{
+			    !skb_queue_empty(&self->txq)) {
 				irlap_send_data_primary(self, skb);
 			} else {
 				irlap_send_data_primary_poll(self, skb);
@@ -1035,8 +1046,8 @@ void irlap_resend_rejected_frame(struct irlap_cb *self, int command)
 	struct sk_buff *tx_skb;
 	struct sk_buff *skb;
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
 
 	/*  Resend unacknowledged frame(s) */
 	skb = skb_peek(&self->wx_list);
@@ -1049,12 +1060,9 @@ void irlap_resend_rejected_frame(struct irlap_cb *self, int command)
 		/* tx_skb = skb_clone( skb, GFP_ATOMIC); */
 		tx_skb = skb_copy(skb, GFP_ATOMIC);
 		if (!tx_skb) {
-			IRDA_DEBUG(0, "%s(), unable to copy\n", __FUNCTION__);
+			IRDA_DEBUG(0, "%s(), unable to copy\n", __func__);
 			return;
 		}
-		/* Unlink tx_skb from list */
-		tx_skb->next = tx_skb->prev = NULL;
-		tx_skb->list = NULL;
 
 		/* Clear old Nr field + poll bit */
 		tx_skb->data[1] &= 0x0f;
@@ -1075,11 +1083,11 @@ void irlap_resend_rejected_frame(struct irlap_cb *self, int command)
 void irlap_send_ui_frame(struct irlap_cb *self, struct sk_buff *skb,
 			 __u8 caddr, int command)
 {
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, "%s()\n", __func__);
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
-	ASSERT(skb != NULL, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(skb != NULL, return;);
 
 	/* Insert connection address */
 	skb->data[0] = caddr | ((command) ? CMD_FRAME : 0);
@@ -1092,8 +1100,8 @@ void irlap_send_ui_frame(struct irlap_cb *self, struct sk_buff *skb,
  *
  *    Contruct and transmit Information (I) frame
  */
-void irlap_send_i_frame(struct irlap_cb *self, struct sk_buff *skb,
-			int command)
+static void irlap_send_i_frame(struct irlap_cb *self, struct sk_buff *skb,
+			       int command)
 {
 	/* Insert connection address */
 	skb->data[0] = self->caddr;
@@ -1135,7 +1143,7 @@ static inline void irlap_recv_i_frame(struct irlap_cb *self,
 static void irlap_recv_ui_frame(struct irlap_cb *self, struct sk_buff *skb,
 				struct irlap_info *info)
 {
-	IRDA_DEBUG( 4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG( 4, "%s()\n", __func__);
 
 	info->pf = skb->data[1] & PF_BIT;      /* Final bit */
 
@@ -1154,15 +1162,15 @@ static void irlap_recv_frmr_frame(struct irlap_cb *self, struct sk_buff *skb,
 	__u8 *frame;
 	int w, x, y, z;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __func__);
 
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
-	ASSERT(skb != NULL, return;);
-	ASSERT(info != NULL, return;);
+	IRDA_ASSERT(self != NULL, return;);
+	IRDA_ASSERT(self->magic == LAP_MAGIC, return;);
+	IRDA_ASSERT(skb != NULL, return;);
+	IRDA_ASSERT(info != NULL, return;);
 
 	if (!pskb_may_pull(skb, 4)) {
-		ERROR("%s: frame to short!\n", __FUNCTION__);
+		IRDA_ERROR("%s: frame too short!\n", __func__);
 		return;
 	}
 
@@ -1210,7 +1218,7 @@ void irlap_send_test_frame(struct irlap_cb *self, __u8 caddr, __u32 daddr,
 	struct test_frame *frame;
 	__u8 *info;
 
-	tx_skb = dev_alloc_skb(cmd->len+sizeof(struct test_frame));
+	tx_skb = alloc_skb(cmd->len + sizeof(struct test_frame), GFP_ATOMIC);
 	if (!tx_skb)
 		return;
 
@@ -1248,10 +1256,10 @@ static void irlap_recv_test_frame(struct irlap_cb *self, struct sk_buff *skb,
 {
 	struct test_frame *frame;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, "%s()\n", __func__);
 
 	if (!pskb_may_pull(skb, sizeof(*frame))) {
-		ERROR("%s: frame to short!\n", __FUNCTION__);
+		IRDA_ERROR("%s: frame too short!\n", __func__);
 		return;
 	}
 	frame = (struct test_frame *) skb->data;
@@ -1259,8 +1267,8 @@ static void irlap_recv_test_frame(struct irlap_cb *self, struct sk_buff *skb,
 	/* Broadcast frames must carry saddr and daddr fields */
 	if (info->caddr == CBROADCAST) {
 		if (skb->len < sizeof(struct test_frame)) {
-			IRDA_DEBUG(0, "%s() test frame to short!\n",
-				   __FUNCTION__);
+			IRDA_DEBUG(0, "%s() test frame too short!\n",
+				   __func__);
 			return;
 		}
 
@@ -1298,36 +1306,36 @@ static void irlap_recv_test_frame(struct irlap_cb *self, struct sk_buff *skb,
  * Jean II
  */
 int irlap_driver_rcv(struct sk_buff *skb, struct net_device *dev,
-		     struct packet_type *ptype)
+		     struct packet_type *ptype, struct net_device *orig_dev)
 {
 	struct irlap_info info;
 	struct irlap_cb *self;
 	int command;
 	__u8 control;
+	int ret = -1;
+
+	if (!net_eq(dev_net(dev), &init_net))
+		goto out;
 
 	/* FIXME: should we get our own field? */
 	self = (struct irlap_cb *) dev->atalk_ptr;
 
 	/* If the net device is down, then IrLAP is gone! */
-	if (!self || self->magic != LAP_MAGIC) {
-		dev_kfree_skb(skb);
-		return -1;
-	}
+	if (!self || self->magic != LAP_MAGIC)
+		goto err;
 
 	/* We are no longer an "old" protocol, so we need to handle
 	 * share and non linear skbs. This should never happen, so
 	 * we don't need to be clever about it. Jean II */
 	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL) {
-		ERROR("%s: can't clone shared skb!\n", __FUNCTION__);
-		dev_kfree_skb(skb);
-		return -1;
+		IRDA_ERROR("%s: can't clone shared skb!\n", __func__);
+		goto err;
 	}
 
 	/* Check if frame is large enough for parsing */
 	if (!pskb_may_pull(skb, 2)) {
-		ERROR("%s: frame to short!\n", __FUNCTION__);
-		dev_kfree_skb(skb);
-		return -1;
+		IRDA_ERROR("%s: frame too short!\n", __func__);
+		goto err;
 	}
 
 	command    = skb->data[0] & CMD_FRAME;
@@ -1341,7 +1349,7 @@ int irlap_driver_rcv(struct sk_buff *skb, struct net_device *dev,
 	/*  First we check if this frame has a valid connection address */
 	if ((info.caddr != self->caddr) && (info.caddr != CBROADCAST)) {
 		IRDA_DEBUG(0, "%s(), wrong connection address!\n",
-			   __FUNCTION__);
+			   __func__);
 		goto out;
 	}
 	/*
@@ -1375,8 +1383,8 @@ int irlap_driver_rcv(struct sk_buff *skb, struct net_device *dev,
 			irlap_recv_srej_frame(self, skb, &info, command);
 			break;
 		default:
-			WARNING("%s: Unknown S-frame %02x received!\n",
-				__FUNCTION__, info.control);
+			IRDA_WARNING("%s: Unknown S-frame %02x received!\n",
+				__func__, info.control);
 			break;
 		}
 		goto out;
@@ -1413,12 +1421,14 @@ int irlap_driver_rcv(struct sk_buff *skb, struct net_device *dev,
 		irlap_recv_ui_frame(self, skb, &info);
 		break;
 	default:
-		WARNING("%s: Unknown frame %02x received!\n",
-				__FUNCTION__, info.control);
+		IRDA_WARNING("%s: Unknown frame %02x received!\n",
+				__func__, info.control);
 		break;
 	}
 out:
+	ret = 0;
+err:
 	/* Always drop our reference on the skb */
 	dev_kfree_skb(skb);
-	return 0;
+	return ret;
 }

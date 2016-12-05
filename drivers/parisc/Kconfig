@@ -103,13 +103,29 @@ config IOMMU_SBA
 	depends on PCI_LBA
 	default PCI_LBA
 
+config IOMMU_HELPER
+	bool
+	depends on IOMMU_SBA || IOMMU_CCIO
+	default y
+
 #config PCI_EPIC
 #	bool "EPIC/SAGA PCI support"
 #	depends on PCI
+#	default y
+#	help
+#	  Say Y here for V-class PCI, DMA/IOMMU, IRQ subsystem support.
+
+source "drivers/pcmcia/Kconfig"
+
+source "drivers/pci/hotplug/Kconfig"
+
+endmenu
+
+menu "PA-RISC specific drivers"
 
 config SUPERIO
 	bool "SuperIO (SuckyIO) support"
-	depends on PCI
+	depends on PCI_LBA
 	default y
 	help
 	  Say Y here to support the SuperIO chip found in Bxxxx, C3xxx and
@@ -124,31 +140,54 @@ config CHASSIS_LCD_LED
 	  Disk/Network activities LEDs on some PA-RISC machines,
 	  or support for the LCD that can be found on recent material.
 	
-	  This has nothing to do with LED State support for A, J and E class.
+	  This has nothing to do with LED State support for A and E class.
 	
 	  If unsure, say Y.
 
-config HOTPLUG
-	bool "Support for hot-pluggable devices"
-	---help---
-	  Say Y here if you want to plug devices into your computer while
-	  the system is running, and be able to use them quickly.  In many
-	  cases, the devices can likewise be unplugged at any time too.
+config PDC_CHASSIS
+	bool "PDC chassis state codes support"
+	default y
+	help
+	  Say Y here if you want to enable support for Chassis codes.
+	  That includes support for LED State front panel as found on E
+	  class, and support for the GSP Virtual Front Panel (LED State and
+	  message logging)  as found on high end servers such as A, L and
+	  N-class.
+	  This driver will also display progress messages on LCD display,
+	  such as "INI", "RUN" and "FLT", and might thus clobber messages
+	  shown by the LED/LCD driver.
+	  This driver updates the state panel (LED and/or LCD) upon system
+	  state change (eg: boot, shutdown or panic).
+	  
+	  If unsure, say Y.
 
-	  One well known example of this is PCMCIA- or PC-cards, credit-card
-	  size devices such as network cards, modems or hard drives which are
-	  plugged into slots found on all modern laptop computers.  Another
-	  example, used on modern desktops as well as laptops, is USB.
 
-	  Enable HOTPLUG and KMOD, and build a modular kernel.  Get agent
-	  software (at <http://linux-hotplug.sourceforge.net/>) and install it.
-	  Then your kernel will automatically call out to a user mode "policy
-	  agent" (/sbin/hotplug) to load modules and set up software needed
-	  to use devices as you hotplug them.
+config PDC_CHASSIS_WARN
+	bool "PDC chassis warnings support"
+	depends on PROC_FS
+	default y
+	help
+	  Say Y here if you want to enable support for Chassis warnings.
+	  This will add a proc entry '/proc/chassis' giving some information
+	  about the overall health state of the system.
+	  This includes NVRAM battery level, overtemp or failures such as
+	  fans or power units.
 
-source "drivers/pcmcia/Kconfig"
+	  If unsure, say Y.
 
-source "drivers/pci/hotplug/Kconfig"
 
+config PDC_STABLE
+	tristate "PDC Stable Storage support"
+	depends on SYSFS
+	default y
+	help
+	  Say Y here if you want to enable support for accessing Stable Storage
+	  variables (PDC non volatile variables such as Primary Boot Path,
+	  Console Path, Autoboot, Autosearch, etc) through SysFS.
+	
+	  If unsure, say Y.
+	
+	  To compile this driver as a module, choose M here.
+	  The module will be called pdc_stable.
 
 endmenu

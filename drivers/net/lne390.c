@@ -49,11 +49,9 @@ static const char *version =
 
 #include "8390.h"
 
-int lne390_probe(struct net_device *dev);
-static int lne390_probe1(struct net_device *dev, int ioaddr);
+#define DRV_NAME "lne390"
 
-static int lne390_open(struct net_device *dev);
-static int lne390_close(struct net_device *dev);
+static int lne390_probe1(struct net_device *dev, int ioaddr);
 
 static void lne390_reset_8390(struct net_device *dev);
 
@@ -103,15 +101,15 @@ static unsigned int shmem_mapB[] __initdata = {0xff, 0xfe, 0x0e, 0xfff, 0xffe, 0
  *	PROM for a match against the value assigned to Mylex.
  */
 
-int __init lne390_probe(struct net_device *dev)
+static int __init do_lne390_probe(struct net_device *dev)
 {
 	unsigned short ioaddr = dev->base_addr;
+	int irq = dev->irq;
+	int mem_start = dev->mem_start;
 	int ret;
 
-	SET_MODULE_OWNER(dev);
-
 	if (ioaddr > 0x1ff) {		/* Check a single specified location. */
-		if (!request_region(ioaddr, LNE390_IO_EXTENT, dev->name))
+		if (!request_region(ioaddr, LNE390_IO_EXTENT, DRV_NAME))
 			return -EBUSY;
 		ret = lne390_probe1(dev, ioaddr);
 		if (ret)
@@ -130,15 +128,39 @@ int __init lne390_probe(struct net_device *dev)
 
 	/* EISA spec allows for up to 16 slots, but 8 is typical. */
 	for (ioaddr = 0x1000; ioaddr < 0x9000; ioaddr += 0x1000) {
-		if (!request_region(ioaddr, LNE390_IO_EXTENT, dev->name))
+		if (!request_region(ioaddr, LNE390_IO_EXTENT, DRV_NAME))
 			continue;
 		if (lne390_probe1(dev, ioaddr) == 0)
 			return 0;
 		release_region(ioaddr, LNE390_IO_EXTENT);
+		dev->irq = irq;
+		dev->mem_start = mem_start;
 	}
 
 	return -ENODEV;
 }
+
+#ifndef MODULE
+struct net_device * __init lne390_probe(int unit)
+{
+	struct net_device *dev = alloc_ei_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_lne390_probe(dev);
+	if (err)
+		goto out;
+	return dev;
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
 
 static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 {
@@ -161,7 +183,7 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 	}
 
 	revision = (eisa_id >> 24) & 0x01;	/* 0 = rev A, 1 rev B */
-	
+
 #if 0
 /*	Check the Mylex vendor ID as well. Not really required. */
 	if (inb(ioaddr + LNE390_SA_PROM + 0) != LNE390_ADDR0
@@ -174,16 +196,13 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 		return -ENODEV;
 	}
 #endif
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk ("lne390.c: unable to allocate memory for dev->priv!\n");
-		return -ENOMEM;
-	}
 
-	printk("lne390.c: LNE390%X in EISA slot %d, address", 0xa+revision, ioaddr/0x1000);
 	for(i = 0; i < ETHER_ADDR_LEN; i++)
-		printk(" %02x", (dev->dev_addr[i] = inb(ioaddr + LNE390_SA_PROM + i)));
-	printk(".\nlne390.c: ");
+		dev->dev_addr[i] = inb(ioaddr + LNE390_SA_PROM + i);
+	printk("lne390.c: LNE390%X in EISA slot %d, address %pM.\n",
+	       0xa+revision, ioaddr/0x1000, dev->dev_addr);
+
+	printk("lne390.c: ");
 
 	/* Snarf the interrupt now. CFG file has them all listed as `edge' with share=NO */
 	if (dev->irq == 0) {
@@ -197,10 +216,8 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 	}
 	printk(" IRQ %d,", dev->irq);
 
-	if ((ret = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev))) {
+	if ((ret = request_irq(dev->irq, ei_interrupt, 0, DRV_NAME, dev))) {
 		printk (" unable to get IRQ %d.\n", dev->irq);
-		kfree(dev->priv);
-		dev->priv = NULL;
 		return ret;
 	}
 
@@ -224,32 +241,22 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 	/*
 	   BEWARE!! Some dain-bramaged EISA SCUs will allow you to put
 	   the card mem within the region covered by `normal' RAM  !!!
-	*/
-	if (dev->mem_start > 1024*1024) {	/* phys addr > 1MB */
-		if (dev->mem_start < virt_to_phys(high_memory)) {
-			printk(KERN_CRIT "lne390.c: Card RAM overlaps with normal memory!!!\n");
-			printk(KERN_CRIT "lne390.c: Use EISA SCU to set card memory below 1MB,\n");
-			printk(KERN_CRIT "lne390.c: or to an address above 0x%lx.\n", virt_to_phys(high_memory));
-			printk(KERN_CRIT "lne390.c: Driver NOT installed.\n");
-			ret = -EINVAL;
-			goto cleanup;
-		}
-		dev->mem_start = (unsigned long)ioremap(dev->mem_start, LNE390_STOP_PG*0x100);
-		if (dev->mem_start == 0) {
-			printk(KERN_ERR "lne390.c: Unable to remap card memory above 1MB !!\n");
-			printk(KERN_ERR "lne390.c: Try using EISA SCU to set memory below 1MB.\n");
-			printk(KERN_ERR "lne390.c: Driver NOT installed.\n");
-			ret = -EAGAIN;
-			goto cleanup;
-		}
-		ei_status.reg0 = 1;	/* Use as remap flag */
-		printk("lne390.c: remapped %dkB card memory to virtual address %#lx\n",
-				LNE390_STOP_PG/4, dev->mem_start);
-	}
 
-	dev->mem_end = ei_status.rmem_end = dev->mem_start
-		+ (LNE390_STOP_PG - LNE390_START_PG)*256;
-	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
+	   ioremap() will fail in that case.
+	*/
+	ei_status.mem = ioremap(dev->mem_start, LNE390_STOP_PG*0x100);
+	if (!ei_status.mem) {
+		printk(KERN_ERR "lne390.c: Unable to remap card memory above 1MB !!\n");
+		printk(KERN_ERR "lne390.c: Try using EISA SCU to set memory below 1MB.\n");
+		printk(KERN_ERR "lne390.c: Driver NOT installed.\n");
+		ret = -EAGAIN;
+		goto cleanup;
+	}
+	printk("lne390.c: remapped %dkB card memory to virtual address %p\n",
+			LNE390_STOP_PG/4, ei_status.mem);
+
+	dev->mem_start = (unsigned long)ei_status.mem;
+	dev->mem_end = dev->mem_start + (LNE390_STOP_PG - LNE390_START_PG)*256;
 
 	/* The 8390 offset is zero for the LNE390 */
 	dev->base_addr = ioaddr;
@@ -268,14 +275,18 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 	ei_status.block_output = &lne390_block_output;
 	ei_status.get_8390_hdr = &lne390_get_8390_hdr;
 
-	dev->open = &lne390_open;
-	dev->stop = &lne390_close;
+	dev->netdev_ops = &ei_netdev_ops;
 	NS8390_init(dev, 0);
+
+	ret = register_netdev(dev);
+	if (ret)
+		goto unmap;
 	return 0;
+unmap:
+	if (ei_status.reg0)
+		iounmap(ei_status.mem);
 cleanup:
 	free_irq(dev->irq, dev);
-	kfree(dev->priv);
-	dev->priv = NULL;
 	return ret;
 }
 
@@ -296,8 +307,6 @@ static void lne390_reset_8390(struct net_device *dev)
 	ei_status.txing = 0;
 	outb(0x01, ioaddr + LNE390_RESET_PORT);
 	if (ei_debug > 1) printk("reset done\n");
-
-	return;
 }
 
 /*
@@ -318,12 +327,12 @@ static void lne390_reset_8390(struct net_device *dev)
 static void
 lne390_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
-	unsigned long hdr_start = dev->mem_start + ((ring_page - LNE390_START_PG)<<8);
-	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	void __iomem *hdr_start = ei_status.mem + ((ring_page - LNE390_START_PG)<<8);
+	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	hdr->count = (hdr->count + 3) & ~3;     /* Round up allocation. */
 }
 
-/*	
+/*
  *	Block input and output are easy on shared memory ethercards, the only
  *	complication is when the ring buffer wraps. The count will already
  *	be rounded up to a doubleword value via lne390_get_8390_hdr() above.
@@ -332,99 +341,91 @@ lne390_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_
 static void lne390_block_input(struct net_device *dev, int count, struct sk_buff *skb,
 						  int ring_offset)
 {
-	unsigned long xfer_start = dev->mem_start + ring_offset - (LNE390_START_PG<<8);
+	void __iomem *xfer_start = ei_status.mem + ring_offset - (LNE390_START_PG<<8);
 
-	if (xfer_start + count > ei_status.rmem_end) {
+	if (ring_offset + count > (LNE390_STOP_PG<<8)) {
 		/* Packet wraps over end of ring buffer. */
-		int semi_count = ei_status.rmem_end - xfer_start;
-		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
+		int semi_count = (LNE390_STOP_PG<<8) - ring_offset;
+		memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
+		memcpy_fromio(skb->data + semi_count,
+			ei_status.mem + (TX_PAGES<<8), count);
 	} else {
 		/* Packet is in one chunk. */
-		isa_memcpy_fromio(skb->data, xfer_start, count);
+		memcpy_fromio(skb->data, xfer_start, count);
 	}
 }
 
 static void lne390_block_output(struct net_device *dev, int count,
 				const unsigned char *buf, int start_page)
 {
-	unsigned long shmem = dev->mem_start + ((start_page - LNE390_START_PG)<<8);
+	void __iomem *shmem = ei_status.mem + ((start_page - LNE390_START_PG)<<8);
 
 	count = (count + 3) & ~3;     /* Round up to doubleword */
-	isa_memcpy_toio(shmem, buf, count);
+	memcpy_toio(shmem, buf, count);
 }
 
-static int lne390_open(struct net_device *dev)
-{
-	ei_open(dev);
-	return 0;
-}
-
-static int lne390_close(struct net_device *dev)
-{
-
-	if (ei_debug > 1)
-		printk("%s: Shutting down ethercard.\n", dev->name);
-
-	ei_close(dev);
-	return 0;
-}
 
 #ifdef MODULE
 #define MAX_LNE_CARDS	4	/* Max number of LNE390 cards per module */
-static struct net_device dev_lne[MAX_LNE_CARDS];
+static struct net_device *dev_lne[MAX_LNE_CARDS];
 static int io[MAX_LNE_CARDS];
 static int irq[MAX_LNE_CARDS];
 static int mem[MAX_LNE_CARDS];
 
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_LNE_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_LNE_CARDS) "i");
-MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_LNE_CARDS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(mem, int, NULL, 0);
 MODULE_PARM_DESC(io, "I/O base address(es)");
 MODULE_PARM_DESC(irq, "IRQ number(s)");
 MODULE_PARM_DESC(mem, "memory base address(es)");
 MODULE_DESCRIPTION("Mylex LNE390A/B EISA Ethernet driver");
 MODULE_LICENSE("GPL");
 
-int init_module(void)
+int __init init_module(void)
 {
+	struct net_device *dev;
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_LNE_CARDS; this_dev++) {
-		struct net_device *dev = &dev_lne[this_dev];
+		if (io[this_dev] == 0 && this_dev != 0)
+			break;
+		dev = alloc_ei_netdev();
+		if (!dev)
+			break;
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->mem_start = mem[this_dev];
-		dev->init = lne390_probe;
-		/* Default is to only install one card. */
-		if (io[this_dev] == 0 && this_dev != 0) break;
-		if (register_netdev(dev) != 0) {
-			printk(KERN_WARNING "lne390.c: No LNE390 card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) {	/* Got at least one. */
-				return 0;
-			}
-			return -ENXIO;
+		if (do_lne390_probe(dev) == 0) {
+			dev_lne[found++] = dev;
+			continue;
 		}
-		found++;
+		free_netdev(dev);
+		printk(KERN_WARNING "lne390.c: No LNE390 card found (i/o = 0x%x).\n", io[this_dev]);
+		break;
 	}
-	return 0;
+	if (found)
+		return 0;
+	return -ENXIO;
 }
 
-void cleanup_module(void)
+static void cleanup_card(struct net_device *dev)
+{
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, LNE390_IO_EXTENT);
+	iounmap(ei_status.mem);
+}
+
+void __exit cleanup_module(void)
 {
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_LNE_CARDS; this_dev++) {
-		struct net_device *dev = &dev_lne[this_dev];
-		if (dev->priv != NULL) {
-			void *priv = dev->priv;
-			free_irq(dev->irq, dev);
-			release_region(dev->base_addr, LNE390_IO_EXTENT);
-			if (ei_status.reg0)
-				iounmap((void *)dev->mem_start);
+		struct net_device *dev = dev_lne[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
-			kfree(priv);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }

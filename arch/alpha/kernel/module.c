@@ -47,7 +47,7 @@ module_free(struct module *mod, void *module_region)
 
 struct got_entry {
 	struct got_entry *next;
-	Elf64_Addr r_offset;
+	Elf64_Sxword r_addend;
 	int got_offset;
 };
 
@@ -57,14 +57,14 @@ process_reloc_for_got(Elf64_Rela *rela,
 {
 	unsigned long r_sym = ELF64_R_SYM (rela->r_info);
 	unsigned long r_type = ELF64_R_TYPE (rela->r_info);
-	Elf64_Addr r_offset = rela->r_offset;
+	Elf64_Sxword r_addend = rela->r_addend;
 	struct got_entry *g;
 
 	if (r_type != R_ALPHA_LITERAL)
 		return;
 
 	for (g = chains + r_sym; g ; g = g->next)
-		if (g->r_offset == r_offset) {
+		if (g->r_addend == r_addend) {
 			if (g->got_offset == 0) {
 				g->got_offset = *poffset;
 				*poffset += 8;
@@ -74,7 +74,7 @@ process_reloc_for_got(Elf64_Rela *rela,
 
 	g = kmalloc (sizeof (*g), GFP_KERNEL);
 	g->next = chains[r_sym].next;
-	g->r_offset = r_offset;
+	g->r_addend = r_addend;
 	g->got_offset = *poffset;
 	*poffset += 8;
 	chains[r_sym].next = g;
@@ -119,8 +119,13 @@ module_frob_arch_sections(Elf64_Ehdr *hdr, Elf64_Shdr *sechdrs,
 	}
 
 	nsyms = symtab->sh_size / sizeof(Elf64_Sym);
-	chains = kmalloc(nsyms * sizeof(struct got_entry), GFP_KERNEL);
-	memset(chains, 0, nsyms * sizeof(struct got_entry));
+	chains = kcalloc(nsyms, sizeof(struct got_entry), GFP_KERNEL);
+	if (!chains) {
+		printk(KERN_ERR
+		       "module %s: no memory for symbol chain buffer\n",
+		       me->name);
+		return -ENOMEM;
+	}
 
 	got->sh_size = 0;
 	got->sh_addralign = 8;
@@ -234,6 +239,10 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 			   value was resolved from somewhere else.  */
 			if (sym->st_shndx == SHN_UNDEF)
 				goto reloc_overflow;
+			if ((sym->st_other & STO_ALPHA_STD_GPLOAD) ==
+			    STO_ALPHA_STD_GPLOAD)
+				/* Omit the prologue. */
+				value += 8;
 			/* FALLTHRU */
 		case R_ALPHA_BRADDR:
 			value -= (u64)location + 4;
@@ -259,7 +268,7 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 			*(u64 *)location = value;
 			break;
 		case R_ALPHA_GPRELHIGH:
-			value = (value - gp + 0x8000) >> 16;
+			value = (long)(value - gp + 0x8000) >> 16;
 			if ((short) value != value)
 				goto reloc_overflow;
 			*(u16 *)location = value;
@@ -281,12 +290,12 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 		reloc_overflow:
 			if (ELF64_ST_TYPE (sym->st_info) == STT_SECTION)
 			  printk(KERN_ERR
-			         "module %s: Relocation overflow vs section %d\n",
-			         me->name, sym->st_shndx);
+			         "module %s: Relocation (type %lu) overflow vs section %d\n",
+			         me->name, r_type, sym->st_shndx);
 			else
 			  printk(KERN_ERR
-			         "module %s: Relocation overflow vs %s\n",
-			         me->name, strtab + sym->st_name);
+			         "module %s: Relocation (type %lu) overflow vs %s\n",
+			         me->name, r_type, strtab + sym->st_name);
 			return -ENOEXEC;
 		}
 	}

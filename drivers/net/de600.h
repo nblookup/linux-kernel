@@ -121,17 +121,15 @@ static u8	de600_read_byte(unsigned char type, struct net_device *dev);
 /* Put in the device structure. */
 static int	de600_open(struct net_device *dev);
 static int	de600_close(struct net_device *dev);
-static struct net_device_stats *get_stats(struct net_device *dev);
 static int	de600_start_xmit(struct sk_buff *skb, struct net_device *dev);
 
 /* Dispatch from interrupts. */
-static irqreturn_t de600_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t de600_interrupt(int irq, void *dev_id);
 static int	de600_tx_intr(struct net_device *dev, int irq_status);
 static void	de600_rx_intr(struct net_device *dev);
 
 /* Initialization */
 static void	trigger_interrupt(struct net_device *dev);
-int		de600_probe(struct net_device *dev);
 static int	adapter_init(struct net_device *dev);
 
 /*

@@ -11,29 +11,38 @@
  */
 
 #include <linux/module.h>
-
+#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/genhd.h>
 #include <linux/kernel.h>
 #include <linux/blkdev.h>
 #include <linux/buffer_head.h>
 #include <asm/unaligned.h>
-#include "scsi.h"
-#include "hosts.h"
+
 #include <scsi/scsicam.h>
+
 
 static int setsize(unsigned long capacity, unsigned int *cyls, unsigned int *hds,
 		   unsigned int *secs);
 
+/**
+ * scsi_bios_ptable - Read PC partition table out of first sector of device.
+ * @dev: from this device
+ *
+ * Description: Reads the first sector from the device and returns %0x42 bytes
+ *              starting at offset %0x1be.
+ * Returns: partition table in kmalloc(GFP_KERNEL) memory, or NULL on error.
+ */
 unsigned char *scsi_bios_ptable(struct block_device *dev)
 {
 	unsigned char *res = kmalloc(66, GFP_KERNEL);
 	if (res) {
 		struct block_device *bdev = dev->bd_contains;
-		struct buffer_head *bh = __bread(bdev, 0, block_size(bdev));
-		if (bh) {
-			memcpy(res, bh->b_data + 0x1be, 66);
-			brelse(bh);
+		Sector sect;
+		void *data = read_dev_sector(bdev, 0, &sect);
+		if (data) {
+			memcpy(res, data + 0x1be, 66);
+			put_dev_sector(sect);
 		} else {
 			kfree(res);
 			res = NULL;
@@ -41,21 +50,25 @@ unsigned char *scsi_bios_ptable(struct block_device *dev)
 	}
 	return res;
 }
+EXPORT_SYMBOL(scsi_bios_ptable);
 
-/*
- * Function : int scsicam_bios_param (struct block_device *bdev, ector_t capacity, int *ip)
+/**
+ * scsicam_bios_param - Determine geometry of a disk in cylinders/heads/sectors.
+ * @bdev: which device
+ * @capacity: size of the disk in sectors
+ * @ip: return value: ip[0]=heads, ip[1]=sectors, ip[2]=cylinders
  *
- * Purpose : to determine the BIOS mapping used for a drive in a 
+ * Description : determine the BIOS mapping/geometry used for a drive in a
  *      SCSI-CAM system, storing the results in ip as required
  *      by the HDIO_GETGEO ioctl().
  *
  * Returns : -1 on failure, 0 on success.
- *
  */
 
 int scsicam_bios_param(struct block_device *bdev, sector_t capacity, int *ip)
 {
 	unsigned char *p;
+	u64 capacity64 = capacity;	/* Suppress gcc warning */
 	int ret;
 
 	p = scsi_bios_ptable(bdev);
@@ -67,7 +80,7 @@ int scsicam_bios_param(struct block_device *bdev, sector_t capacity, int *ip)
 			       (unsigned int *)ip + 0, (unsigned int *)ip + 1);
 	kfree(p);
 
-	if (ret == -1) {
+	if (ret == -1 && capacity64 < (1ULL << 32)) {
 		/* pick some standard mapping with at most 1024 cylinders,
 		   and at most 62 sectors per track - this works up to
 		   7905 MB */
@@ -94,16 +107,20 @@ int scsicam_bios_param(struct block_device *bdev, sector_t capacity, int *ip)
 
 	return 0;
 }
+EXPORT_SYMBOL(scsicam_bios_param);
 
-/*
- * Function : static int scsi_partsize(unsigned char *buf, unsigned long 
- *     capacity,unsigned int *cyls, unsigned int *hds, unsigned int *secs);
+/**
+ * scsi_partsize - Parse cylinders/heads/sectors from PC partition table
+ * @buf: partition table, see scsi_bios_ptable()
+ * @capacity: size of the disk in sectors
+ * @cyls: put cylinders here
+ * @hds: put heads here
+ * @secs: put sectors here
  *
- * Purpose : to determine the BIOS mapping used to create the partition
+ * Description: determine the BIOS mapping/geometry used to create the partition
  *      table, storing the results in *cyls, *hds, and *secs 
  *
- * Returns : -1 on failure, 0 on success.
- *
+ * Returns: -1 on failure, 0 on success.
  */
 
 int scsi_partsize(unsigned char *buf, unsigned long capacity,
@@ -175,6 +192,7 @@ int scsi_partsize(unsigned char *buf, unsigned long capacity,
 	}
 	return -1;
 }
+EXPORT_SYMBOL(scsi_partsize);
 
 /*
  * Function : static int setsize(unsigned long capacity,unsigned int *cyls,
@@ -190,7 +208,7 @@ int scsi_partsize(unsigned char *buf, unsigned long capacity,
  *
  * WORKING                                                    X3T9.2
  * DRAFT                                                        792D
- *
+ * see http://www.t10.org/ftp/t10/drafts/cam/cam-r12b.pdf
  *
  *                                                        Revision 6
  *                                                         10-MAR-94

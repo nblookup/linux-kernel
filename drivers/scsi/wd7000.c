@@ -146,13 +146,13 @@
  *
  * use host->host_lock, not io_request_lock, cleanups
  *
- * 2002/10/04 - Alan Cox <alan@redhat.com>
+ * 2002/10/04 - Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
- * Use dev_id for interrupts, kill __FUNCTION__ pasting
+ * Use dev_id for interrupts, kill __func__ pasting
  * Add a lock for the scb pool, clean up all other cli/sti usage stuff
  * Use the adapter lock for the other places we had the cli's
  *
- * 2002/10/06 - Alan Cox <alan@redhat.com>
+ * 2002/10/06 - Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  * Switch to new style error handling
  * Clean up delay to udelay, and yielding sleeps
@@ -161,33 +161,34 @@
  *
  * 2003/02/12 - Christoph Hellwig <hch@infradead.org>
  *
- * Cleaned up host template defintion
+ * Cleaned up host template definition
  * Removed now obsolete wd7000.h
  */
 
+#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/ioport.h>
 #include <linux/proc_fs.h>
 #include <linux/blkdev.h>
 #include <linux/init.h>
 #include <linux/stat.h>
+#include <linux/io.h>
 
 #include <asm/system.h>
 #include <asm/dma.h>
-#include <asm/io.h>
 
-#include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
+#include <scsi/scsi_host.h>
 #include <scsi/scsicam.h>
 
 
-#define ANY2SCSI_INLINE		/* undef this to use old macros */
 #undef  WD7000_DEBUG		/* general debug                */
 #ifdef WD7000_DEBUG
 #define dprintk printk
@@ -217,7 +218,7 @@
  *  In this version, sg_tablesize now defaults to WD7000_SG, and will
  *  be set to SG_NONE for older boards.  This is the reverse of the
  *  previous default, and was changed so that the driver-level
- *  Scsi_Host_Template would reflect the driver's support for scatter/
+ *  scsi_host_template would reflect the driver's support for scatter/
  *  gather.
  *
  *  Also, it has been reported that boards at Revision 6 support scatter/
@@ -265,7 +266,7 @@ static const long wd7000_biosaddr[] = {
 	0xc0000, 0xc2000, 0xc4000, 0xc6000, 0xc8000, 0xca000, 0xcc000, 0xce000,
 	0xd0000, 0xd2000, 0xd4000, 0xd6000, 0xd8000, 0xda000, 0xdc000, 0xde000
 };
-#define NUM_ADDRS (sizeof(wd7000_biosaddr)/sizeof(long))
+#define NUM_ADDRS ARRAY_SIZE(wd7000_biosaddr)
 
 static const unsigned short wd7000_iobase[] = {
 	0x0300, 0x0308, 0x0310, 0x0318, 0x0320, 0x0328, 0x0330, 0x0338,
@@ -273,13 +274,13 @@ static const unsigned short wd7000_iobase[] = {
 	0x0380, 0x0388, 0x0390, 0x0398, 0x03a0, 0x03a8, 0x03b0, 0x03b8,
 	0x03c0, 0x03c8, 0x03d0, 0x03d8, 0x03e0, 0x03e8, 0x03f0, 0x03f8
 };
-#define NUM_IOPORTS (sizeof(wd7000_iobase)/sizeof(unsigned short))
+#define NUM_IOPORTS ARRAY_SIZE(wd7000_iobase)
 
 static const short wd7000_irq[] = { 3, 4, 5, 7, 9, 10, 11, 12, 14, 15 };
-#define NUM_IRQS (sizeof(wd7000_irq)/sizeof(short))
+#define NUM_IRQS ARRAY_SIZE(wd7000_irq)
 
 static const short wd7000_dma[] = { 5, 6, 7 };
-#define NUM_DMAS (sizeof(wd7000_dma)/sizeof(short))
+#define NUM_DMAS ARRAY_SIZE(wd7000_dma)
 
 /*
  * The following is set up by wd7000_detect, and used thereafter for
@@ -315,7 +316,7 @@ static Config configs[] = {
 	{7, 6, 0x350, BUS_ON, BUS_OFF},	/* My configuration (Zaga)     */
 	{-1, -1, 0x0, BUS_ON, BUS_OFF}	/* Empty slot                  */
 };
-#define NUM_CONFIGS (sizeof(configs)/sizeof(Config))
+#define NUM_CONFIGS ARRAY_SIZE(configs)
 
 /*
  *  The following list defines strings to look for in the BIOS that identify
@@ -331,7 +332,7 @@ typedef struct signature {
 static const Signature signatures[] = {
 	{"SSTBIOS", 0x0000d, 7}	/* "SSTBIOS" @ offset 0x0000d */
 };
-#define NUM_SIGNATURES (sizeof(signatures)/sizeof(Signature))
+#define NUM_SIGNATURES ARRAY_SIZE(signatures)
 
 
 /*
@@ -434,8 +435,8 @@ typedef struct initCmd {
  *  carrying SCB addresses to/from the 7000-FASST2.
  *
  *  Note also since SCBs are not "permanently" associated with mailboxes,
- *  there is no need to keep a global list of Scsi_Cmnd pointers indexed
- *  by OGMB.   Again, SCBs reference their Scsi_Cmnds directly, so mailbox
+ *  there is no need to keep a global list of scsi_cmnd pointers indexed
+ *  by OGMB.   Again, SCBs reference their scsi_cmnds directly, so mailbox
  *  indices need not be involved.
  */
 
@@ -462,7 +463,7 @@ typedef struct scb {		/* Command Control Block 5.4.1               */
 	unchar direc;		/* Transfer Direction                        */
 	unchar reserved2[6];	/* SCSI Command Descriptor Block             */
 	/* end of hardware SCB                       */
-	Scsi_Cmnd *SCpnt;	/* Scsi_Cmnd using this SCB                  */
+	struct scsi_cmnd *SCpnt;/* scsi_cmnd using this SCB                  */
 	Sgb sgb[WD7000_SG];	/* Scatter/gather list for this SCB          */
 	Adapter *host;		/* host adapter                              */
 	struct scb *next;	/* for lists of scbs                         */
@@ -587,7 +588,7 @@ typedef union icb {
 
 #ifdef MODULE
 static char *wd7000;
-MODULE_PARM(wd7000, "s");
+module_param(wd7000, charp, 0);
 #endif
 
 /*
@@ -638,12 +639,12 @@ static int __init wd7000_setup(char *str)
 	(void) get_options(str, ARRAY_SIZE(ints), ints);
 
 	if (wd7000_card_num >= NUM_CONFIGS) {
-		printk(KERN_ERR "%s: Too many \"wd7000=\" configurations in " "command line!\n", __FUNCTION__);
+		printk(KERN_ERR "%s: Too many \"wd7000=\" configurations in " "command line!\n", __func__);
 		return 0;
 	}
 
 	if ((ints[0] < 3) || (ints[0] > 5)) {
-		printk(KERN_ERR "%s: Error in command line!  " "Usage: wd7000=<IRQ>,<DMA>,IO>[,<BUS_ON>" "[,<BUS_OFF>]]\n", __FUNCTION__);
+		printk(KERN_ERR "%s: Error in command line!  " "Usage: wd7000=<IRQ>,<DMA>,IO>[,<BUS_ON>" "[,<BUS_OFF>]]\n", __func__);
 	} else {
 		for (i = 0; i < NUM_IRQS; i++)
 			if (ints[1] == wd7000_irq[i])
@@ -723,55 +724,17 @@ static int __init wd7000_setup(char *str)
 
 __setup("wd7000=", wd7000_setup);
 
-#ifdef ANY2SCSI_INLINE
-/*
- * Since they're used a lot, I've redone the following from the macros
- * formerly in wd7000.h, hopefully to speed them up by getting rid of
- * all the shifting (it may not matter; GCC might have done as well anyway).
- *
- * xany2scsi and xscsi2int were not being used, and are no longer defined.
- * (They were simply 4-byte versions of these routines).
- */
-typedef union {			/* let's cheat... */
-	int i;
-	unchar u[sizeof(int)];	/* the sizeof(int) makes it more portable */
-} i_u;
-
-
 static inline void any2scsi(unchar * scsi, int any)
 {
-	*scsi++ = ((i_u) any).u[2];
-	*scsi++ = ((i_u) any).u[1];
-	*scsi++ = ((i_u) any).u[0];
+	*scsi++ = (unsigned)any >> 16;
+	*scsi++ = (unsigned)any >> 8;
+	*scsi++ = any;
 }
-
 
 static inline int scsi2int(unchar * scsi)
 {
-	i_u result;
-
-	result.i = 0;		/* clears unused bytes */
-	result.u[2] = *scsi++;
-	result.u[1] = *scsi++;
-	result.u[0] = *scsi++;
-
-	return (result.i);
+	return (scsi[0] << 16) | (scsi[1] << 8) | scsi[2];
 }
-#else
-/*
- * These are the old ones - I've just moved them here...
- */
-#undef any2scsi
-#define any2scsi(up, p)   (up)[0] = (((unsigned long) (p)) >> 16);	\
-			  (up)[1] = ((unsigned long) (p)) >> 8;		\
-			  (up)[2] = ((unsigned long) (p));
-
-#undef scsi2int
-#define scsi2int(up)   ( (((unsigned long) *(up)) << 16) +	\
-			 (((unsigned long) (up)[1]) << 8) +	\
-			 ((unsigned long) (up)[2]) )
-#endif
-
 
 static inline void wd7000_enable_intr(Adapter * host)
 {
@@ -798,8 +761,8 @@ static inline void wd7000_enable_dma(Adapter * host)
 
 static inline short WAIT(unsigned port, unsigned mask, unsigned allof, unsigned noneof)
 {
-	register unsigned WAITbits;
-	register unsigned long WAITtimeout = jiffies + WAITnexttimeout;
+	unsigned WAITbits;
+	unsigned long WAITtimeout = jiffies + WAITnexttimeout;
 
 	while (time_before_eq(jiffies, WAITtimeout)) {
 		WAITbits = inb(port) & mask;
@@ -845,10 +808,10 @@ static inline int command_out(Adapter * host, unchar * cmd, int len)
  */
 static inline Scb *alloc_scbs(struct Scsi_Host *host, int needed)
 {
-	register Scb *scb, *p = NULL;
-	register unsigned long flags;
-	register unsigned long timeout = jiffies + WAITnexttimeout;
-	register unsigned long now;
+	Scb *scb, *p = NULL;
+	unsigned long flags;
+	unsigned long timeout = jiffies + WAITnexttimeout;
+	unsigned long now;
 	int i;
 
 	if (needed <= 0)
@@ -874,7 +837,7 @@ static inline Scb *alloc_scbs(struct Scsi_Host *host, int needed)
 		}
 	}
 
-	/* Take the lock, then check we didnt get beaten, if so try again */
+	/* Take the lock, then check we didn't get beaten, if so try again */
 	spin_lock_irqsave(&scbpool_lock, flags);
 	if (freescbs < needed) {
 		spin_unlock_irqrestore(&scbpool_lock, flags);
@@ -898,7 +861,7 @@ static inline Scb *alloc_scbs(struct Scsi_Host *host, int needed)
 
 static inline void free_scb(Scb * scb)
 {
-	register unsigned long flags;
+	unsigned long flags;
 
 	spin_lock_irqsave(&scbpool_lock, flags);
 
@@ -935,8 +898,8 @@ static int mail_out(Adapter * host, Scb * scbptr)
  *  Note: this can also be used for ICBs; just cast to the parm type.
  */
 {
-	register int i, ogmb;
-	register unsigned long flags;
+	int i, ogmb;
+	unsigned long flags;
 	unchar start_ogmb;
 	Mailbox *ogmbs = host->mb.ogmb;
 	int *next_ogmb = &(host->next_ogmb);
@@ -1033,23 +996,26 @@ static int make_code(unsigned hosterr, unsigned scsierr)
 
 #define wd7000_intr_ack(host)   outb (0, host->iobase + ASC_INTR_ACK)
 
-static void wd7000_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
-{
-	register int flag, icmb, errstatus, icmb_status;
-	register int host_error, scsi_error;
-	register Scb *scb;	/* for SCSI commands */
-	register IcbAny *icb;	/* for host commands */
-	register Scsi_Cmnd *SCpnt;
-	Adapter *host = (Adapter *) dev_id;
-	Mailbox *icmbs = host->mb.icmb;
 
+static irqreturn_t wd7000_intr(int irq, void *dev_id)
+{
+	Adapter *host = (Adapter *) dev_id;
+	int flag, icmb, errstatus, icmb_status;
+	int host_error, scsi_error;
+	Scb *scb;	/* for SCSI commands */
+	IcbAny *icb;	/* for host commands */
+	struct scsi_cmnd *SCpnt;
+	Mailbox *icmbs = host->mb.icmb;
+	unsigned long flags;
+
+	spin_lock_irqsave(host->sh->host_lock, flags);
 	host->int_counter++;
 
-	dprintk("wd7000_intr_handle: irq = %d, host = 0x%06lx\n", irq, (long) host);
+	dprintk("wd7000_intr: irq = %d, host = 0x%06lx\n", irq, (long) host);
 
 	flag = inb(host->iobase + ASC_INTR_STAT);
 
-	dprintk("wd7000_intr_handle: intr stat = 0x%02x\n", flag);
+	dprintk("wd7000_intr: intr stat = 0x%02x\n", flag);
 
 	if (!(inb(host->iobase + ASC_STAT) & INT_IM)) {
 		/* NB: these are _very_ possible if IRQ 15 is being used, since
@@ -1060,79 +1026,71 @@ static void wd7000_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
 		 * can sort these out.  Otherwise, electrical noise and other such
 		 * problems would be indistinguishable from valid interrupts...
 		 */
-		dprintk("wd7000_intr_handle: phantom interrupt...\n");
-		wd7000_intr_ack(host);
-		return;
+		dprintk("wd7000_intr: phantom interrupt...\n");
+		goto ack;
 	}
 
-	if (flag & MB_INTR) {
-		/* The interrupt is for a mailbox */
-		if (!(flag & IMB_INTR)) {
-			dprintk("wd7000_intr_handle: free outgoing mailbox\n");
-			/*
-			 * If sleep_on() and the "interrupt on free OGMB" command are
-			 * used in mail_out(), wake_up() should correspondingly be called
-			 * here.  For now, we don't need to do anything special.
-			 */
-			wd7000_intr_ack(host);
-			return;
-		} else {
-			/* The interrupt is for an incoming mailbox */
-			icmb = flag & MB_MASK;
-			icmb_status = icmbs[icmb].status;
-			if (icmb_status & 0x80) {	/* unsolicited - result in ICMB */
-				dprintk("wd7000_intr_handle: unsolicited interrupt 0x%02x\n", icmb_status);
-				wd7000_intr_ack(host);
-				return;
-			}
-			/* Aaaargh! (Zaga) */
-			scb = isa_bus_to_virt(scsi2int((unchar *) icmbs[icmb].scbptr));
-			icmbs[icmb].status = 0;
-			if (!(scb->op & ICB_OP_MASK)) {	/* an SCB is done */
-				SCpnt = scb->SCpnt;
-				if (--(SCpnt->SCp.phase) <= 0) {	/* all scbs are done */
-					host_error = scb->vue | (icmb_status << 8);
-					scsi_error = scb->status;
-					errstatus = make_code(host_error, scsi_error);
-					SCpnt->result = errstatus;
+	if (!(flag & MB_INTR))
+		goto ack;
 
-					free_scb(scb);
-
-					SCpnt->scsi_done(SCpnt);
-				}
-			} else {	/* an ICB is done */
-				icb = (IcbAny *) scb;
-				icb->status = icmb_status;
-				icb->phase = 0;
-			}
-		}		/* incoming mailbox */
+	/* The interrupt is for a mailbox */
+	if (!(flag & IMB_INTR)) {
+		dprintk("wd7000_intr: free outgoing mailbox\n");
+		/*
+		 * If sleep_on() and the "interrupt on free OGMB" command are
+		 * used in mail_out(), wake_up() should correspondingly be called
+		 * here.  For now, we don't need to do anything special.
+		 */
+		goto ack;
 	}
 
+	/* The interrupt is for an incoming mailbox */
+	icmb = flag & MB_MASK;
+	icmb_status = icmbs[icmb].status;
+	if (icmb_status & 0x80) {	/* unsolicited - result in ICMB */
+		dprintk("wd7000_intr: unsolicited interrupt 0x%02x\n", icmb_status);
+		goto ack;
+	}
+
+	/* Aaaargh! (Zaga) */
+	scb = isa_bus_to_virt(scsi2int((unchar *) icmbs[icmb].scbptr));
+	icmbs[icmb].status = 0;
+	if (scb->op & ICB_OP_MASK) {	/* an SCB is done */
+		icb = (IcbAny *) scb;
+		icb->status = icmb_status;
+		icb->phase = 0;
+		goto ack;
+	}
+
+	SCpnt = scb->SCpnt;
+	if (--(SCpnt->SCp.phase) <= 0) {	/* all scbs are done */
+		host_error = scb->vue | (icmb_status << 8);
+		scsi_error = scb->status;
+		errstatus = make_code(host_error, scsi_error);
+		SCpnt->result = errstatus;
+
+		free_scb(scb);
+
+		SCpnt->scsi_done(SCpnt);
+	}
+
+ ack:
+	dprintk("wd7000_intr: return from interrupt handler\n");
 	wd7000_intr_ack(host);
 
-	dprintk("wd7000_intr_handle: return from interrupt handler\n");
-}
-
-static irqreturn_t do_wd7000_intr_handle(int irq, void *dev_id,
-					struct pt_regs *regs)
-{
-	unsigned long flags;
-	struct Scsi_Host *host = dev_id;
-
-	spin_lock_irqsave(host->host_lock, flags);
-	wd7000_intr_handle(irq, dev_id, regs);
-	spin_unlock_irqrestore(host->host_lock, flags);
+	spin_unlock_irqrestore(host->sh->host_lock, flags);
 	return IRQ_HANDLED;
 }
 
-
-static int wd7000_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
+static int wd7000_queuecommand_lck(struct scsi_cmnd *SCpnt,
+		void (*done)(struct scsi_cmnd *))
 {
-	register Scb *scb;
-	register Sgb *sgb;
-	register unchar *cdb = (unchar *) SCpnt->cmnd;
-	register unchar idlun;
-	register short cdblen;
+	Scb *scb;
+	Sgb *sgb;
+	unchar *cdb = (unchar *) SCpnt->cmnd;
+	unchar idlun;
+	short cdblen;
+	int nseg;
 	Adapter *host = (Adapter *) SCpnt->device->host->hostdata;
 
 	cdblen = SCpnt->cmd_len;
@@ -1148,28 +1106,29 @@ static int wd7000_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 	SCpnt->host_scribble = (unchar *) scb;
 	scb->host = host;
 
-	if (SCpnt->use_sg) {
-		struct scatterlist *sg = (struct scatterlist *) SCpnt->request_buffer;
+	nseg = scsi_sg_count(SCpnt);
+	if (nseg > 1) {
+		struct scatterlist *sg;
 		unsigned i;
 
-		if (SCpnt->device->host->sg_tablesize == SG_NONE) {
-			panic("wd7000_queuecommand: scatter/gather not supported.\n");
-		}
-		dprintk("Using scatter/gather with %d elements.\n", SCpnt->use_sg);
+		dprintk("Using scatter/gather with %d elements.\n", nseg);
 
 		sgb = scb->sgb;
 		scb->op = 1;
 		any2scsi(scb->dataptr, (int) sgb);
-		any2scsi(scb->maxlen, SCpnt->use_sg * sizeof(Sgb));
+		any2scsi(scb->maxlen, nseg * sizeof(Sgb));
 
-		for (i = 0; i < SCpnt->use_sg; i++) {
-			any2scsi(sgb[i].ptr, isa_page_to_bus(sg[i].page) + sg[i].offset);
-			any2scsi(sgb[i].len, sg[i].length);
+		scsi_for_each_sg(SCpnt, sg, nseg, i) {
+			any2scsi(sgb[i].ptr, isa_page_to_bus(sg_page(sg)) + sg->offset);
+			any2scsi(sgb[i].len, sg->length);
 		}
 	} else {
 		scb->op = 0;
-		any2scsi(scb->dataptr, isa_virt_to_bus(SCpnt->request_buffer));
-		any2scsi(scb->maxlen, SCpnt->request_bufflen);
+		if (nseg) {
+			struct scatterlist *sg = scsi_sglist(SCpnt);
+			any2scsi(scb->dataptr, isa_page_to_bus(sg_page(sg)) + sg->offset);
+		}
+		any2scsi(scb->maxlen, scsi_bufflen(SCpnt));
 	}
 
 	/* FIXME: drop lock and yield here ? */
@@ -1179,6 +1138,8 @@ static int wd7000_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 
 	return 0;
 }
+
+static DEF_SCSI_QCMD(wd7000_queuecommand)
 
 static int wd7000_diagnostics(Adapter * host, int code)
 {
@@ -1292,7 +1253,7 @@ static int wd7000_init(Adapter * host)
 		return 0;
 
 
-	if (request_irq(host->irq, do_wd7000_intr_handle, SA_INTERRUPT, "wd7000", host)) {
+	if (request_irq(host->irq, wd7000_intr, IRQF_DISABLED, "wd7000", host)) {
 		printk("wd7000_init: can't get IRQ %d.\n", host->irq);
 		return (0);
 	}
@@ -1433,7 +1394,7 @@ static int wd7000_proc_info(struct Scsi_Host *host, char *buffer, char **start, 
  *
  */
 
-static int wd7000_detect(Scsi_Host_Template * tpnt)
+static __init int wd7000_detect(struct scsi_host_template *tpnt)
 {
 	short present = 0, biosaddr_ptr, sig_ptr, i, pass;
 	short biosptr[NUM_CONFIGS];
@@ -1471,16 +1432,16 @@ static int wd7000_detect(Scsi_Host_Template * tpnt)
 						break;
 
 				if (i == pass) {
-					void *biosaddr = ioremap(wd7000_biosaddr[biosaddr_ptr] + signatures[sig_ptr].ofs,
+					void __iomem *biosaddr = ioremap(wd7000_biosaddr[biosaddr_ptr] + signatures[sig_ptr].ofs,
 								 signatures[sig_ptr].len);
-					short bios_match = 0;
+					short bios_match = 1;
 
 					if (biosaddr)
-						bios_match = memcmp((char *) biosaddr, signatures[sig_ptr].sig, signatures[sig_ptr].len);
+						bios_match = check_signature(biosaddr, signatures[sig_ptr].sig, signatures[sig_ptr].len);
 
 					iounmap(biosaddr);
 
-					if (!bios_match)
+					if (bios_match)
 						goto bios_matched;
 				}
 			}
@@ -1515,8 +1476,7 @@ static int wd7000_detect(Scsi_Host_Template * tpnt)
 			 * ASC reset...
 			 */
 			outb(ASC_RES, iobase + ASC_CONTROL);
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule_timeout(HZ / 100);
+			msleep(10);
 			outb(0, iobase + ASC_CONTROL);
 
 			if (WAIT(iobase + ASC_STAT, ASC_STATMASK, CMD_RDY, 0)) {
@@ -1565,7 +1525,7 @@ static int wd7000_detect(Scsi_Host_Template * tpnt)
 				 *  For boards before rev 6.0, scatter/gather isn't supported.
 				 */
 				if (host->rev1 < 6)
-					sh->sg_tablesize = SG_NONE;
+					sh->sg_tablesize = 1;
 
 				present++;	/* count it */
 
@@ -1604,6 +1564,7 @@ static int wd7000_release(struct Scsi_Host *shost)
 	return 0;
 }
 
+#if 0
 /*
  *  I have absolutely NO idea how to do an abort with the WD7000...
  */
@@ -1618,36 +1579,28 @@ static int wd7000_abort(Scsi_Cmnd * SCpnt)
 	}
 	return FAILED;
 }
-
-
-/*
- *  I also have no idea how to do a reset...
- */
-
-static int wd7000_bus_reset(Scsi_Cmnd * SCpnt)
-{
-	return FAILED;
-}
-
-static int wd7000_device_reset(Scsi_Cmnd * SCpnt)
-{
-	return FAILED;
-}
+#endif
 
 /*
  *  Last resort. Reinitialize the board.
  */
 
-static int wd7000_host_reset(Scsi_Cmnd * SCpnt)
+static int wd7000_host_reset(struct scsi_cmnd *SCpnt)
 {
 	Adapter *host = (Adapter *) SCpnt->device->host->hostdata;
 
-	if (wd7000_adapter_reset(host) < 0)
+	spin_lock_irq(SCpnt->device->host->host_lock);
+
+	if (wd7000_adapter_reset(host) < 0) {
+		spin_unlock_irq(SCpnt->device->host->host_lock);
 		return FAILED;
+	}
+
 	wd7000_enable_intr(host);
+
+	spin_unlock_irq(SCpnt->device->host->host_lock);
 	return SUCCESS;
 }
-
 
 /*
  *  This was borrowed directly from aha1542.c. (Zaga)
@@ -1690,7 +1643,7 @@ static int wd7000_biosparam(struct scsi_device *sdev,
 			ip[2] = info[2];
 
 			if (info[0] == 255)
-				printk(KERN_INFO "%s: current partition table is " "using extended translation.\n", __FUNCTION__);
+				printk(KERN_INFO "%s: current partition table is " "using extended translation.\n", __func__);
 		}
 	}
 
@@ -1704,15 +1657,13 @@ MODULE_AUTHOR("Thomas Wuensche, John Boyd, Miroslav Zagorac");
 MODULE_DESCRIPTION("Driver for the WD7000 series ISA controllers");
 MODULE_LICENSE("GPL");
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name		= "wd7000",
 	.proc_info		= wd7000_proc_info,
 	.name			= "Western Digital WD-7000",
 	.detect			= wd7000_detect,
 	.release		= wd7000_release,
 	.queuecommand		= wd7000_queuecommand,
-	.eh_bus_reset_handler	= wd7000_bus_reset,
-	.eh_device_reset_handler = wd7000_device_reset,
 	.eh_host_reset_handler	= wd7000_host_reset,
 	.bios_param		= wd7000_biosparam,
 	.can_queue		= WD7000_Q,

@@ -3,6 +3,7 @@
  *
  *  Copyright (C) 2000 ARM Limited
  *  Copyright (C) 2000 Deep Blue Solutions Ltd.
+ *  hacked for non-paged-MM by Hyok S. Choi, 2003.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,14 +26,15 @@
  *  CONFIG_CPU_ARM1020_CPU_IDLE -> nohlt
  */
 #include <linux/linkage.h>
-#include <linux/config.h>
 #include <linux/init.h>
 #include <asm/assembler.h>
-#include <asm/constants.h>
+#include <asm/asm-offsets.h>
+#include <asm/hwcap.h>
+#include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
-#include <asm/procinfo.h>
 #include <asm/ptrace.h>
-#include <asm/hardware.h>
+
+#include "proc-macros.S"
 
 /*
  * This is the maximum size of an area which will be invalidated
@@ -62,7 +64,7 @@
 /*
  * This is the size at which it becomes more efficient to
  * clean the whole cache, rather than using the individual
- * cache line maintainence instructions.
+ * cache line maintenance instructions.
  */
 #define CACHE_DLIMIT	32768
 
@@ -77,15 +79,11 @@ ENTRY(cpu_arm1020_proc_init)
  * cpu_arm1020_proc_fin()
  */
 ENTRY(cpu_arm1020_proc_fin)
-	stmfd	sp!, {lr}
-	mov	ip, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
-	msr	cpsr_c, ip
-	bl	arm1020_flush_kern_cache_all
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x1000 		@ ...i............
 	bic	r0, r0, #0x000e 		@ ............wca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	ldmfd	sp!, {pc}
+	mov	pc, lr
 
 /*
  * cpu_arm1020_reset(loc)
@@ -101,7 +99,9 @@ ENTRY(cpu_arm1020_reset)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c7, 0		@ invalidate I,D caches
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+#ifdef CONFIG_MMU
 	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
+#endif
 	mrc	p15, 0, ip, c1, c0, 0		@ ctrl register
 	bic	ip, ip, #0x000f 		@ ............wcam
 	bic	ip, ip, #0x1100 		@ ...i...s........
@@ -119,6 +119,20 @@ ENTRY(cpu_arm1020_do_idle)
 /* ================================= CACHE ================================ */
 
 	.align	5
+
+/*
+ *	flush_icache_all()
+ *
+ *	Unconditionally clean and invalidate the entire icache.
+ */
+ENTRY(arm1020_flush_icache_all)
+#ifndef CONFIG_CPU_ICACHE_DISABLE
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
+#endif
+	mov	pc, lr
+ENDPROC(arm1020_flush_icache_all)
+
 /*
  *	flush_user_cache_all()
  *
@@ -196,6 +210,19 @@ ENTRY(arm1020_flush_user_cache_range)
  *	- end	- virtual end address
  */
 ENTRY(arm1020_coherent_kern_range)
+	/* FALLTRHOUGH */
+
+/*
+ *	coherent_user_range(start, end)
+ *
+ *	Ensure coherency between the Icache and the Dcache in the
+ *	region described by start.  If you have non-snooping
+ *	Harvard caches, you need to implement this function.
+ *
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ */
+ENTRY(arm1020_coherent_user_range)
 	mov	ip, #0
 	bic	r0, r0, #CACHE_DLINESIZE - 1
 	mcr	p15, 0, ip, c7, c10, 4
@@ -214,17 +241,18 @@ ENTRY(arm1020_coherent_kern_range)
 	mov	pc, lr
 
 /*
- *	flush_kern_dcache_page(void *page)
+ *	flush_kern_dcache_area(void *addr, size_t size)
  *
  *	Ensure no D cache aliasing occurs, either with itself or
  *	the I cache
  *
- *	- page	- page aligned address
+ *	- addr	- kernel address
+ *	- size	- region size
  */
-ENTRY(arm1020_flush_kern_dcache_page)
+ENTRY(arm1020_flush_kern_dcache_area)
 	mov	ip, #0
 #ifndef CONFIG_CPU_DCACHE_DISABLE
-	add	r1, r0, #PAGE_SZ
+	add	r1, r0, r1
 1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
 	add	r0, r0, #CACHE_DLINESIZE
@@ -247,7 +275,7 @@ ENTRY(arm1020_flush_kern_dcache_page)
  *
  * (same as v4wb)
  */
-ENTRY(arm1020_dma_inv_range)
+arm1020_dma_inv_range:
 	mov	ip, #0
 #ifndef CONFIG_CPU_DCACHE_DISABLE
 	tst	r0, #CACHE_DLINESIZE - 1
@@ -277,7 +305,7 @@ ENTRY(arm1020_dma_inv_range)
  *
  * (same as v4wb)
  */
-ENTRY(arm1020_dma_clean_range)
+arm1020_dma_clean_range:
 	mov	ip, #0
 #ifndef CONFIG_CPU_DCACHE_DISABLE
 	bic	r0, r0, #CACHE_DLINESIZE - 1
@@ -312,14 +340,40 @@ ENTRY(arm1020_dma_flush_range)
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
+/*
+ *	dma_map_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(arm1020_dma_map_area)
+	add	r1, r1, r0
+	cmp	r2, #DMA_TO_DEVICE
+	beq	arm1020_dma_clean_range
+	bcs	arm1020_dma_inv_range
+	b	arm1020_dma_flush_range
+ENDPROC(arm1020_dma_map_area)
+
+/*
+ *	dma_unmap_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(arm1020_dma_unmap_area)
+	mov	pc, lr
+ENDPROC(arm1020_dma_unmap_area)
+
 ENTRY(arm1020_cache_fns)
+	.long	arm1020_flush_icache_all
 	.long	arm1020_flush_kern_cache_all
 	.long	arm1020_flush_user_cache_all
 	.long	arm1020_flush_user_cache_range
 	.long	arm1020_coherent_kern_range
-	.long	arm1020_flush_kern_dcache_page
-	.long	arm1020_dma_inv_range
-	.long	arm1020_dma_clean_range
+	.long	arm1020_coherent_user_range
+	.long	arm1020_flush_kern_dcache_area
+	.long	arm1020_dma_map_area
+	.long	arm1020_dma_unmap_area
 	.long	arm1020_dma_flush_range
 
 	.align	5
@@ -345,6 +399,7 @@ ENTRY(cpu_arm1020_dcache_clean_area)
  */
 	.align	5
 ENTRY(cpu_arm1020_switch_mm)
+#ifdef CONFIG_MMU
 #ifndef CONFIG_CPU_DCACHE_DISABLE
 	mcr	p15, 0, r3, c7, c10, 4
 	mov	r1, #0xF			@ 16 segments
@@ -369,6 +424,7 @@ ENTRY(cpu_arm1020_switch_mm)
 	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
 	mcr	p15, 0, r0, c2, c0, 0		@ load page table pointer
 	mcr	p15, 0, r1, c8, c7, 0		@ invalidate I & D TLBs
+#endif /* CONFIG_MMU */
 	mov	pc, lr
         
 /*
@@ -377,75 +433,48 @@ ENTRY(cpu_arm1020_switch_mm)
  * Set a PTE and flush it out
  */
 	.align	5
-ENTRY(cpu_arm1020_set_pte)
-	str	r1, [r0], #-2048		@ linux version
-
-	eor	r1, r1, #L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_WRITE | L_PTE_DIRTY
-
-	bic	r2, r1, #PTE_SMALL_AP_MASK
-	bic	r2, r2, #PTE_TYPE_MASK
-	orr	r2, r2, #PTE_TYPE_SMALL
-
-	tst	r1, #L_PTE_USER			@ User?
-	orrne	r2, r2, #PTE_SMALL_AP_URO_SRW
-
-	tst	r1, #L_PTE_WRITE | L_PTE_DIRTY	@ Write and Dirty?
-	orreq	r2, r2, #PTE_SMALL_AP_UNO_SRW
-
-	tst	r1, #L_PTE_PRESENT | L_PTE_YOUNG	@ Present and Young?
-	movne	r2, #0
-
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
-	eor	r3, r1, #0x0a			@ C & small page?
-	tst	r3, #0x0b
-	biceq	r2, r2, #4
-#endif
-	str	r2, [r0]			@ hardware version
+ENTRY(cpu_arm1020_set_pte_ext)
+#ifdef CONFIG_MMU
+	armv3_set_pte_ext
 	mov	r0, r0
 #ifndef CONFIG_CPU_DCACHE_DISABLE
 	mcr	p15, 0, r0, c7, c10, 4
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 #endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+#endif /* CONFIG_MMU */
 	mov	pc, lr
 
-	__INIT
+	__CPUINIT
 
 	.type	__arm1020_setup, #function
 __arm1020_setup:
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c7		@ invalidate I,D caches on v4
 	mcr	p15, 0, r0, c7, c10, 4		@ drain write buffer on v4
+#ifdef CONFIG_MMU
 	mcr	p15, 0, r0, c8, c7		@ invalidate I,D TLBs on v4
-	mcr	p15, 0, r4, c2, c0		@ load page table pointer
-	mov	r0, #0x1f			@ Domains 0, 1 = client
-	mcr	p15, 0, r0, c3, c0		@ load domain access register
-	mrc	p15, 0, r0, c1, c0		@ get control register v4
-/*
- * Clear out 'unwanted' bits (then put them in if we need them)
- */
-	bic	r0, r0, #0x1e00 		@ i...??r.........
-	bic	r0, r0, #0x000e 		@ ............wca.
-/*
- * Turn on what we want
- */
-	orr	r0, r0, #0x0031 		@ ..........DP...M
-	orr	r0, r0, #0x0100 		@ .......S........
+#endif
 
+	adr	r5, arm1020_crval
+	ldmia	r5, {r5, r6}
+	mrc	p15, 0, r0, c1, c0		@ get control register v4
+	bic	r0, r0, r5
+	orr	r0, r0, r6
 #ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
-	orr	r0, r0, #0x4000 		@ .R..............
-#endif
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
-	orr	r0, r0, #0x0800 		@ ....Z...........
-#endif
-#ifndef CONFIG_CPU_DCACHE_DISABLE
-	orr	r0, r0, #0x0004 		@ Enable D cache
-#endif
-#ifndef CONFIG_CPU_ICACHE_DISABLE
-	orr	r0, r0, #0x1000 		@ I Cache on
+	orr	r0, r0, #0x4000 		@ .R.. .... .... ....
 #endif
 	mov	pc, lr
 	.size	__arm1020_setup, . - __arm1020_setup
+
+	/*
+	 *  R
+	 * .RVI ZFRS BLDP WCAM
+	 * .011 1001 ..11 0101
+	 */
+	.type	arm1020_crval, #object
+arm1020_crval:
+	crval	clear=0x0000593f, mmuset=0x00003935, ucset=0x00001930
 
 	__INITDATA
 
@@ -456,13 +485,17 @@ __arm1020_setup:
 	.type	arm1020_processor_functions, #object
 arm1020_processor_functions:
 	.word	v4t_early_abort
+	.word	legacy_pabort
 	.word	cpu_arm1020_proc_init
 	.word	cpu_arm1020_proc_fin
 	.word	cpu_arm1020_reset
 	.word	cpu_arm1020_do_idle
 	.word	cpu_arm1020_dcache_clean_area
 	.word	cpu_arm1020_switch_mm
-	.word	cpu_arm1020_set_pte
+	.word	cpu_arm1020_set_pte_ext
+	.word	0
+	.word	0
+	.word	0
 	.size	arm1020_processor_functions, . - arm1020_processor_functions
 
 	.section ".rodata"
@@ -502,13 +535,18 @@ cpu_arm1020_name:
 
 	.align
 
-	.section ".proc.info", #alloc, #execinstr
+	.section ".proc.info.init", #alloc, #execinstr
 
 	.type	__arm1020_proc_info,#object
 __arm1020_proc_info:
 	.long	0x4104a200			@ ARM 1020T (Architecture v5T)
 	.long	0xff0ffff0
-	.long	0x00000c02			@ mmuflags
+	.long   PMD_TYPE_SECT | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
+	.long   PMD_TYPE_SECT | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
 	b	__arm1020_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name

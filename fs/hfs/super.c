@@ -1,131 +1,33 @@
 /*
- * linux/fs/hfs/super.c
+ *  linux/fs/hfs/super.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
+ * (C) 2003 Ardis Technologies <roman@ardistech.com>
  * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains hfs_read_super(), some of the super_ops and
- * init_module() and cleanup_module().	The remaining super_ops are in
+ * init_hfs_fs() and exit_hfs_fs().  The remaining super_ops are in
  * inode.c since they deal with inodes.
  *
  * Based on the minix file system code, (C) 1991, 1992 by Linus Torvalds
- *
- * "XXX" in a comment is a note to myself to consider changing something.
- *
- * In function preconditions the term "valid" applied to a pointer to
- * a structure means that the pointer is non-NULL and the structure it
- * points to has all fields initialized to consistent values.
- *
- * The code in this file initializes some structures which contain
- * pointers by calling memset(&foo, 0, sizeof(foo)).
- * This produces the desired behavior only due to the non-ANSI
- * assumption that the machine representation of NULL is all zeros.
  */
 
-#include "hfs.h"
-#include <linux/hfs_fs_sb.h>
-#include <linux/hfs_fs_i.h>
-#include <linux/hfs_fs.h>
-
-#include <linux/config.h> /* for CONFIG_MAC_PARTITION */
-#include <linux/blkdev.h>
 #include <linux/module.h>
+#include <linux/blkdev.h>
+#include <linux/mount.h>
 #include <linux/init.h>
+#include <linux/nls.h>
 #include <linux/parser.h>
-#include <linux/smp_lock.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
 #include <linux/vfs.h>
 
+#include "hfs_fs.h"
+#include "btree.h"
+
+static struct kmem_cache *hfs_inode_cachep;
+
 MODULE_LICENSE("GPL");
-
-/*================ Forward declarations ================*/
-
-static void hfs_read_inode(struct inode *);
-static void hfs_put_super(struct super_block *);
-static int hfs_statfs(struct super_block *, struct kstatfs *);
-static void hfs_write_super(struct super_block *);
-
-static kmem_cache_t * hfs_inode_cachep;
-
-static struct inode *hfs_alloc_inode(struct super_block *sb)
-{
-	struct hfs_inode_info *ei;
-	ei = (struct hfs_inode_info *)kmem_cache_alloc(hfs_inode_cachep, SLAB_KERNEL);
-	if (!ei)
-		return NULL;
-	return &ei->vfs_inode;
-}
-
-static void hfs_destroy_inode(struct inode *inode)
-{
-	kmem_cache_free(hfs_inode_cachep, HFS_I(inode));
-}
-
-static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
-{
-	struct hfs_inode_info *ei = (struct hfs_inode_info *) foo;
-
-	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
-	    SLAB_CTOR_CONSTRUCTOR)
-		inode_init_once(&ei->vfs_inode);
-}
- 
-static int init_inodecache(void)
-{
-	hfs_inode_cachep = kmem_cache_create("hfs_inode_cache",
-					     sizeof(struct hfs_inode_info),
-					     0, SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT,
-					     init_once, NULL);
-	if (hfs_inode_cachep == NULL)
-		return -ENOMEM;
-	return 0;
-}
-
-static void destroy_inodecache(void)
-{
-	if (kmem_cache_destroy(hfs_inode_cachep))
-		printk(KERN_INFO "hfs_inode_cache: not all structures were freed\n");
-}
-
-/*================ Global variables ================*/
-
-static struct super_operations hfs_super_operations = { 
-	.alloc_inode	= hfs_alloc_inode,
-	.destroy_inode	= hfs_destroy_inode,
-	.read_inode	= hfs_read_inode,
-	.put_inode	= hfs_put_inode,
-	.put_super	= hfs_put_super,
-	.write_super	= hfs_write_super,
-	.statfs		= hfs_statfs,
-};
-
-/*================ File-local variables ================*/
-
-static struct super_block *hfs_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data)
-{
-	return get_sb_bdev(fs_type, flags, dev_name, data, hfs_fill_super);
-}
-
-static struct file_system_type hfs_fs = {
-	.owner		= THIS_MODULE,
-	.name		= "hfs",
-	.get_sb		= hfs_get_sb,
-	.kill_sb	= kill_block_super,
-	.fs_flags	= FS_REQUIRES_DEV,
-};
-
-/*================ File-local functions ================*/
-
-/* 
- * hfs_read_inode()
- *
- * this doesn't actually do much. hfs_iget actually fills in the 
- * necessary inode information.
- */
-static void hfs_read_inode(struct inode *inode)
-{
-  inode->i_mode = 0;
-}
 
 /*
  * hfs_write_super()
@@ -148,20 +50,23 @@ static void hfs_read_inode(struct inode *inode)
  */
 static void hfs_write_super(struct super_block *sb)
 {
-	struct hfs_mdb *mdb = HFS_SB(sb)->s_mdb;
-	lock_kernel();
-	/* is this a valid hfs superblock? */
-	if (!sb || sb->s_magic != HFS_SUPER_MAGIC) {
-		unlock_kernel();
-		return;
-	}
-
-	if (!(sb->s_flags & MS_RDONLY)) {
-		/* sync everything to the buffers */
-		hfs_mdb_commit(mdb, 0);
-	}
+	lock_super(sb);
 	sb->s_dirt = 0;
-	unlock_kernel();
+
+	/* sync everything to the buffers */
+	if (!(sb->s_flags & MS_RDONLY))
+		hfs_mdb_commit(sb);
+	unlock_super(sb);
+}
+
+static int hfs_sync_fs(struct super_block *sb, int wait)
+{
+	lock_super(sb);
+	hfs_mdb_commit(sb);
+	sb->s_dirt = 0;
+	unlock_super(sb);
+
+	return 0;
 }
 
 /*
@@ -173,18 +78,11 @@ static void hfs_write_super(struct super_block *sb)
  */
 static void hfs_put_super(struct super_block *sb)
 {
-	struct hfs_mdb *mdb = HFS_SB(sb)->s_mdb;
- 
-	if (!(sb->s_flags & MS_RDONLY)) {
-		hfs_mdb_commit(mdb, 0);
-		sb->s_dirt = 0;
-	}
-
+	if (sb->s_dirt)
+		hfs_write_super(sb);
+	hfs_mdb_close(sb);
 	/* release the MDB's resources */
-	hfs_mdb_put(mdb, sb->s_flags & MS_RDONLY);
-
-	kfree(sb->s_fs_info);
-	sb->s_fs_info = NULL;
+	hfs_mdb_put(sb);
 }
 
 /*
@@ -196,295 +94,276 @@ static void hfs_put_super(struct super_block *sb)
  *
  * changed f_files/f_ffree to reflect the fs_ablock/free_ablocks.
  */
-static int hfs_statfs(struct super_block *sb, struct kstatfs *buf)
+static int hfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
-	struct hfs_mdb *mdb = HFS_SB(sb)->s_mdb;
+	struct super_block *sb = dentry->d_sb;
+	u64 id = huge_encode_dev(sb->s_bdev->bd_dev);
 
 	buf->f_type = HFS_SUPER_MAGIC;
-	buf->f_bsize = HFS_SECTOR_SIZE;
-	buf->f_blocks = mdb->alloc_blksz * mdb->fs_ablocks;
-	buf->f_bfree = mdb->alloc_blksz * mdb->free_ablocks;
+	buf->f_bsize = sb->s_blocksize;
+	buf->f_blocks = (u32)HFS_SB(sb)->fs_ablocks * HFS_SB(sb)->fs_div;
+	buf->f_bfree = (u32)HFS_SB(sb)->free_ablocks * HFS_SB(sb)->fs_div;
 	buf->f_bavail = buf->f_bfree;
-	buf->f_files = mdb->fs_ablocks;  
-	buf->f_ffree = mdb->free_ablocks;
+	buf->f_files = HFS_SB(sb)->fs_ablocks;
+	buf->f_ffree = HFS_SB(sb)->free_ablocks;
+	buf->f_fsid.val[0] = (u32)id;
+	buf->f_fsid.val[1] = (u32)(id >> 32);
 	buf->f_namelen = HFS_NAMELEN;
 
 	return 0;
 }
 
-enum {
-	Opt_version, Opt_uid, Opt_gid, Opt_umask, Opt_part,
-	Opt_type, Opt_creator, Opt_quiet, Opt_afpd,
-	Opt_names_netatalk, Opt_names_trivial, Opt_names_alpha, Opt_names_latin,
-	Opt_names_7bit, Opt_names_8bit, Opt_names_cap,
-	Opt_fork_netatalk, Opt_fork_single, Opt_fork_double, Opt_fork_cap,
-	Opt_case_lower, Opt_case_asis,
-	Opt_conv_binary, Opt_conv_text, Opt_conv_auto,
+static int hfs_remount(struct super_block *sb, int *flags, char *data)
+{
+	*flags |= MS_NODIRATIME;
+	if ((*flags & MS_RDONLY) == (sb->s_flags & MS_RDONLY))
+		return 0;
+	if (!(*flags & MS_RDONLY)) {
+		if (!(HFS_SB(sb)->mdb->drAtrb & cpu_to_be16(HFS_SB_ATTRIB_UNMNT))) {
+			printk(KERN_WARNING "hfs: filesystem was not cleanly unmounted, "
+			       "running fsck.hfs is recommended.  leaving read-only.\n");
+			sb->s_flags |= MS_RDONLY;
+			*flags |= MS_RDONLY;
+		} else if (HFS_SB(sb)->mdb->drAtrb & cpu_to_be16(HFS_SB_ATTRIB_SLOCK)) {
+			printk(KERN_WARNING "hfs: filesystem is marked locked, leaving read-only.\n");
+			sb->s_flags |= MS_RDONLY;
+			*flags |= MS_RDONLY;
+		}
+	}
+	return 0;
+}
+
+static int hfs_show_options(struct seq_file *seq, struct vfsmount *mnt)
+{
+	struct hfs_sb_info *sbi = HFS_SB(mnt->mnt_sb);
+
+	if (sbi->s_creator != cpu_to_be32(0x3f3f3f3f))
+		seq_printf(seq, ",creator=%.4s", (char *)&sbi->s_creator);
+	if (sbi->s_type != cpu_to_be32(0x3f3f3f3f))
+		seq_printf(seq, ",type=%.4s", (char *)&sbi->s_type);
+	seq_printf(seq, ",uid=%u,gid=%u", sbi->s_uid, sbi->s_gid);
+	if (sbi->s_file_umask != 0133)
+		seq_printf(seq, ",file_umask=%o", sbi->s_file_umask);
+	if (sbi->s_dir_umask != 0022)
+		seq_printf(seq, ",dir_umask=%o", sbi->s_dir_umask);
+	if (sbi->part >= 0)
+		seq_printf(seq, ",part=%u", sbi->part);
+	if (sbi->session >= 0)
+		seq_printf(seq, ",session=%u", sbi->session);
+	if (sbi->nls_disk)
+		seq_printf(seq, ",codepage=%s", sbi->nls_disk->charset);
+	if (sbi->nls_io)
+		seq_printf(seq, ",iocharset=%s", sbi->nls_io->charset);
+	if (sbi->s_quiet)
+		seq_printf(seq, ",quiet");
+	return 0;
+}
+
+static struct inode *hfs_alloc_inode(struct super_block *sb)
+{
+	struct hfs_inode_info *i;
+
+	i = kmem_cache_alloc(hfs_inode_cachep, GFP_KERNEL);
+	return i ? &i->vfs_inode : NULL;
+}
+
+static void hfs_i_callback(struct rcu_head *head)
+{
+	struct inode *inode = container_of(head, struct inode, i_rcu);
+	INIT_LIST_HEAD(&inode->i_dentry);
+	kmem_cache_free(hfs_inode_cachep, HFS_I(inode));
+}
+
+static void hfs_destroy_inode(struct inode *inode)
+{
+	call_rcu(&inode->i_rcu, hfs_i_callback);
+}
+
+static const struct super_operations hfs_super_operations = {
+	.alloc_inode	= hfs_alloc_inode,
+	.destroy_inode	= hfs_destroy_inode,
+	.write_inode	= hfs_write_inode,
+	.evict_inode	= hfs_evict_inode,
+	.put_super	= hfs_put_super,
+	.write_super	= hfs_write_super,
+	.sync_fs	= hfs_sync_fs,
+	.statfs		= hfs_statfs,
+	.remount_fs     = hfs_remount,
+	.show_options	= hfs_show_options,
 };
 
-static match_table_t tokens = {
-	{Opt_version, "version=%u"},
-	{Opt_uid, "uid=%u"},
-	{Opt_gid, "gid=%u"},
-	{Opt_umask, "umask=%o"},
-	{Opt_part, "part=%u"},
-	{Opt_type, "type=%s"},
-	{Opt_creator, "creator=%s"},
-	{Opt_quiet, "quiet"},
-	{Opt_afpd, "afpd"},
-	{Opt_names_netatalk, "names=netatalk"},
-	{Opt_names_trivial, "names=trivial"},
-	{Opt_names_alpha, "names=alpha"},
-	{Opt_names_latin, "names=latin"},
-	{Opt_names_7bit, "names=7bit"},
-	{Opt_names_8bit, "names=8bit"},
-	{Opt_names_cap, "names=cap"},
-	{Opt_names_netatalk, "names=n"},
-	{Opt_names_trivial, "names=t"},
-	{Opt_names_alpha, "names=a"},
-	{Opt_names_latin, "names=l"},
-	{Opt_names_7bit, "names=7"},
-	{Opt_names_8bit, "names=8"},
-	{Opt_names_cap, "names=c"},
-	{Opt_fork_netatalk, "fork=netatalk"},
-	{Opt_fork_single, "fork=single"},
-	{Opt_fork_double, "fork=double"},
-	{Opt_fork_cap, "fork=cap"},
-	{Opt_fork_netatalk, "fork=n"},
-	{Opt_fork_single, "fork=s"},
-	{Opt_fork_double, "fork=d"},
-	{Opt_fork_cap, "fork=c"},
-	{Opt_case_lower, "case=lower"},
-	{Opt_case_asis, "case=asis"},
-	{Opt_case_lower, "case=l"},
-	{Opt_case_asis, "case=a"},
-	{Opt_conv_binary, "conv=binary"},
-	{Opt_conv_text, "conv=text"},
-	{Opt_conv_auto, "conv=auto"},
-	{Opt_conv_binary, "conv=b"},
-	{Opt_conv_text, "conv=t"},
-	{Opt_conv_auto, "conv=a"},
+enum {
+	opt_uid, opt_gid, opt_umask, opt_file_umask, opt_dir_umask,
+	opt_part, opt_session, opt_type, opt_creator, opt_quiet,
+	opt_codepage, opt_iocharset,
+	opt_err
 };
+
+static const match_table_t tokens = {
+	{ opt_uid, "uid=%u" },
+	{ opt_gid, "gid=%u" },
+	{ opt_umask, "umask=%o" },
+	{ opt_file_umask, "file_umask=%o" },
+	{ opt_dir_umask, "dir_umask=%o" },
+	{ opt_part, "part=%u" },
+	{ opt_session, "session=%u" },
+	{ opt_type, "type=%s" },
+	{ opt_creator, "creator=%s" },
+	{ opt_quiet, "quiet" },
+	{ opt_codepage, "codepage=%s" },
+	{ opt_iocharset, "iocharset=%s" },
+	{ opt_err, NULL }
+};
+
+static inline int match_fourchar(substring_t *arg, u32 *result)
+{
+	if (arg->to - arg->from != 4)
+		return -EINVAL;
+	memcpy(result, arg->from, 4);
+	return 0;
+}
 
 /*
  * parse_options()
- * 
+ *
  * adapted from linux/fs/msdos/inode.c written 1992,93 by Werner Almesberger
  * This function is called by hfs_read_super() to parse the mount options.
  */
-static int parse_options(char *options, struct hfs_sb_info *hsb, int *part)
+static int parse_options(char *options, struct hfs_sb_info *hsb)
 {
 	char *p;
-	char names, fork;
 	substring_t args[MAX_OPT_ARGS];
-	int option;
+	int tmp, token;
 
 	/* initialize the sb with defaults */
-	memset(hsb, 0, sizeof(*hsb));
-	hsb->magic = HFS_SB_MAGIC;
-	hsb->s_uid   = current->uid;
-	hsb->s_gid   = current->gid;
-	hsb->s_umask = current->fs->umask;
-	hsb->s_type    = 0x3f3f3f3f;	/* == '????' */
-	hsb->s_creator = 0x3f3f3f3f;	/* == '????' */
-	hsb->s_lowercase = 0;
-	hsb->s_quiet     = 0;
-	hsb->s_afpd      = 0;
-        /* default version. 0 just selects the defaults */
-	hsb->s_version   = 0; 
-	hsb->s_conv = 'b';
-	names = '?';
-	fork = '?';
-	*part = 0;
+	hsb->s_uid = current_uid();
+	hsb->s_gid = current_gid();
+	hsb->s_file_umask = 0133;
+	hsb->s_dir_umask = 0022;
+	hsb->s_type = hsb->s_creator = cpu_to_be32(0x3f3f3f3f);	/* == '????' */
+	hsb->s_quiet = 0;
+	hsb->part = -1;
+	hsb->session = -1;
 
-	if (!options) {
-		goto done;
-	}
-	while ((p = strsep(&options,",")) != NULL) {
-		int token;
+	if (!options)
+		return 1;
+
+	while ((p = strsep(&options, ",")) != NULL) {
 		if (!*p)
 			continue;
 
 		token = match_token(p, tokens, args);
 		switch (token) {
-		/* Numeric-valued options */
-		case Opt_version:
-			if (match_int(&args[0], &option))
-				return 0;
-			hsb->s_version = option;
-			break;
-		case Opt_uid:
-			if (match_int(&args[0], &option))
-				return 0;
-			hsb->s_uid = option;
-			break;
-		case Opt_gid:
-			if (match_int(&args[0], &option))
-				return 0;
-			hsb->s_gid = option;
-			break;
-		case Opt_umask:
-			if (match_octal(&args[0], &option))
-				return 0;
-			hsb->s_umask = option;
-			break;
-		case Opt_part:
-			if (match_int(&args[0], &option))
-				return 0;
-			*part = option;
-			break;
-		/* String-valued options */
-		case Opt_type:
-			if (strlen(args[0].from) != 4) {
+		case opt_uid:
+			if (match_int(&args[0], &tmp)) {
+				printk(KERN_ERR "hfs: uid requires an argument\n");
 				return 0;
 			}
-			hsb->s_type = hfs_get_nl(args[0].from);
+			hsb->s_uid = (uid_t)tmp;
 			break;
-		case Opt_creator:
-			if (strlen(args[0].from) != 4) {
+		case opt_gid:
+			if (match_int(&args[0], &tmp)) {
+				printk(KERN_ERR "hfs: gid requires an argument\n");
 				return 0;
 			}
-			hsb->s_creator = hfs_get_nl(args[0].from);
+			hsb->s_gid = (gid_t)tmp;
 			break;
-		/* Boolean-valued options */
-		case Opt_quiet:
+		case opt_umask:
+			if (match_octal(&args[0], &tmp)) {
+				printk(KERN_ERR "hfs: umask requires a value\n");
+				return 0;
+			}
+			hsb->s_file_umask = (umode_t)tmp;
+			hsb->s_dir_umask = (umode_t)tmp;
+			break;
+		case opt_file_umask:
+			if (match_octal(&args[0], &tmp)) {
+				printk(KERN_ERR "hfs: file_umask requires a value\n");
+				return 0;
+			}
+			hsb->s_file_umask = (umode_t)tmp;
+			break;
+		case opt_dir_umask:
+			if (match_octal(&args[0], &tmp)) {
+				printk(KERN_ERR "hfs: dir_umask requires a value\n");
+				return 0;
+			}
+			hsb->s_dir_umask = (umode_t)tmp;
+			break;
+		case opt_part:
+			if (match_int(&args[0], &hsb->part)) {
+				printk(KERN_ERR "hfs: part requires an argument\n");
+				return 0;
+			}
+			break;
+		case opt_session:
+			if (match_int(&args[0], &hsb->session)) {
+				printk(KERN_ERR "hfs: session requires an argument\n");
+				return 0;
+			}
+			break;
+		case opt_type:
+			if (match_fourchar(&args[0], &hsb->s_type)) {
+				printk(KERN_ERR "hfs: type requires a 4 character value\n");
+				return 0;
+			}
+			break;
+		case opt_creator:
+			if (match_fourchar(&args[0], &hsb->s_creator)) {
+				printk(KERN_ERR "hfs: creator requires a 4 character value\n");
+				return 0;
+			}
+			break;
+		case opt_quiet:
 			hsb->s_quiet = 1;
 			break;
-		case Opt_afpd:
-			hsb->s_afpd = 1;
+		case opt_codepage:
+			if (hsb->nls_disk) {
+				printk(KERN_ERR "hfs: unable to change codepage\n");
+				return 0;
+			}
+			p = match_strdup(&args[0]);
+			if (p)
+				hsb->nls_disk = load_nls(p);
+			if (!hsb->nls_disk) {
+				printk(KERN_ERR "hfs: unable to load codepage \"%s\"\n", p);
+				kfree(p);
+				return 0;
+			}
+			kfree(p);
 			break;
-		/* Multiple choice options */
-		case Opt_names_netatalk:
-			names = 'n';
-			break;
-		case Opt_names_trivial:
-			names = 't';
-			break;
-		case Opt_names_alpha:
-			names = 'a';
-			break;
-		case Opt_names_latin:
-			names = 'l';
-			break;
-		case Opt_names_7bit:
-			names = '7';
-			break;
-		case Opt_names_8bit:
-			names = '8';
-			break;
-		case Opt_names_cap:
-			names = 'c';
-			break;
-		case Opt_fork_netatalk:
-			fork = 'n';
-			break;
-		case Opt_fork_single:
-			fork = 's';
-			break;
-		case Opt_fork_double:
-			fork = 'd';
-			break;
-		case Opt_fork_cap:
-			fork = 'c';
-			break;
-		case Opt_case_lower:
-			hsb->s_lowercase = 1;
-			break;
-		case Opt_case_asis:
-			hsb->s_lowercase = 0;
-			break;
-		case Opt_conv_binary:
-			hsb->s_conv = 'b';
-			break;
-		case Opt_conv_text:
-			hsb->s_conv = 't';
-			break;
-		case Opt_conv_auto:
-			hsb->s_conv = 'a';
+		case opt_iocharset:
+			if (hsb->nls_io) {
+				printk(KERN_ERR "hfs: unable to change iocharset\n");
+				return 0;
+			}
+			p = match_strdup(&args[0]);
+			if (p)
+				hsb->nls_io = load_nls(p);
+			if (!hsb->nls_io) {
+				printk(KERN_ERR "hfs: unable to load iocharset \"%s\"\n", p);
+				kfree(p);
+				return 0;
+			}
+			kfree(p);
 			break;
 		default:
 			return 0;
 		}
 	}
 
-done:
-	/* Parse the "fork" and "names" options */
-	if (fork == '?') {
-		fork = hsb->s_afpd ? 'n' : 'c';
+	if (hsb->nls_disk && !hsb->nls_io) {
+		hsb->nls_io = load_nls_default();
+		if (!hsb->nls_io) {
+			printk(KERN_ERR "hfs: unable to load default iocharset\n");
+			return 0;
+		}
 	}
-	switch (fork) {
-	default:
-	case 'c':
-		hsb->s_ifill = hfs_cap_ifill;
-		hsb->s_reserved1 = hfs_cap_reserved1;
-		hsb->s_reserved2 = hfs_cap_reserved2;
-		break;
-
-	case 's':
-		hfs_warn("hfs_fs: AppleSingle not yet implemented.\n");
-		return 0;
-		/* break; */
-	
-	case 'd':
-		hsb->s_ifill = hfs_dbl_ifill;
-		hsb->s_reserved1 = hfs_dbl_reserved1;
-		hsb->s_reserved2 = hfs_dbl_reserved2;
-		break;
-
-	case 'n':
-		hsb->s_ifill = hfs_nat_ifill;
-		hsb->s_reserved1 = hfs_nat_reserved1;
-		hsb->s_reserved2 = hfs_nat_reserved2;
-		break;
-	}
-
-	if (names == '?') {
-		names = fork;
-	}
-	switch (names) {
-	default:
-	case 'n':
-		hsb->s_nameout = hfs_colon2mac;
-		hsb->s_namein = hfs_mac2nat;
-		break;
-
-	case 'c':
-		hsb->s_nameout = hfs_colon2mac;
-		hsb->s_namein = hfs_mac2cap;
-		break;
-
-	case 't':
-		hsb->s_nameout = hfs_triv2mac;
-		hsb->s_namein = hfs_mac2triv;
-		break;
-
-	case '7':
-		hsb->s_nameout = hfs_prcnt2mac;
-		hsb->s_namein = hfs_mac2seven;
-		break;
-
-	case '8':
-		hsb->s_nameout = hfs_prcnt2mac;
-		hsb->s_namein = hfs_mac2eight;
-		break;
-
-	case 'l':
-		hsb->s_nameout = hfs_latin2mac;
-		hsb->s_namein = hfs_mac2latin;
-		break;
-
- 	case 'a':	/* 's' and 'd' are unadvertised aliases for 'alpha', */
- 	case 's':	/* since 'alpha' is the default if fork=s or fork=d. */
- 	case 'd':	/* (It is also helpful for poor typists!)           */
-		hsb->s_nameout = hfs_prcnt2mac;
-		hsb->s_namein = hfs_mac2alpha;
-		break;
-	}
+	hsb->s_dir_umask &= 0777;
+	hsb->s_file_umask &= 0577;
 
 	return 1;
 }
-
-/*================ Global functions ================*/
 
 /*
  * hfs_read_super()
@@ -497,122 +376,118 @@ done:
  * hfs_btree_init() to get the necessary data about the extents and
  * catalog B-trees and, finally, reading the root inode into memory.
  */
-int hfs_fill_super(struct super_block *s, void *data, int silent)
+static int hfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct hfs_sb_info *sbi;
-	struct hfs_mdb *mdb;
-	struct hfs_cat_key key;
-	hfs_s32 part_size, part_start;
+	struct hfs_find_data fd;
+	hfs_cat_rec rec;
 	struct inode *root_inode;
-	int part;
+	int res;
 
-	sbi = kmalloc(sizeof(struct hfs_sb_info), GFP_KERNEL);
+	sbi = kzalloc(sizeof(struct hfs_sb_info), GFP_KERNEL);
 	if (!sbi)
 		return -ENOMEM;
-	s->s_fs_info = sbi;
-	memset(sbi, 0, sizeof(struct hfs_sb_info));
 
-	if (!parse_options((char *)data, sbi, &part)) {
-		hfs_warn("hfs_fs: unable to parse mount options.\n");
-		goto bail2;
+	sb->s_fs_info = sbi;
+
+	res = -EINVAL;
+	if (!parse_options((char *)data, sbi)) {
+		printk(KERN_ERR "hfs: unable to parse mount options.\n");
+		goto bail;
 	}
 
-	/* set the device driver to 512-byte blocks */
-	sb_set_blocksize(s, HFS_SECTOR_SIZE);
+	sb->s_op = &hfs_super_operations;
+	sb->s_flags |= MS_NODIRATIME;
+	mutex_init(&sbi->bitmap_lock);
 
-#ifdef CONFIG_MAC_PARTITION
-	/* check to see if we're in a partition */
-	mdb = hfs_mdb_get(s, s->s_flags & MS_RDONLY, 0);
-
-	/* erk. try parsing the partition table ourselves */
-	if (!mdb) {
-		if (hfs_part_find(s, part, silent, &part_size, &part_start)) {
-	    		goto bail2;
-	  	}
-	  	mdb = hfs_mdb_get(s, s->s_flags & MS_RDONLY, part_start);
+	res = hfs_mdb_get(sb);
+	if (res) {
+		if (!silent)
+			printk(KERN_WARNING "hfs: can't find a HFS filesystem on dev %s.\n",
+				hfs_mdb_name(sb));
+		res = -EINVAL;
+		goto bail;
 	}
-#else
-	if (hfs_part_find(s, part, silent, &part_size, &part_start)) {
-		goto bail2;
-	}
-
-	mdb = hfs_mdb_get(s, s->s_flags & MS_RDONLY, part_start);
-#endif
-
-	if (!mdb) {
-		if (!silent) {
-			hfs_warn("VFS: Can't find a HFS filesystem on dev %s.\n",
-			       s->s_id);
-		}
-		goto bail2;
-	}
-
-	sbi->s_mdb = mdb;
-	if (HFS_ITYPE(mdb->next_id) != 0) {
-		hfs_warn("hfs_fs: too many files.\n");
-		goto bail1;
-	}
-
-	s->s_magic = HFS_SUPER_MAGIC;
-	s->s_op = &hfs_super_operations;
 
 	/* try to get the root inode */
-	hfs_cat_build_key(htonl(HFS_POR_CNID),
-			  (struct hfs_name *)(mdb->vname), &key);
-
-	root_inode = hfs_iget(hfs_cat_get(mdb, &key), HFS_ITYPE_NORM, NULL);
-	if (!root_inode) 
+	hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
+	res = hfs_cat_find_brec(sb, HFS_ROOT_CNID, &fd);
+	if (!res) {
+		if (fd.entrylength > sizeof(rec) || fd.entrylength < 0) {
+			res =  -EIO;
+			goto bail;
+		}
+		hfs_bnode_read(fd.bnode, &rec, fd.entryoffset, fd.entrylength);
+	}
+	if (res) {
+		hfs_find_exit(&fd);
 		goto bail_no_root;
-	  
-	s->s_root = d_alloc_root(root_inode);
-	if (!s->s_root) 
+	}
+	res = -EINVAL;
+	root_inode = hfs_iget(sb, &fd.search_key->cat, &rec);
+	hfs_find_exit(&fd);
+	if (!root_inode)
 		goto bail_no_root;
 
-	/* fix up pointers. */
-	HFS_I(root_inode)->entry->sys_entry[HFS_ITYPE_TO_INT(HFS_ITYPE_NORM)] =
-	  s->s_root;
-	s->s_root->d_op = &hfs_dentry_operations;
+	sb->s_d_op = &hfs_dentry_operations;
+	res = -ENOMEM;
+	sb->s_root = d_alloc_root(root_inode);
+	if (!sb->s_root)
+		goto bail_iput;
 
 	/* everything's okay */
 	return 0;
 
-bail_no_root: 
-	hfs_warn("hfs_fs: get root inode failed.\n");
+bail_iput:
 	iput(root_inode);
-bail1:
-	hfs_mdb_put(mdb, s->s_flags & MS_RDONLY);
-bail2:
-	kfree(sbi);
-	s->s_fs_info = NULL;
-	return -EINVAL;	
+bail_no_root:
+	printk(KERN_ERR "hfs: get root inode failed.\n");
+bail:
+	hfs_mdb_put(sb);
+	return res;
+}
+
+static struct dentry *hfs_mount(struct file_system_type *fs_type,
+		      int flags, const char *dev_name, void *data)
+{
+	return mount_bdev(fs_type, flags, dev_name, data, hfs_fill_super);
+}
+
+static struct file_system_type hfs_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "hfs",
+	.mount		= hfs_mount,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
+
+static void hfs_init_once(void *p)
+{
+	struct hfs_inode_info *i = p;
+
+	inode_init_once(&i->vfs_inode);
 }
 
 static int __init init_hfs_fs(void)
 {
-	int err = init_inodecache();
+	int err;
+
+	hfs_inode_cachep = kmem_cache_create("hfs_inode_cache",
+		sizeof(struct hfs_inode_info), 0, SLAB_HWCACHE_ALIGN,
+		hfs_init_once);
+	if (!hfs_inode_cachep)
+		return -ENOMEM;
+	err = register_filesystem(&hfs_fs_type);
 	if (err)
-		goto out1;
-        hfs_cat_init();
-	err = register_filesystem(&hfs_fs);
-	if (err)
-		goto out;
-	return 0;
-out:
-	hfs_cat_free();
-	destroy_inodecache();
-out1:
+		kmem_cache_destroy(hfs_inode_cachep);
 	return err;
 }
 
-static void __exit exit_hfs_fs(void) {
-	hfs_cat_free();
-	unregister_filesystem(&hfs_fs);
-	destroy_inodecache();
+static void __exit exit_hfs_fs(void)
+{
+	unregister_filesystem(&hfs_fs_type);
+	kmem_cache_destroy(hfs_inode_cachep);
 }
 
 module_init(init_hfs_fs)
 module_exit(exit_hfs_fs)
-
-#if defined(DEBUG_ALL) || defined(DEBUG_MEM)
-long int hfs_alloc = 0;
-#endif

@@ -3,7 +3,6 @@
  */
 #include <linux/kernel.h>
 
-#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -996,7 +995,7 @@ static SMC37c669_CONFIG_REGS *SMC37c669 __initdata = NULL;
 ** and standard ISA IRQs.
 **
 */
-static SMC37c669_IRQ_TRANSLATION_ENTRY *SMC37c669_irq_table __initdata = 0; 
+static SMC37c669_IRQ_TRANSLATION_ENTRY *SMC37c669_irq_table __initdata; 
 
 /*
 ** The following definition is for the default IRQ 
@@ -1045,7 +1044,7 @@ static SMC37c669_IRQ_TRANSLATION_ENTRY *SMC37c669_irq_tables[] __initdata =
 ** ISA DMA channels.
 **
 */
-static SMC37c669_DRQ_TRANSLATION_ENTRY *SMC37c669_drq_table __initdata = 0;
+static SMC37c669_DRQ_TRANSLATION_ENTRY *SMC37c669_drq_table __initdata;
 
 /*
 ** The following definition is the default DRQ
@@ -1104,7 +1103,7 @@ static int SMC37c669_xlate_drq(
     int drq 
 );
 
-static spinlock_t smc_lock __cacheline_aligned = SPIN_LOCK_UNLOCKED;
+static  __cacheline_aligned DEFINE_SPINLOCK(smc_lock);
 
 /*
 **++
@@ -2542,8 +2541,8 @@ void __init SMC669_Init ( int index )
         SMC37c669_display_device_info( );
 #endif
 	local_irq_restore(flags);
-        printk( "SMC37c669 Super I/O Controller found @ 0x%lx\n",
-		(unsigned long) SMC_base );
+        printk( "SMC37c669 Super I/O Controller found @ 0x%p\n",
+		SMC_base );
     }
     else {
 	local_irq_restore(flags);

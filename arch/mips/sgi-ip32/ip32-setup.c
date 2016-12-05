@@ -6,29 +6,32 @@
  * for more details.
  *
  * Copyright (C) 2000 Harald Koerfgen
+ * Copyright (C) 2002, 2003, 2005 Ilya A. Volynets
+ * Copyright (C) 2006 Ralf Baechle <ralf@linux-mips.org>
  */
-#include <linux/config.h>
-#include <linux/sched.h>
+#include <linux/console.h>
+#include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/mc146818rtc.h>
 #include <linux/param.h>
-#include <linux/init.h>
+#include <linux/sched.h>
 
-#include <asm/time.h>
-#include <asm/mipsregs.h>
 #include <asm/bootinfo.h>
+#include <asm/mc146818-time.h>
+#include <asm/mipsregs.h>
 #include <asm/mmu_context.h>
+#include <asm/sgialib.h>
+#include <asm/time.h>
+#include <asm/traps.h>
+#include <asm/io.h>
 #include <asm/ip32/crime.h>
 #include <asm/ip32/mace.h>
 #include <asm/ip32/ip32_ints.h>
-#include <asm/sgialib.h>
-#include <asm/traps.h>
 
-extern struct rtc_ops ip32_rtc_ops;
-extern u32 cc_interval;
+extern void ip32_be_init(void);
+extern void crime_init(void);
 
 #ifdef CONFIG_SGI_O2MACE_ETH
-
 /*
  * This is taken care of in here 'cause they say using Arc later on is
  * problematic
@@ -59,45 +62,41 @@ static inline void str2eaddr(unsigned char *ea, unsigned char *str)
 }
 #endif
 
-extern void ip32_time_init(void);
-extern void ip32_be_init(void);                                                
-extern void __init ip32_timer_setup (struct irqaction *irq);                   
-extern void __init crime_init (void);                                          
+/* An arbitrary time; this can be decreased if reliability looks good */
+#define WAIT_MS 10
 
-
-void __init ip32_setup(void)
+void __init plat_time_init(void)
 {
-#ifdef CONFIG_SERIAL_CONSOLE
-	char *ctype;
-#endif
-	TLBMISS_HANDLER_SETUP ();
+	printk(KERN_INFO "Calibrating system timer... ");
+	write_c0_count(0);
+	crime->timer = 0;
+	while (crime->timer < CRIME_MASTER_FREQ * WAIT_MS / 1000) ;
+	mips_hpt_frequency = read_c0_count() * 1000 / WAIT_MS;
+	printk("%d MHz CPU detected\n", mips_hpt_frequency * 2 / 1000000);
+}
 
-	mips_io_port_base = UNCACHEDADDR(MACEPCI_HI_IO);;
+void __init plat_mem_setup(void)
+{
+	board_be_init = ip32_be_init;
 
-#ifdef CONFIG_SERIAL_CONSOLE
-	ctype = ArcGetEnvironmentVariable("console");
-	if (*ctype == 'd') {
-		if (ctype[1] == '2')
-			console_setup ("ttyS1");
-		else
-			console_setup ("ttyS0");
-	}
-#endif
 #ifdef CONFIG_SGI_O2MACE_ETH
 	{
-		char *mac=ArcGetEnvironmentVariable("eaddr");
+		char *mac = ArcGetEnvironmentVariable("eaddr");
 		str2eaddr(o2meth_eaddr, mac);
 	}
 #endif
 
-#ifdef CONFIG_VT
-	conswitchp = &dummy_con;
+#if defined(CONFIG_SERIAL_CORE_CONSOLE)
+	{
+		char* con = ArcGetEnvironmentVariable("console");
+		if (con && *con == 'd') {
+			static char options[8] __initdata;
+			char *baud = ArcGetEnvironmentVariable("dbaud");
+			if (baud)
+				strcpy(options, baud);
+			add_preferred_console("ttyS", *(con + 1) == '2' ? 1 : 0,
+					      baud ? options : NULL);
+		}
+	}
 #endif
-
-	rtc_ops = &ip32_rtc_ops;
-	board_be_init = ip32_be_init;
-	board_time_init = ip32_time_init;
-	board_timer_setup = ip32_timer_setup;
-
-	crime_init();
 }

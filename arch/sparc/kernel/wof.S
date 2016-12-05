@@ -1,14 +1,12 @@
-/* $Id: wof.S,v 1.40 2000/01/08 16:38:18 anton Exp $
+/*
  * wof.S: Sparc window overflow handler.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <asm/cprefix.h>
 #include <asm/contregs.h>
 #include <asm/page.h>
 #include <asm/ptrace.h>
-#include <asm/asm_offsets.h>
 #include <asm/psr.h>
 #include <asm/smp.h>
 #include <asm/asi.h>
@@ -165,8 +163,8 @@ spwin_fromuser:
 	 * the label 'spwin_user_stack_is_bolixed' which will take
 	 * care of things at that point.
 	 */
-				.globl	C_LABEL(spwin_mmu_patchme)
-C_LABEL(spwin_mmu_patchme):	b	C_LABEL(spwin_sun4c_stackchk)
+	.globl	spwin_mmu_patchme
+spwin_mmu_patchme:	b	spwin_sun4c_stackchk
 				 andcc	%sp, 0x7, %g0
 
 spwin_good_ustack:
@@ -211,20 +209,18 @@ spwin_user_stack_is_bolixed:
 	bne	spwin_bad_ustack_from_kernel
 	 nop
 
-	ld	[%curptr + TI_TASK], %glob_tmp
-
 	/* Oh well, throw this one window into the per-task window
 	 * buffer, the first one.
 	 */
-	st	%sp, [%glob_tmp + AOFF_task_thread + AOFF_thread_rwbuf_stkptrs]
-	STORE_WINDOW(glob_tmp + AOFF_task_thread + AOFF_thread_reg_window)
+	st	%sp, [%curptr + TI_RWIN_SPTRS]
+	STORE_WINDOW(curptr + TI_REG_WINDOW)
 	restore	%g0, %g0, %g0
 
 	/* LOCATION: Trap Window */
 
 	/* Back in the trap window, update winbuffer save count. */
 	mov	1, %twin_tmp
-	st	%twin_tmp, [%glob_tmp + AOFF_task_thread + AOFF_thread_w_saved]
+	st	%twin_tmp, [%curptr + TI_W_SAVED]
 
 		/* Compute new user window mask.  What we are basically
 		 * doing is taking two windows, the invalid one at trap
@@ -256,7 +252,7 @@ spnwin_patch3:	and	%twin_tmp, 0xff, %twin_tmp	! patched on 7win Sparcs
 	/* Turn on traps and call c-code to deal with it. */
 	wr	%t_psr, PSR_ET, %psr
 	nop
-	call	C_LABEL(window_overflow_fault)
+	call	window_overflow_fault
 	 nop
 
 	/* Return from trap if C-code actually fixes things, if it
@@ -275,8 +271,7 @@ spwin_bad_ustack_from_kernel:
 	 * a per-process window buffer until we can properly handle
 	 * this later on.
 	 */
-	ld	[%curptr + TI_TASK], %glob_tmp	/* Using curptr one last time */
-	SAVE_BOLIXED_USER_STACK(glob_tmp, g6)	/* ...now using g6 as scratch */
+	SAVE_BOLIXED_USER_STACK(curptr, glob_tmp)
 	restore	%g0, %g0, %g0
 
 	/* LOCATION: Trap window */
@@ -311,8 +306,7 @@ spwin_bad_ustack_from_kernel:
  * As noted above %curptr cannot be touched by this routine at all.
  */
 
-	.globl	C_LABEL(spwin_sun4c_stackchk)
-C_LABEL(spwin_sun4c_stackchk):
+spwin_sun4c_stackchk:
 	/* LOCATION: Window to be saved on the stack */
 
 	/* See if the stack is in the address space hole but first,
@@ -383,8 +377,8 @@ spwin_sun4c_onepage:
 	 * works for all current v8/srmmu implementations, we'll
 	 * see...
 	 */
-	.globl	C_LABEL(spwin_srmmu_stackchk)
-C_LABEL(spwin_srmmu_stackchk):
+	.globl	spwin_srmmu_stackchk
+spwin_srmmu_stackchk:
 	/* LOCATION: Window to be saved on the stack */
 
 	/* Because of SMP concerns and speed we play a trick.

@@ -10,7 +10,6 @@
 
 #define ASSEMBLY
 
-#include <linux/config.h>
 #include <asm/linkage.h>
 	
 	.global SYMBOL_NAME(_start)
@@ -105,6 +104,7 @@ gpio_table:
 	;; PBDDR
 	.byte	0x00,0x00
 
+	.section .rodata
 __target_name:	
 	.asciz	"generic"
 	

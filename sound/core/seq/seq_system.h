@@ -1,6 +1,6 @@
 /*
  *  ALSA sequencer System Client
- *  Copyright (c) 1998 by Frank van de Pol <fvdpol@home.nl>
+ *  Copyright (c) 1998 by Frank van de Pol <fvdpol@coil.demon.nl>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -34,7 +34,7 @@ void snd_seq_system_broadcast(int client, int port, int type);
 #define snd_seq_system_client_ev_port_exit(client, port) snd_seq_system_broadcast(client, port, SNDRV_SEQ_EVENT_PORT_EXIT)
 #define snd_seq_system_client_ev_port_change(client, port) snd_seq_system_broadcast(client, port, SNDRV_SEQ_EVENT_PORT_CHANGE)
 
-int snd_seq_system_notify(int client, int port, snd_seq_event_t *ev);
+int snd_seq_system_notify(int client, int port, struct snd_seq_event *ev);
 
 /* register our internal client */
 int snd_seq_system_client_init(void);

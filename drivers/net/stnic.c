@@ -7,7 +7,6 @@
  * Copyright (C) 1999 kaz Kojima
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -20,13 +19,15 @@
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/hitachi_se.h>
+#include <mach-se/mach/se.h>
 #include <asm/machvec.h>
-#ifdef CONFIG_SH_STANDARD_BIOS 
+#ifdef CONFIG_SH_STANDARD_BIOS
 #include <asm/sh_bios.h>
 #endif
 
 #include "8390.h"
+
+#define DRV_NAME "stnic"
 
 #define byte	unsigned char
 #define half	unsigned short
@@ -59,8 +60,6 @@ static byte stnic_eadr[6] =
 
 static struct net_device *stnic_dev;
 
-static int stnic_open (struct net_device *dev);
-static int stnic_close (struct net_device *dev);
 static void stnic_reset (struct net_device *dev);
 static void stnic_get_hdr (struct net_device *dev, struct e8390_pkt_hdr *hdr,
 			   int ring_page);
@@ -97,31 +96,22 @@ STNIC_WRITE (int reg, byte val)
   *(vhalf *) (PA_83902 + ((reg) << 1)) = ((half) (val) << 8);
   STNIC_DELAY ();
 }
-
-int __init stnic_probe(void)
+
+static int __init stnic_probe(void)
 {
   struct net_device *dev;
-  int i;
+  int i, err;
 
   /* If we are not running on a SolutionEngine, give up now */
   if (! MACH_SE)
     return -ENODEV;
 
   /* New style probing API */
-  dev = init_etherdev (NULL, 0);
+  dev = alloc_ei_netdev();
   if (!dev)
   	return -ENOMEM;
-  SET_MODULE_OWNER(dev);
-  stnic_dev = dev;
 
-  /* Allocate dev->priv and fill in 8390 specific dev fields. */
-  if (ethdev_init (dev))
-    {
-      printk (KERN_EMERG "Unable to get memory for dev->priv.\n");
-      return -ENOMEM;
-    }
-
-#ifdef CONFIG_SH_STANDARD_BIOS 
+#ifdef CONFIG_SH_STANDARD_BIOS
   sh_bios_get_node_addr (stnic_eadr);
 #endif
   for (i = 0; i < ETHER_ADDR_LEN; i++)
@@ -130,23 +120,20 @@ int __init stnic_probe(void)
   /* Set the base address to point to the NIC, not the "real" base! */
   dev->base_addr = 0x1000;
   dev->irq = IRQ_STNIC;
-  dev->open = &stnic_open;
-  dev->stop = &stnic_close;
+  dev->netdev_ops = &ei_netdev_ops;
 
   /* Snarf the interrupt now.  There's no point in waiting since we cannot
      share and the board will usually be enabled. */
-  i = request_irq (dev->irq, ei_interrupt, 0, dev->name, dev);
-  if (i)  {
+  err = request_irq (dev->irq, ei_interrupt, 0, DRV_NAME, dev);
+  if (err)  {
       printk (KERN_EMERG " unable to get IRQ %d.\n", dev->irq);
-      unregister_netdev(dev);
-      kfree(dev->priv);
-      kfree(dev);
-      return i;
+      free_netdev(dev);
+      return err;
     }
 
   ei_status.name = dev->name;
   ei_status.word16 = 1;
-#ifdef __LITTLE_ENDIAN__ 
+#ifdef __LITTLE_ENDIAN__
   ei_status.bigendian = 0;
 #else
   ei_status.bigendian = 1;
@@ -162,25 +149,16 @@ int __init stnic_probe(void)
 
   stnic_init (dev);
 
+  err = register_netdev(dev);
+  if (err) {
+    free_irq(dev->irq, dev);
+    free_netdev(dev);
+    return err;
+  }
+  stnic_dev = dev;
+
   printk (KERN_INFO "NS ST-NIC 83902A\n");
 
-  return 0;
-}
-
-static int
-stnic_open (struct net_device *dev)
-{
-#if 0
-  printk (KERN_DEBUG "stnic open\n");
-#endif
-  ei_open (dev);
-  return 0;
-}
-
-static int
-stnic_close (struct net_device *dev)
-{
-  ei_close (dev);
   return 0;
 }
 
@@ -302,18 +280,15 @@ stnic_init (struct net_device *dev)
 {
   stnic_reset (dev);
   NS8390_init (dev, 0);
-  return;
 }
 
-/* Hardware interrupt handler.  */
-extern void ei_interrupt (int irq, void *dev_id, struct pt_regs *regs);
-
-void
-do_stnic_intr (int irq, void *dev_id, struct pt_regs *regs)
+static void __exit stnic_cleanup(void)
 {
-  ei_interrupt (0, stnic_dev, regs);
+	unregister_netdev(stnic_dev);
+	free_irq(stnic_dev->irq, stnic_dev);
+	free_netdev(stnic_dev);
 }
 
 module_init(stnic_probe);
-/* No cleanup routine. */
+module_exit(stnic_cleanup);
 MODULE_LICENSE("GPL");

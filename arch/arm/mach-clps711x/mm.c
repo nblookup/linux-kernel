@@ -22,9 +22,9 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/init.h>
-#include <linux/bootmem.h>
 
-#include <asm/hardware.h>
+#include <asm/sizes.h>
+#include <mach/hardware.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/mach/map.h>
@@ -34,7 +34,12 @@
  * This maps the generic CLPS711x registers
  */
 static struct map_desc clps711x_io_desc[] __initdata = {
- { CLPS7111_VIRT_BASE,	CLPS7111_PHYS_BASE,	1048576, MT_DEVICE }
+	{
+		.virtual	= CLPS7111_VIRT_BASE,
+		.pfn		= __phys_to_pfn(CLPS7111_PHYS_BASE),
+		.length		= SZ_1M,
+		.type		= MT_DEVICE
+	}
 };
 
 void __init clps711x_map_io(void)

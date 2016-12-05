@@ -6,7 +6,7 @@
 
 /* 2.3.x zone allocator, 1999 Andrea Arcangeli <andrea@suse.de> */
 
-#include <linux/config.h>
+#include <linux/pagemap.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -20,6 +20,7 @@
 #include <linux/init.h>
 #include <linux/bootmem.h> /* max_low_pfn */
 #include <linux/vmalloc.h>
+#include <linux/gfp.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -42,10 +43,9 @@ pgd_alloc(struct mm_struct *mm)
 {
 	pgd_t *ret, *init;
 
-	ret = (pgd_t *)__get_free_page(GFP_KERNEL);
+	ret = (pgd_t *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
 	init = pgd_offset(&init_mm, 0UL);
 	if (ret) {
-		clear_page(ret);
 #ifdef CONFIG_ALPHA_LARGE_VMALLOC
 		memcpy (ret + USER_PTRS_PER_PGD, init + USER_PTRS_PER_PGD,
 			(PTRS_PER_PGD - USER_PTRS_PER_PGD - 1)*sizeof(pgd_t));
@@ -58,15 +58,6 @@ pgd_alloc(struct mm_struct *mm)
 		  = pte_val(mk_pte(virt_to_page(ret), PAGE_KERNEL));
 	}
 	return ret;
-}
-
-pte_t *
-pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
-{
-	pte_t *pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
-	if (pte)
-		clear_page(pte);
-	return pte;
 }
 
 
@@ -97,36 +88,6 @@ __bad_page(void)
 	return pte_mkdirty(mk_pte(virt_to_page(EMPTY_PGE), PAGE_SHARED));
 }
 
-#ifndef CONFIG_DISCONTIGMEM
-void
-show_mem(void)
-{
-	long i,free = 0,total = 0,reserved = 0;
-	long shared = 0, cached = 0;
-
-	printk("\nMem-info:\n");
-	show_free_areas();
-	printk("Free swap:       %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
-	i = max_mapnr;
-	while (i-- > 0) {
-		total++;
-		if (PageReserved(mem_map+i))
-			reserved++;
-		else if (PageSwapCache(mem_map+i))
-			cached++;
-		else if (!page_count(mem_map+i))
-			free++;
-		else
-			shared += atomic_read(&mem_map[i].count) - 1;
-	}
-	printk("%ld pages of RAM\n",total);
-	printk("%ld free pages\n",free);
-	printk("%ld reserved pages\n",reserved);
-	printk("%ld pages shared\n",shared);
-	printk("%ld pages swap cached\n",cached);
-}
-#endif
-
 static inline unsigned long
 load_PCB(struct pcb_struct *pcb)
 {
@@ -152,9 +113,9 @@ switch_to_system_map(void)
 
 	/* Set the vptb.  This is often done by the bootloader, but 
 	   shouldn't be required.  */
-	if (hwrpb->vptb != 0xfffffffe00000000) {
-		wrvptptr(0xfffffffe00000000);
-		hwrpb->vptb = 0xfffffffe00000000;
+	if (hwrpb->vptb != 0xfffffffe00000000UL) {
+		wrvptptr(0xfffffffe00000000UL);
+		hwrpb->vptb = 0xfffffffe00000000UL;
 		hwrpb_update_checksum(hwrpb);
 	}
 
@@ -229,8 +190,20 @@ callback_init(void * kernel_end)
 
 	if (alpha_using_srm) {
 		static struct vm_struct console_remap_vm;
-		unsigned long vaddr = VMALLOC_START;
+		unsigned long nr_pages = 0;
+		unsigned long vaddr;
 		unsigned long i, j;
+
+		/* calculate needed size */
+		for (i = 0; i < crb->map_entries; ++i)
+			nr_pages += crb->map[i].count;
+
+		/* register the vm area */
+		console_remap_vm.flags = VM_ALLOC;
+		console_remap_vm.size = nr_pages << PAGE_SHIFT;
+		vm_area_register_early(&console_remap_vm, PAGE_SIZE);
+
+		vaddr = (unsigned long)console_remap_vm.addr;
 
 		/* Set up the third level PTEs and update the virtual
 		   addresses of the CRB entries.  */
@@ -238,7 +211,7 @@ callback_init(void * kernel_end)
 			unsigned long pfn = crb->map[i].pa >> PAGE_SHIFT;
 			crb->map[i].va = vaddr;
 			for (j = 0; j < crb->map[i].count; ++j) {
-				/* Newer console's (especially on larger
+				/* Newer consoles (especially on larger
 				   systems) may require more pages of
 				   PTEs. Grab additional pages as needed. */
 				if (pmd != pmd_offset(pgd, vaddr)) {
@@ -253,12 +226,6 @@ callback_init(void * kernel_end)
 				vaddr += PAGE_SIZE;
 			}
 		}
-
-		/* Let vmalloc know that we've allocated some space.  */
-		console_remap_vm.flags = VM_ALLOC;
-		console_remap_vm.addr = (void *) VMALLOC_START;
-		console_remap_vm.size = vaddr - VMALLOC_START;
-		vmlist = &console_remap_vm;
 	}
 
 	callback_init_done = 1;
@@ -270,10 +237,9 @@ callback_init(void * kernel_end)
 /*
  * paging_init() sets up the memory map.
  */
-void
-paging_init(void)
+void __init paging_init(void)
 {
-	unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+	unsigned long zones_size[MAX_NR_ZONES] = {0, };
 	unsigned long dma_pfn, high_pfn;
 
 	dma_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
@@ -301,8 +267,8 @@ srm_paging_stop (void)
 	/* Move the vptb back to where the SRM console expects it.  */
 	swapper_pg_dir[1] = swapper_pg_dir[1023];
 	tbia();
-	wrvptptr(0x200000000);
-	hwrpb->vptb = 0x200000000;
+	wrvptptr(0x200000000UL);
+	hwrpb->vptb = 0x200000000UL;
 	hwrpb_update_checksum(hwrpb);
 
 	/* Reload the page tables that the console had in use.  */
@@ -334,7 +300,7 @@ printk_memory_info(void)
 	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
 
 	printk("Memory: %luk/%luk available (%luk kernel code, %luk reserved, %luk data, %luk init)\n",
-	       (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+	       nr_free_pages() << (PAGE_SHIFT-10),
 	       max_mapnr << (PAGE_SHIFT-10),
 	       codesize >> 10,
 	       reservedpages << (PAGE_SHIFT-10),
@@ -359,7 +325,7 @@ free_reserved_mem(void *start, void *end)
 	void *__start = start;
 	for (; __start < end; __start += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(__start));
-		set_page_count(virt_to_page(__start), 1);
+		init_page_count(virt_to_page(__start));
 		free_page((long)__start);
 		totalram_pages++;
 	}

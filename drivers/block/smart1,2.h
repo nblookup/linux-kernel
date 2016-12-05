@@ -16,7 +16,7 @@
  *    along with this program; if not, write to the Free Software
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- *    Questions/Comments/Bugfixes to arrays@compaq.com
+ *    Questions/Comments/Bugfixes to iss_storagedev@hp.com
  *
  *    If you want to make changes, improve or add functionality to this
  *    driver, you'll probably need the Compaq Array Controller Interface
@@ -95,7 +95,7 @@ static unsigned long smart4_completed(ctlr_info_t *h)
  /*
  *  This hardware returns interrupt pending at a different place and 
  *  it does not tell us if the fifo is empty, we will have check  
- *  that by getting a 0 back from the comamnd_completed call. 
+ *  that by getting a 0 back from the command_completed call. 
  */
 static unsigned long smart4_intr_pending(ctlr_info_t *h)
 {
@@ -156,27 +156,27 @@ static struct access_method smart2_access = {
  */
 static void smart2e_submit_command(ctlr_info_t *h, cmdlist_t *c)
 {
-	outl(c->busaddr, h->ioaddr + COMMAND_FIFO);
+	outl(c->busaddr, h->io_mem_addr + COMMAND_FIFO);
 }
 
 static void smart2e_intr_mask(ctlr_info_t *h, unsigned long val)
 {
-	outl(val, h->ioaddr + INTR_MASK);
+	outl(val, h->io_mem_addr + INTR_MASK);
 }
 
 static unsigned long smart2e_fifo_full(ctlr_info_t *h)
 {
-	return inl(h->ioaddr + COMMAND_FIFO);
+	return inl(h->io_mem_addr + COMMAND_FIFO);
 }
 
 static unsigned long smart2e_completed(ctlr_info_t *h)
 {
-	return inl(h->ioaddr + COMMAND_COMPLETE_FIFO);
+	return inl(h->io_mem_addr + COMMAND_COMPLETE_FIFO);
 }
 
 static unsigned long smart2e_intr_pending(ctlr_info_t *h)
 {
-	return inl(h->ioaddr + INTR_PENDING);
+	return inl(h->io_mem_addr + INTR_PENDING);
 }
 
 static struct access_method smart2e_access = {
@@ -212,30 +212,30 @@ static void smart1_submit_command(ctlr_info_t *h, cmdlist_t *c)
 	 */
 	c->hdr.size = 0;
 
-	outb(CHANNEL_CLEAR, h->ioaddr + SMART1_SYSTEM_DOORBELL);
+	outb(CHANNEL_CLEAR, h->io_mem_addr + SMART1_SYSTEM_DOORBELL);
 
-	outl(c->busaddr, h->ioaddr + SMART1_LISTADDR);
-	outw(c->size, h->ioaddr + SMART1_LISTLEN);
+	outl(c->busaddr, h->io_mem_addr + SMART1_LISTADDR);
+	outw(c->size, h->io_mem_addr + SMART1_LISTLEN);
 
-	outb(CHANNEL_BUSY, h->ioaddr + SMART1_LOCAL_DOORBELL);
+	outb(CHANNEL_BUSY, h->io_mem_addr + SMART1_LOCAL_DOORBELL);
 }
 
 static void smart1_intr_mask(ctlr_info_t *h, unsigned long val)
 {
 	if (val == 1) {
-		outb(0xFD, h->ioaddr + SMART1_SYSTEM_DOORBELL);
-		outb(CHANNEL_BUSY, h->ioaddr + SMART1_LOCAL_DOORBELL);
-		outb(0x01, h->ioaddr + SMART1_INTR_MASK);
-		outb(0x01, h->ioaddr + SMART1_SYSTEM_MASK);
+		outb(0xFD, h->io_mem_addr + SMART1_SYSTEM_DOORBELL);
+		outb(CHANNEL_BUSY, h->io_mem_addr + SMART1_LOCAL_DOORBELL);
+		outb(0x01, h->io_mem_addr + SMART1_INTR_MASK);
+		outb(0x01, h->io_mem_addr + SMART1_SYSTEM_MASK);
 	} else {
-		outb(0, h->ioaddr + 0xC8E);
+		outb(0, h->io_mem_addr + 0xC8E);
 	}
 }
 
 static unsigned long smart1_fifo_full(ctlr_info_t *h)
 {
 	unsigned char chan;
-	chan = inb(h->ioaddr + SMART1_SYSTEM_DOORBELL) & CHANNEL_CLEAR;
+	chan = inb(h->io_mem_addr + SMART1_SYSTEM_DOORBELL) & CHANNEL_CLEAR;
 	return chan;
 }
 
@@ -244,13 +244,13 @@ static unsigned long smart1_completed(ctlr_info_t *h)
 	unsigned char status;
 	unsigned long cmd;
 
-	if (inb(h->ioaddr + SMART1_SYSTEM_DOORBELL) & CHANNEL_BUSY) {
-		outb(CHANNEL_BUSY, h->ioaddr + SMART1_SYSTEM_DOORBELL);
+	if (inb(h->io_mem_addr + SMART1_SYSTEM_DOORBELL) & CHANNEL_BUSY) {
+		outb(CHANNEL_BUSY, h->io_mem_addr + SMART1_SYSTEM_DOORBELL);
 
-		cmd = inl(h->ioaddr + SMART1_COMPLETE_ADDR);
-		status = inb(h->ioaddr + SMART1_LISTSTATUS);
+		cmd = inl(h->io_mem_addr + SMART1_COMPLETE_ADDR);
+		status = inb(h->io_mem_addr + SMART1_LISTSTATUS);
 
-		outb(CHANNEL_CLEAR, h->ioaddr + SMART1_LOCAL_DOORBELL);
+		outb(CHANNEL_CLEAR, h->io_mem_addr + SMART1_LOCAL_DOORBELL);
 
 		/*
 		 * this is x86 (actually compaq x86) only, so it's ok
@@ -265,7 +265,7 @@ static unsigned long smart1_completed(ctlr_info_t *h)
 static unsigned long smart1_intr_pending(ctlr_info_t *h)
 {
 	unsigned char chan;
-	chan = inb(h->ioaddr + SMART1_SYSTEM_DOORBELL) & CHANNEL_BUSY;
+	chan = inb(h->io_mem_addr + SMART1_SYSTEM_DOORBELL) & CHANNEL_BUSY;
 	return chan;
 }
 

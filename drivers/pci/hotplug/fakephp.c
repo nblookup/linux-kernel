@@ -1,232 +1,164 @@
-/*
- * Fake PCI Hot Plug Controller Driver
+/* Works like the fakephp driver used to, except a little better.
  *
- * Copyright (C) 2003 Greg Kroah-Hartman <greg@kroah.com>
- * Copyright (C) 2003 IBM Corp.
- * Copyright (C) 2003 Rolf Eike Beer <eike-kernel@sf-tec.de>
+ * - It's possible to remove devices with subordinate busses.
+ * - New PCI devices that appear via any method, not just a fakephp triggered
+ *   rescan, will be noticed.
+ * - Devices that are removed via any method, not just a fakephp triggered
+ *   removal, will also be noticed.
  *
- * Based on ideas and code from:
- * 	Vladimir Kondratiev <vladimir.kondratiev@intel.com>
- *	Rolf Eike Beer <eike-kernel@sf-tec.de>
+ * Uses nothing from the pci-hotplug subsystem.
  *
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, version 2 of the License.
- *
- * Send feedback to <greg@kroah.com>
  */
 
-/*
- *
- * This driver will "emulate" removing PCI devices from the system.  If
- * the "power" file is written to with "0" then the specified PCI device
- * will be completely removed from the kernel.
- *
- * WARNING, this does NOT turn off the power to the PCI device.  This is
- * a "logical" removal, not a physical or electrical removal.
- *
- * Use this module at your own risk, you have been warned!
- *
- * Enabling PCI devices is left as an exercise for the reader...
- *
- */
-#include <linux/config.h>
-#include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/pci.h>
+#include <linux/kernel.h>
+#include <linux/types.h>
+#include <linux/list.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
 #include <linux/init.h>
-#include "pci_hotplug.h"
+#include <linux/pci.h>
+#include <linux/device.h>
+#include <linux/slab.h>
 #include "../pci.h"
 
-#if !defined(CONFIG_HOTPLUG_PCI_FAKE_MODULE)
-	#define MY_NAME	"fakephp"
-#else
-	#define MY_NAME	THIS_MODULE->name
-#endif
-
-#define dbg(format, arg...)					\
-	do {							\
-		if (debug)					\
-			printk(KERN_DEBUG "%s: " format,	\
-				MY_NAME , ## arg); 		\
-	} while (0)
-#define err(format, arg...) printk(KERN_ERR "%s: " format, MY_NAME , ## arg)
-#define info(format, arg...) printk(KERN_INFO "%s: " format, MY_NAME , ## arg)
-
-#define DRIVER_AUTHOR	"Greg Kroah-Hartman <greg@kroah.com>"
-#define DRIVER_DESC	"Fake PCI Hot Plug Controller Driver"
-
-struct dummy_slot {
-	struct list_head node;
-	struct hotplug_slot *slot;
-	struct pci_dev *dev;
+struct legacy_slot {
+	struct kobject		kobj;
+	struct pci_dev		*dev;
+	struct list_head	list;
 };
 
-static int debug;
-static LIST_HEAD(slot_list);
+static LIST_HEAD(legacy_list);
 
-static int enable_slot (struct hotplug_slot *slot);
-static int disable_slot (struct hotplug_slot *slot);
-
-static struct hotplug_slot_ops dummy_hotplug_slot_ops = {
-	.owner			= THIS_MODULE,
-	.enable_slot		= enable_slot,
-	.disable_slot		= disable_slot,
-};
-
-static void dummy_release(struct hotplug_slot *slot)
+static ssize_t legacy_show(struct kobject *kobj, struct attribute *attr,
+			   char *buf)
 {
-	struct dummy_slot *dslot = slot->private;
-
-	list_del(&dslot->node);
-	kfree(dslot->slot->info);
-	kfree(dslot->slot);
-	pci_dev_put(dslot->dev);
-	kfree(dslot);
+	struct legacy_slot *slot = container_of(kobj, typeof(*slot), kobj);
+	strcpy(buf, "1\n");
+	return 2;
 }
 
-static int add_slot(struct pci_dev *dev)
+static void remove_callback(void *data)
 {
-	struct dummy_slot *dslot;
-	struct hotplug_slot *slot;
-	int retval = -ENOMEM;
+	pci_remove_bus_device((struct pci_dev *)data);
+}
 
-	slot = kmalloc(sizeof(struct hotplug_slot), GFP_KERNEL);
-	if (!slot)
-		goto error;
-	memset(slot, 0, sizeof(*slot));
+static ssize_t legacy_store(struct kobject *kobj, struct attribute *attr,
+			    const char *buf, size_t len)
+{
+	struct legacy_slot *slot = container_of(kobj, typeof(*slot), kobj);
+	unsigned long val;
 
-	slot->info = kmalloc(sizeof(struct hotplug_slot_info), GFP_KERNEL);
-	if (!slot->info)
-		goto error_slot;
-	memset(slot->info, 0, sizeof(struct hotplug_slot_info));
+	if (strict_strtoul(buf, 0, &val) < 0)
+		return -EINVAL;
 
-	slot->info->power_status = 1;
-	slot->info->max_bus_speed = PCI_SPEED_UNKNOWN;
-	slot->info->cur_bus_speed = PCI_SPEED_UNKNOWN;
+	if (val)
+		pci_rescan_bus(slot->dev->bus);
+	else
+		sysfs_schedule_callback(&slot->dev->dev.kobj, remove_callback,
+					slot->dev, THIS_MODULE);
+	return len;
+}
 
-	slot->name = &dev->dev.bus_id[0];
-	dbg("slot->name = %s\n", slot->name);
+static struct attribute *legacy_attrs[] = {
+	&(struct attribute){ .name = "power", .mode = 0644 },
+	NULL,
+};
 
-	dslot = kmalloc(sizeof(struct dummy_slot), GFP_KERNEL);
-	if (!dslot)
-		goto error_info;
+static void legacy_release(struct kobject *kobj)
+{
+	struct legacy_slot *slot = container_of(kobj, typeof(*slot), kobj);
 
-	slot->ops = &dummy_hotplug_slot_ops;
-	slot->release = &dummy_release;
-	slot->private = dslot;
-
-	retval = pci_hp_register(slot);
-	if (retval) {
-		err("pci_hp_register failed with error %d\n", retval);
-		goto error_dslot;
-	}
-
-	dslot->slot = slot;
-	dslot->dev = pci_dev_get(dev);
-	list_add (&dslot->node, &slot_list);
-	return retval;
-
-error_dslot:
-	kfree(dslot);
-error_info:
-	kfree(slot->info);
-error_slot:
+	pci_dev_put(slot->dev);
 	kfree(slot);
-error:
-	return retval;
 }
 
-static int __init pci_scan_buses(void)
+static struct kobj_type legacy_ktype = {
+	.sysfs_ops = &(const struct sysfs_ops){
+		.store = legacy_store, .show = legacy_show
+	},
+	.release = &legacy_release,
+	.default_attrs = legacy_attrs,
+};
+
+static int legacy_add_slot(struct pci_dev *pdev)
 {
-	struct pci_dev *dev = NULL;
-	int retval = 0;
-
-	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
-		retval = add_slot(dev);
-		if (retval) {
-			pci_dev_put(dev);
-			break;
-		}
-	}
-
-	return retval;
-}
-
-static void remove_slot(struct dummy_slot *dslot)
-{
-	int retval;
-
-	dbg("removing slot %s\n", dslot->slot->name);
-	retval = pci_hp_deregister(dslot->slot);
-	if (retval)
-		err("Problem unregistering a slot %s\n", dslot->slot->name);
-}
-
-static int enable_slot(struct hotplug_slot *hotplug_slot)
-{
-	return -ENODEV;
-}
-
-static int disable_slot(struct hotplug_slot *slot)
-{
-	struct dummy_slot *dslot;
+	struct legacy_slot *slot = kzalloc(sizeof(*slot), GFP_KERNEL);
 
 	if (!slot)
-		return -ENODEV;
-	dslot = slot->private;
+		return -ENOMEM;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, slot->name);
-
-	/* don't disable bridged devices just yet, we can't handle them easily... */
-	if (dslot->dev->subordinate) {
-		err("Can't remove PCI devices with other PCI devices behind it yet.\n");
-		return -ENODEV;
+	if (kobject_init_and_add(&slot->kobj, &legacy_ktype,
+				 &pci_slots_kset->kobj, "%s",
+				 dev_name(&pdev->dev))) {
+		dev_warn(&pdev->dev, "Failed to created legacy fake slot\n");
+		return -EINVAL;
 	}
+	slot->dev = pci_dev_get(pdev);
 
-	/* remove the device from the pci core */
-	pci_remove_bus_device(dslot->dev);
-
-	/* blow away this sysfs entry and other parts. */
-	remove_slot(dslot);
+	list_add(&slot->list, &legacy_list);
 
 	return 0;
 }
 
-static void cleanup_slots (void)
+static int legacy_notify(struct notifier_block *nb,
+			 unsigned long action, void *data)
 {
-	struct list_head *tmp;
-	struct list_head *next;
-	struct dummy_slot *dslot;
+	struct pci_dev *pdev = to_pci_dev(data);
 
-	list_for_each_safe (tmp, next, &slot_list) {
-		dslot = list_entry (tmp, struct dummy_slot, node);
-		remove_slot(dslot);
+	if (action == BUS_NOTIFY_ADD_DEVICE) {
+		legacy_add_slot(pdev);
+	} else if (action == BUS_NOTIFY_DEL_DEVICE) {
+		struct legacy_slot *slot;
+
+		list_for_each_entry(slot, &legacy_list, list)
+			if (slot->dev == pdev)
+				goto found;
+
+		dev_warn(&pdev->dev, "Missing legacy fake slot?");
+		return -ENODEV;
+found:
+		kobject_del(&slot->kobj);
+		list_del(&slot->list);
+		kobject_put(&slot->kobj);
 	}
-	
+
+	return 0;
 }
 
-static int __init dummyphp_init(void)
+static struct notifier_block legacy_notifier = {
+	.notifier_call = legacy_notify
+};
+
+static int __init init_legacy(void)
 {
-	info(DRIVER_DESC "\n");
+	struct pci_dev *pdev = NULL;
 
-	return pci_scan_buses();
+	/* Add existing devices */
+	for_each_pci_dev(pdev)
+		legacy_add_slot(pdev);
+
+	/* Be alerted of any new ones */
+	bus_register_notifier(&pci_bus_type, &legacy_notifier);
+	return 0;
 }
+module_init(init_legacy);
 
-
-static void __exit dummyphp_exit(void)
+static void __exit remove_legacy(void)
 {
-	cleanup_slots();
+	struct legacy_slot *slot, *tmp;
+
+	bus_unregister_notifier(&pci_bus_type, &legacy_notifier);
+
+	list_for_each_entry_safe(slot, tmp, &legacy_list, list) {
+		list_del(&slot->list);
+		kobject_del(&slot->kobj);
+		kobject_put(&slot->kobj);
+	}
 }
+module_exit(remove_legacy);
 
-module_init(dummyphp_init);
-module_exit(dummyphp_exit);
 
-MODULE_AUTHOR(DRIVER_AUTHOR);
-MODULE_DESCRIPTION(DRIVER_DESC);
+MODULE_AUTHOR("Trent Piepho <xyzzy@speakeasy.org>");
+MODULE_DESCRIPTION("Legacy version of the fakephp interface");
 MODULE_LICENSE("GPL");
-MODULE_PARM(debug, "i");
-MODULE_PARM_DESC(debug, "Debugging mode enabled or not");
-

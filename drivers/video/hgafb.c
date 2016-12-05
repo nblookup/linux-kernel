@@ -36,12 +36,11 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/platform_device.h>
 #include <asm/io.h>
 #include <asm/vga.h>
 
@@ -59,16 +58,16 @@
 
 /* Description of the hardware layout */
 
-static unsigned long hga_vram_base;		/* Base of video memory */
+static void __iomem *hga_vram;			/* Base of video memory */
 static unsigned long hga_vram_len;		/* Size of video memory */
 
 #define HGA_ROWADDR(row) ((row%4)*8192 + (row>>2)*90)
 #define HGA_TXT			0
 #define HGA_GFX			1
 
-static inline u8* rowaddr(struct fb_info *info, u_int row)
+static inline u8 __iomem * rowaddr(struct fb_info *info, u_int row)
 {
-        return info->screen_base + HGA_ROWADDR(row);
+	return info->screen_base + HGA_ROWADDR(row);
 }
 
 static int hga_mode = -1;			/* 0 = txt, 1 = gfx mode */
@@ -103,11 +102,11 @@ static char *hga_type_name;
 
 /* Global locks */
 
-static spinlock_t hga_reg_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(hga_reg_lock);
 
 /* Framebuffer driver structures */
 
-static struct fb_var_screeninfo hga_default_var = {
+static struct fb_var_screeninfo hga_default_var __devinitdata = {
 	.xres		= 720,
 	.yres 		= 348,
 	.xres_virtual 	= 720,
@@ -121,7 +120,7 @@ static struct fb_var_screeninfo hga_default_var = {
 	.width 		= -1,
 };
 
-static struct fb_fix_screeninfo hga_fix = {
+static struct fb_fix_screeninfo hga_fix __devinitdata = {
 	.id 		= "HGA",
 	.type 		= FB_TYPE_PACKED_PIXELS,	/* (not sure) */
 	.visual 	= FB_VISUAL_MONO10,
@@ -130,8 +129,6 @@ static struct fb_fix_screeninfo hga_fix = {
 	.line_length 	= 90,
 	.accel 		= FB_ACCEL_NONE
 };
-
-static struct fb_info fb_info;
 
 /* Don't assume that tty1 will be the initial current console. */
 static int release_io_port = 0;
@@ -176,7 +173,7 @@ static void hga_clear_screen(void)
 		fillchar = 0x00;
 	spin_unlock_irqrestore(&hga_reg_lock, flags);
 	if (fillchar != 0xbf)
-		isa_memset_io(hga_vram_base, fillchar, hga_vram_len);
+		memset_io(hga_vram, fillchar, hga_vram_len);
 }
 
 static void hga_txt_mode(void)
@@ -244,13 +241,13 @@ static void hga_gfx_mode(void)
 static void hga_show_logo(struct fb_info *info)
 {
 /*
-	unsigned long dest = hga_vram_base;
+	void __iomem *dest = hga_vram;
 	char *logo = linux_logo_bw;
 	int x, y;
 	
 	for (y = 134; y < 134 + 80 ; y++) * this needs some cleanup *
 		for (x = 0; x < 10 ; x++)
-			isa_writeb(~*(logo++),(dest + HGA_ROWADDR(y) + x + 40));
+			writeb(~*(logo++),(dest + HGA_ROWADDR(y) + x + 40));
 */
 }
 
@@ -279,14 +276,15 @@ static void hga_blank(int blank_mode)
 	spin_unlock_irqrestore(&hga_reg_lock, flags);
 }
 
-static int __init hga_card_detect(void)
+static int __devinit hga_card_detect(void)
 {
-	int count=0;
-	unsigned long p, q;
+	int count = 0;
+	void __iomem *p, *q;
 	unsigned short p_save, q_save;
 
-	hga_vram_base = 0xb0000;
 	hga_vram_len  = 0x08000;
+
+	hga_vram = ioremap(0xb0000, hga_vram_len);
 
 	if (request_region(0x3b0, 12, "hgafb"))
 		release_io_ports = 1;
@@ -295,29 +293,27 @@ static int __init hga_card_detect(void)
 
 	/* do a memory check */
 
-	p = hga_vram_base;
-	q = hga_vram_base + 0x01000;
+	p = hga_vram;
+	q = hga_vram + 0x01000;
 
-	p_save = isa_readw(p); q_save = isa_readw(q);
+	p_save = readw(p); q_save = readw(q);
 
-	isa_writew(0xaa55, p); if (isa_readw(p) == 0xaa55) count++;
-	isa_writew(0x55aa, p); if (isa_readw(p) == 0x55aa) count++;
-	isa_writew(p_save, p);
+	writew(0xaa55, p); if (readw(p) == 0xaa55) count++;
+	writew(0x55aa, p); if (readw(p) == 0x55aa) count++;
+	writew(p_save, p);
 
-	if (count != 2) {
-		return 0;
-	}
+	if (count != 2)
+		goto error;
 
 	/* Ok, there is definitely a card registering at the correct
 	 * memory location, so now we do an I/O port test.
 	 */
 	
-	if (!test_hga_b(0x66, 0x0f)) {	    /* cursor low register */
-		return 0;
-	}
-	if (!test_hga_b(0x99, 0x0f)) {     /* cursor low register */
-		return 0;
-	}
+	if (!test_hga_b(0x66, 0x0f))	    /* cursor low register */
+		goto error;
+
+	if (!test_hga_b(0x99, 0x0f))     /* cursor low register */
+		goto error;
 
 	/* See if the card is a Hercules, by checking whether the vsync
 	 * bit of the status register is changing.  This test lasts for
@@ -332,7 +328,7 @@ static int __init hga_card_detect(void)
 	}
 
 	if (p_save == q_save) 
-		return 0;
+		goto error;
 
 	switch (inb_p(HGA_STATUS_PORT) & 0x70) {
 		case 0x10:
@@ -349,6 +345,12 @@ static int __init hga_card_detect(void)
 			break;
 	}
 	return 1;
+error:
+	if (release_io_ports)
+		release_region(0x3b0, 12);
+	if (release_io_port)
+		release_region(0x3bf, 1);
+	return 0;
 }
 
 /**
@@ -411,7 +413,8 @@ static int hgafb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
  *	A zero is returned on success and %-EINVAL for failure.
  */
 
-int hgafb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
+static int hgafb_pan_display(struct fb_var_screeninfo *var,
+			     struct fb_info *info)
 {
 	if (var->vmode & FB_VMODE_YWRAP) {
 		if (var->yoffset < 0 || 
@@ -448,10 +451,13 @@ static int hgafb_blank(int blank_mode, struct fb_info *info)
 	return 0;
 }
 
+/*
+ * Accel functions
+ */
 static void hgafb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
 	u_int rows, y;
-	u8 *dest;
+	u8 __iomem *dest;
 
 	y = rect->dy;
 
@@ -459,10 +465,10 @@ static void hgafb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 		dest = rowaddr(info, y) + (rect->dx >> 3);
 		switch (rect->rop) {
 		case ROP_COPY:
-			//fb_memset(dest, rect->color, (rect->width >> 3));
+			memset_io(dest, rect->color, (rect->width >> 3));
 			break;
 		case ROP_XOR:
-			*dest = ~*dest;
+			fb_writeb(~(fb_readb(dest)), dest);
 			break;
 		}
 	}
@@ -471,7 +477,8 @@ static void hgafb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 static void hgafb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
 	u_int rows, y1, y2;
-	u8 *src, *dest;
+	u8 __iomem *src;
+	u8 __iomem *dest;
 
 	if (area->dy <= area->sy) {
 		y1 = area->sy;
@@ -480,7 +487,7 @@ static void hgafb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 		for (rows = area->height; rows--; ) {
 			src = rowaddr(info, y1) + (area->sx >> 3);
 			dest = rowaddr(info, y2) + (area->dx >> 3);
-			//fb_memmove(dest, src, (area->width >> 3));
+			memmove(dest, src, (area->width >> 3));
 			y1++;
 			y2++;
 		}
@@ -491,7 +498,7 @@ static void hgafb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 		for (rows = area->height; rows--;) {
 			src = rowaddr(info, y1) + (area->sx >> 3);
 			dest = rowaddr(info, y2) + (area->dx >> 3);
-			//fb_memmove(dest, src, (area->width >> 3));
+			memmove(dest, src, (area->width >> 3));
 			y1--;
 			y2--;
 		}
@@ -500,17 +507,20 @@ static void hgafb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 
 static void hgafb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
-	u8 *dest, *cdat = (u8 *) image->data;
+	u8 __iomem *dest;
+	u8 *cdat = (u8 *) image->data;
 	u_int rows, y = image->dy;
+	u_int x;
 	u8 d;
 
 	for (rows = image->height; rows--; y++) {
-		d = *cdat++;
-		dest = rowaddr(info, y) + (image->dx >> 3);
-		*dest = d;
+		for (x = 0; x < image->width; x+= 8) {
+			d = *cdat++;
+			dest = rowaddr(info, y) + ((image->dx + x)>> 3);
+			fb_writeb(d, dest);
+		}
 	}
 }
-
 
 static struct fb_ops hgafb_ops = {
 	.owner		= THIS_MODULE,
@@ -519,9 +529,9 @@ static struct fb_ops hgafb_ops = {
 	.fb_setcolreg	= hgafb_setcolreg,
 	.fb_pan_display	= hgafb_pan_display,
 	.fb_blank	= hgafb_blank,
-	.fb_fillrect	= cfb_fillrect, //hgafb_fillrect,
-	.fb_copyarea	= cfb_copyarea,	//hgafb_copyarea,
-	.fb_imageblit	= cfb_imageblit,//hgafb_imageblit,
+	.fb_fillrect	= hgafb_fillrect,
+	.fb_copyarea	= hgafb_copyarea,
+	.fb_imageblit	= hgafb_imageblit,
 };
 		
 /* ------------------------------------------------------------------------- *
@@ -536,57 +546,111 @@ static struct fb_ops hgafb_ops = {
 	 *  Initialization
 	 */
 
-int __init hgafb_init(void)
+static int __devinit hgafb_probe(struct platform_device *pdev)
 {
+	struct fb_info *info;
+
 	if (! hga_card_detect()) {
-		printk(KERN_ERR "hgafb: HGA card not detected.\n");
+		printk(KERN_INFO "hgafb: HGA card not detected.\n");
+		if (hga_vram)
+			iounmap(hga_vram);
 		return -EINVAL;
 	}
 
 	printk(KERN_INFO "hgafb: %s with %ldK of memory detected.\n",
 		hga_type_name, hga_vram_len/1024);
 
-	hga_fix.smem_start = VGA_MAP_MEM(hga_vram_base);
+	info = framebuffer_alloc(0, &pdev->dev);
+	if (!info) {
+		iounmap(hga_vram);
+		return -ENOMEM;
+	}
+
+	hga_fix.smem_start = (unsigned long)hga_vram;
 	hga_fix.smem_len = hga_vram_len;
 
-	fb_info.flags = FBINFO_FLAG_DEFAULT;
-	fb_info.var = hga_default_var;
-	fb_info.fix = hga_fix;
-	fb_info.monspecs.hfmin = 0;
-	fb_info.monspecs.hfmax = 0;
-	fb_info.monspecs.vfmin = 10000;
-	fb_info.monspecs.vfmax = 10000;
-	fb_info.monspecs.dpms = 0;
-	fb_info.fbops = &hgafb_ops;
-	fb_info.screen_base = (char *)hga_fix.smem_start;
+	info->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_YPAN;
+	info->var = hga_default_var;
+	info->fix = hga_fix;
+	info->monspecs.hfmin = 0;
+	info->monspecs.hfmax = 0;
+	info->monspecs.vfmin = 10000;
+	info->monspecs.vfmax = 10000;
+	info->monspecs.dpms = 0;
+	info->fbops = &hgafb_ops;
+	info->screen_base = hga_vram;
 
-        if (register_framebuffer(&fb_info) < 0)
-                return -EINVAL;
+        if (register_framebuffer(info) < 0) {
+		framebuffer_release(info);
+		iounmap(hga_vram);
+		return -EINVAL;
+	}
 
         printk(KERN_INFO "fb%d: %s frame buffer device\n",
-               fb_info.node, fb_info.fix.id);
+               info->node, info->fix.id);
+	platform_set_drvdata(pdev, info);
 	return 0;
 }
 
-	/*
-	 *  Setup
-	 */
-
-int __init hgafb_setup(char *options)
+static int __devexit hgafb_remove(struct platform_device *pdev)
 {
-	return 0;
-}
+	struct fb_info *info = platform_get_drvdata(pdev);
 
-#ifdef MODULE
-static void __exit hgafb_exit(void)
-{
 	hga_txt_mode();
 	hga_clear_screen();
-	unregister_framebuffer(&fb_info);
-	if (release_io_ports) release_region(0x3b0, 12);
-	if (release_io_port) release_region(0x3bf, 1);
+
+	if (info) {
+		unregister_framebuffer(info);
+		framebuffer_release(info);
+	}
+
+	iounmap(hga_vram);
+
+	if (release_io_ports)
+		release_region(0x3b0, 12);
+
+	if (release_io_port)
+		release_region(0x3bf, 1);
+
+	return 0;
 }
-#endif
+
+static struct platform_driver hgafb_driver = {
+	.probe = hgafb_probe,
+	.remove = __devexit_p(hgafb_remove),
+	.driver = {
+		.name = "hgafb",
+	},
+};
+
+static struct platform_device *hgafb_device;
+
+static int __init hgafb_init(void)
+{
+	int ret;
+
+	if (fb_get_options("hgafb", NULL))
+		return -ENODEV;
+
+	ret = platform_driver_register(&hgafb_driver);
+
+	if (!ret) {
+		hgafb_device = platform_device_register_simple("hgafb", 0, NULL, 0);
+
+		if (IS_ERR(hgafb_device)) {
+			platform_driver_unregister(&hgafb_driver);
+			ret = PTR_ERR(hgafb_device);
+		}
+	}
+
+	return ret;
+}
+
+static void __exit hgafb_exit(void)
+{
+	platform_device_unregister(hgafb_device);
+	platform_driver_unregister(&hgafb_driver);
+}
 
 /* -------------------------------------------------------------------------
  *
@@ -598,10 +662,7 @@ MODULE_AUTHOR("Ferenc Bakonyi (fero@drama.obuda.kando.hu)");
 MODULE_DESCRIPTION("FBDev driver for Hercules Graphics Adaptor");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(nologo, "i");
+module_param(nologo, bool, 0);
 MODULE_PARM_DESC(nologo, "Disables startup logo if != 0 (default=0)");
-
-#ifdef MODULE
 module_init(hgafb_init);
 module_exit(hgafb_exit);
-#endif

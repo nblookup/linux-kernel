@@ -5,14 +5,8 @@
 #undef  DO_TIMINGS
 
 #include <linux/module.h>
-#include <linux/version.h>
-
-#if LINUX_VERSION_CODE > 131328
-#define LINUX21X
-#endif
 
 #ifdef __KERNEL__
-#include <linux/utsname.h>
 #include <linux/string.h>
 #include <linux/fs.h>
 #include <asm/dma.h>
@@ -23,9 +17,6 @@
 #include <linux/ioport.h>
 #include <asm/page.h>
 #include <asm/system.h>
-#ifdef __alpha__
-#include <asm/segment.h>
-#endif
 #include <linux/vmalloc.h>
 #include <asm/uaccess.h>
 #include <linux/poll.h>
@@ -46,10 +37,10 @@ extern void reprogram_timer(void);
 
 #define USE_AUTOINIT_DMA
 
-extern caddr_t sound_mem_blocks[1024];
+extern void *sound_mem_blocks[1024];
 extern int sound_nblocks;
 
 #undef PSEUDO_DMA_AUTOINIT
 #define ALLOW_BUFFER_MAPPING
 
-extern struct file_operations oss_sound_fops;
+extern const struct file_operations oss_sound_fops;

@@ -29,7 +29,6 @@
  *  $Id: aic7xxx_proc.c,v 4.1 1997/06/97 08:23:42 deang Exp $
  *-M*************************************************************************/
 
-#include <linux/config.h>
 
 #define	BLS	(&aic7xxx_buffer[size])
 #define HDRB \
@@ -64,7 +63,7 @@ static char *aic7xxx_buffer = NULL;
  * Description:
  *   Set parameters for the driver from the /proc filesystem.
  *-F*************************************************************************/
-int
+static int
 aic7xxx_set_info(char *buffer, int length, struct Scsi_Host *HBAptr)
 {
   proc_debug("aic7xxx_set_info(): %s\n", buffer);
@@ -90,9 +89,7 @@ aic7xxx_proc_info ( struct Scsi_Host *HBAptr, char *buffer, char **start, off_t 
   unsigned char i;
   unsigned char tindex;
 
-  HBAptr = NULL;
-
-  for(p=first_aic7xxx; p->host != HBAptr; p=p->next)
+  for(p=first_aic7xxx; p && p->host != HBAptr; p=p->next)
     ;
 
   if (!p)
@@ -321,13 +318,13 @@ aic7xxx_proc_info ( struct Scsi_Host *HBAptr, char *buffer, char **start, off_t 
         aic_dev->r_total+aic_dev->w_total, aic_dev->r_total, aic_dev->w_total);
     size += sprintf(BLS, "%s\n", HDRB);
     size += sprintf(BLS, "   Reads:");
-    for (i = 0; i < NUMBER(aic_dev->r_bins); i++)
+    for (i = 0; i < ARRAY_SIZE(aic_dev->r_bins); i++)
     {
       size += sprintf(BLS, " %10ld", aic_dev->r_bins[i]);
     }
     size += sprintf(BLS, "\n");
     size += sprintf(BLS, "  Writes:");
-    for (i = 0; i < NUMBER(aic_dev->w_bins); i++)
+    for (i = 0; i < ARRAY_SIZE(aic_dev->w_bins); i++)
     {
       size += sprintf(BLS, " %10ld", aic_dev->w_bins[i]);
     }
@@ -349,7 +346,7 @@ aic7xxx_proc_info ( struct Scsi_Host *HBAptr, char *buffer, char **start, off_t 
   else
   {
     *start = buffer;
-    length = MIN(length, size - offset);
+    length = min_t(int, length, size - offset);
     memcpy(buffer, &aic7xxx_buffer[offset], length);
   }
 

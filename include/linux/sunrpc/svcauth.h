@@ -16,35 +16,40 @@
 #include <linux/sunrpc/cache.h>
 #include <linux/hash.h>
 
+#define SVC_CRED_NGROUPS	32
 struct svc_cred {
 	uid_t			cr_uid;
 	gid_t			cr_gid;
-	gid_t			cr_groups[NGROUPS];
+	struct group_info	*cr_group_info;
 };
 
 struct svc_rqst;		/* forward decl */
+struct in6_addr;
 
 /* Authentication is done in the context of a domain.
- * For a server, a domain represents a group of clients using
+ *
+ * Currently, the nfs server uses the auth_domain to stand
+ * for the "client" listed in /etc/exports.
+ *
+ * More generally, a domain might represent a group of clients using
  * a common mechanism for authentication and having a common mapping
  * between local identity (uid) and network identity.  All clients
  * in a domain have similar general access rights.  Each domain can
  * contain multiple principals which will have different specific right
  * based on normal Discretionary Access Control.
  *
- * For a client, a domain represents a number of servers which all
- * use a common authentication mechanism and network identity name space.
- *
  * A domain is created by an authentication flavour module based on name
  * only.  Userspace then fills in detail on demand.
  *
- * The creation of a domain typically implies creation of one or
- * more caches for storing domain specific information.
+ * In the case of auth_unix and auth_null, the auth_domain is also
+ * associated with entries in another cache representing the mapping
+ * of ip addresses to the given client.
  */
 struct auth_domain {
-	struct	cache_head	h;
+	struct kref		ref;
+	struct hlist_node	hash;
 	char			*name;
-	int			flavour;
+	struct auth_ops		*flavour;
 };
 
 /*
@@ -65,6 +70,10 @@ struct auth_domain {
  *      GARBAGE - rpc garbage_args error
  *      SYSERR - rpc system_err error
  *      DENIED - authp holds reason for denial.
+ *      COMPLETE - the reply is encoded already and ready to be sent; no
+ *		further processing is necessary.  (This is used for processing
+ *		null procedure calls which are used to set up encryption
+ *		contexts.)
  *
  *   accept is passed the proc number so that it can accept NULL rpc requests
  *   even if it cannot authenticate the client (as is sometimes appropriate).
@@ -79,15 +88,19 @@ struct auth_domain {
  *
  * domain_release()
  *   This call releases a domain.
+ * set_client()
+ *   Givens a pending request (struct svc_rqst), finds and assigns
+ *   an appropriate 'auth_domain' as the client.
  */
 struct auth_ops {
 	char *	name;
+	struct module *owner;
 	int	flavour;
-	int	(*accept)(struct svc_rqst *rq, u32 *authp);
+	int	(*accept)(struct svc_rqst *rq, __be32 *authp);
 	int	(*release)(struct svc_rqst *rq);
 	void	(*domain_release)(struct auth_domain *);
+	int	(*set_client)(struct svc_rqst *rq);
 };
-extern struct auth_ops	*authtab[RPC_AUTH_MAXFLAVOR];
 
 #define	SVC_GARBAGE	1
 #define	SVC_SYSERR	2
@@ -95,23 +108,32 @@ extern struct auth_ops	*authtab[RPC_AUTH_MAXFLAVOR];
 #define	SVC_NEGATIVE	4
 #define	SVC_OK		5
 #define	SVC_DROP	6
-#define	SVC_DENIED	7
-#define	SVC_PENDING	8
+#define	SVC_CLOSE	7	/* Like SVC_DROP, but request is definitely
+				 * lost so if there is a tcp connection, it
+				 * should be closed
+				 */
+#define	SVC_DENIED	8
+#define	SVC_PENDING	9
+#define	SVC_COMPLETE	10
 
+struct svc_xprt;
 
-extern int	svc_authenticate(struct svc_rqst *rqstp, u32 *authp);
+extern int	svc_authenticate(struct svc_rqst *rqstp, __be32 *authp);
 extern int	svc_authorise(struct svc_rqst *rqstp);
+extern int	svc_set_client(struct svc_rqst *rqstp);
 extern int	svc_auth_register(rpc_authflavor_t flavor, struct auth_ops *aops);
 extern void	svc_auth_unregister(rpc_authflavor_t flavor);
 
 extern struct auth_domain *unix_domain_find(char *name);
 extern void auth_domain_put(struct auth_domain *item);
-extern int auth_unix_add_addr(struct in_addr addr, struct auth_domain *dom);
-extern struct auth_domain *auth_domain_lookup(struct auth_domain *item, int set);
+extern int auth_unix_add_addr(struct net *net, struct in6_addr *addr, struct auth_domain *dom);
+extern struct auth_domain *auth_domain_lookup(char *name, struct auth_domain *new);
 extern struct auth_domain *auth_domain_find(char *name);
-extern struct auth_domain *auth_unix_lookup(struct in_addr addr);
+extern struct auth_domain *auth_unix_lookup(struct net *net, struct in6_addr *addr);
 extern int auth_unix_forget_old(struct auth_domain *dom);
 extern void svcauth_unix_purge(void);
+extern void svcauth_unix_info_release(struct svc_xprt *xpt);
+extern int svcauth_unix_set_client(struct svc_rqst *rqstp);
 
 static inline unsigned long hash_str(char *name, int bits)
 {
@@ -149,8 +171,6 @@ static inline unsigned long hash_mem(char *buf, int length, int bits)
 	} while (len);
 	return hash >> (BITS_PER_LONG - bits);
 }
-
-extern struct cache_detail auth_domain_cache, ip_map_cache;
 
 #endif /* __KERNEL__ */
 

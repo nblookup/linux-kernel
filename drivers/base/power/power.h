@@ -1,101 +1,75 @@
+#ifdef CONFIG_PM_RUNTIME
 
+extern void pm_runtime_init(struct device *dev);
+extern void pm_runtime_remove(struct device *dev);
 
-enum {
-	DEVICE_PM_ON,
-	DEVICE_PM1,
-	DEVICE_PM2,
-	DEVICE_PM3,
-	DEVICE_PM_OFF,
-};
+#else /* !CONFIG_PM_RUNTIME */
 
-/*
- * shutdown.c
- */
+static inline void pm_runtime_init(struct device *dev) {}
+static inline void pm_runtime_remove(struct device *dev) {}
 
-extern int device_detach_shutdown(struct device *);
-extern void device_shutdown(void);
+#endif /* !CONFIG_PM_RUNTIME */
 
+#ifdef CONFIG_PM_SLEEP
+
+/* kernel/power/main.c */
+extern int pm_async_enabled;
+
+/* drivers/base/power/main.c */
+extern struct list_head dpm_list;	/* The active device list */
+
+static inline struct device *to_device(struct list_head *entry)
+{
+	return container_of(entry, struct device, power.entry);
+}
+
+extern void device_pm_init(struct device *dev);
+extern void device_pm_add(struct device *);
+extern void device_pm_remove(struct device *);
+extern void device_pm_move_before(struct device *, struct device *);
+extern void device_pm_move_after(struct device *, struct device *);
+extern void device_pm_move_last(struct device *);
+
+#else /* !CONFIG_PM_SLEEP */
+
+static inline void device_pm_init(struct device *dev)
+{
+	spin_lock_init(&dev->power.lock);
+	pm_runtime_init(dev);
+}
+
+static inline void device_pm_remove(struct device *dev)
+{
+	pm_runtime_remove(dev);
+}
+
+static inline void device_pm_add(struct device *dev) {}
+static inline void device_pm_move_before(struct device *deva,
+					 struct device *devb) {}
+static inline void device_pm_move_after(struct device *deva,
+					struct device *devb) {}
+static inline void device_pm_move_last(struct device *dev) {}
+
+#endif /* !CONFIG_PM_SLEEP */
 
 #ifdef CONFIG_PM
-
-/*
- * main.c
- */
-
-/*
- * Used to synchronize global power management operations.
- */
-extern struct semaphore dpm_sem;
-
-/* 
- * The PM lists.
- */
-extern struct list_head dpm_active;
-extern struct list_head dpm_off;
-extern struct list_head dpm_off_irq;
-
-
-static inline struct dev_pm_info * to_pm_info(struct list_head * entry)
-{
-	return container_of(entry,struct dev_pm_info,entry);
-}
-
-static inline struct device * to_device(struct list_head * entry)
-{
-	return container_of(to_pm_info(entry),struct device,power);
-}
-
-extern int device_pm_add(struct device *);
-extern void device_pm_remove(struct device *);
 
 /*
  * sysfs.c
  */
 
-extern int dpm_sysfs_add(struct device *);
-extern void dpm_sysfs_remove(struct device *);
-
-/*
- * resume.c 
- */
-
-extern void dpm_resume(void);
-extern void dpm_power_up(void);
-extern int resume_device(struct device *);
-
-/*
- * suspend.c
- */
-extern int suspend_device(struct device *, u32);
-
-
-/*
- * runtime.c
- */
-
-extern int dpm_runtime_suspend(struct device *, u32);
-extern void dpm_runtime_resume(struct device *);
+extern int dpm_sysfs_add(struct device *dev);
+extern void dpm_sysfs_remove(struct device *dev);
+extern void rpm_sysfs_remove(struct device *dev);
+extern int wakeup_sysfs_add(struct device *dev);
+extern void wakeup_sysfs_remove(struct device *dev);
 
 #else /* CONFIG_PM */
 
-
-static inline int device_pm_add(struct device * dev)
-{
-	return 0;
-}
-static inline void device_pm_remove(struct device * dev)
-{
-
-}
-
-static inline int dpm_runtime_suspend(struct device * dev, u32 state)
-{
-	return 0;
-}
-
-static inline void dpm_runtime_resume(struct device * dev)
-{
-
-}
+static inline int dpm_sysfs_add(struct device *dev) { return 0; }
+static inline void dpm_sysfs_remove(struct device *dev) {}
+static inline void rpm_sysfs_remove(struct device *dev) {}
+static inline int wakeup_sysfs_add(struct device *dev) { return 0; }
+static inline void wakeup_sysfs_remove(struct device *dev) {}
 
 #endif

@@ -5,7 +5,12 @@
 
 #ifdef __KERNEL__
 
-/* Should never be seen by user programs */
+/*
+ * These should never be seen by user programs.  To return one of ERESTART*
+ * codes, signal_pending() MUST be set.  Note that ptrace can observe these
+ * at syscall exit tracing, but they will never be left for the debugged user
+ * process to see.
+ */
 #define ERESTARTSYS	512
 #define ERESTARTNOINTR	513
 #define ERESTARTNOHAND	514	/* restart if no handler.. */
@@ -22,6 +27,7 @@
 #define EBADTYPE	527	/* Type not supported by server */
 #define EJUKEBOX	528	/* Request initiated, but will not complete before timeout */
 #define EIOCBQUEUED	529	/* iocb queued, will get completion event */
+#define EIOCBRETRY	530	/* iocb queued, will trigger a retry */
 
 #endif
 

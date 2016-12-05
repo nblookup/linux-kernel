@@ -29,7 +29,6 @@
  * code in here.  If there is it should be reported as a bug.
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -42,21 +41,27 @@
 MODULE_AUTHOR("Takashi Iwai / Steve Ratcliffe");
 MODULE_DESCRIPTION("Advanced Linux Sound Architecture sequencer MIDI emulation.");
 MODULE_LICENSE("GPL");
-MODULE_CLASSES("{sound}");
-MODULE_SUPPORTED_DEVICE("sound");
 
 /* Prototypes for static functions */
-static void note_off(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan, int note, int vel);
-static void do_control(snd_midi_op_t *ops, void *private,
-		       snd_midi_channel_set_t *chset, snd_midi_channel_t *chan,
+static void note_off(struct snd_midi_op *ops, void *drv,
+		     struct snd_midi_channel *chan,
+		     int note, int vel);
+static void do_control(struct snd_midi_op *ops, void *private,
+		       struct snd_midi_channel_set *chset,
+		       struct snd_midi_channel *chan,
 		       int control, int value);
-static void rpn(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan, snd_midi_channel_set_t *chset);
-static void nrpn(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan, snd_midi_channel_set_t *chset);
-static void sysex(snd_midi_op_t *ops, void *private, unsigned char *sysex, int len, snd_midi_channel_set_t *chset);
-static void all_sounds_off(snd_midi_op_t *ops, void *private, snd_midi_channel_t *chan);
-static void all_notes_off(snd_midi_op_t *ops, void *private, snd_midi_channel_t *chan);
-void snd_midi_reset_controllers(snd_midi_channel_t *chan);
-static void reset_all_channels(snd_midi_channel_set_t *chset);
+static void rpn(struct snd_midi_op *ops, void *drv, struct snd_midi_channel *chan,
+		struct snd_midi_channel_set *chset);
+static void nrpn(struct snd_midi_op *ops, void *drv, struct snd_midi_channel *chan,
+		 struct snd_midi_channel_set *chset);
+static void sysex(struct snd_midi_op *ops, void *private, unsigned char *sysex,
+		  int len, struct snd_midi_channel_set *chset);
+static void all_sounds_off(struct snd_midi_op *ops, void *private,
+			   struct snd_midi_channel *chan);
+static void all_notes_off(struct snd_midi_op *ops, void *private,
+			  struct snd_midi_channel *chan);
+static void snd_midi_reset_controllers(struct snd_midi_channel *chan);
+static void reset_all_channels(struct snd_midi_channel_set *chset);
 
 
 /*
@@ -65,7 +70,7 @@ static void reset_all_channels(snd_midi_channel_set_t *chset);
  * such as GM, GS and XG.
  * There modes that this module will run in are:
  *   Generic MIDI - no interpretation at all, it will just save current values
- *                  of controlers etc.
+ *                  of controllers etc.
  *   GM - You can use all gm_ prefixed elements of chan.  Controls, RPN, NRPN,
  *        SysEx will be interpreded as defined in General Midi.
  *   GS - You can use all gs_ prefixed elements of chan. Codes for GS will be
@@ -74,10 +79,11 @@ static void reset_all_channels(snd_midi_channel_set_t *chset);
  *        be interpreted.
  */
 void
-snd_midi_process_event(snd_midi_op_t *ops,
-		       snd_seq_event_t *ev, snd_midi_channel_set_t *chanset)
+snd_midi_process_event(struct snd_midi_op *ops,
+		       struct snd_seq_event *ev,
+		       struct snd_midi_channel_set *chanset)
 {
-	snd_midi_channel_t *chan;
+	struct snd_midi_channel *chan;
 	void *drv;
 	int dest_channel = 0;
 
@@ -91,7 +97,8 @@ snd_midi_process_event(snd_midi_op_t *ops,
 	if (snd_seq_ev_is_channel_type(ev)) {
 		dest_channel = ev->data.note.channel;
 		if (dest_channel >= chanset->max_channels) {
-			snd_printd("dest channel is %d, max is %d\n", dest_channel, chanset->max_channels);
+			snd_printd("dest channel is %d, max is %d\n",
+				   dest_channel, chanset->max_channels);
 			return;
 		}
 	}
@@ -168,7 +175,7 @@ snd_midi_process_event(snd_midi_op_t *ops,
 				   ev->data.control.value);
 		break;
 	case SNDRV_SEQ_EVENT_NONREGPARAM:
-		/* Break it back into its controler values */
+		/* Break it back into its controller values */
 		chan->param_type = SNDRV_MIDI_PARAM_TYPE_NONREGISTERED;
 		chan->control[MIDI_CTL_MSB_DATA_ENTRY]
 			= (ev->data.control.value >> 7) & 0x7f;
@@ -181,7 +188,7 @@ snd_midi_process_event(snd_midi_op_t *ops,
 		nrpn(ops, drv, chan, chanset);
 		break;
 	case SNDRV_SEQ_EVENT_REGPARAM:
-		/* Break it back into its controler values */
+		/* Break it back into its controller values */
 		chan->param_type = SNDRV_MIDI_PARAM_TYPE_REGISTERED;
 		chan->control[MIDI_CTL_MSB_DATA_ENTRY]
 			= (ev->data.control.value >> 7) & 0x7f;
@@ -221,13 +228,6 @@ snd_midi_process_event(snd_midi_op_t *ops,
 	case SNDRV_SEQ_EVENT_PORT_START:
 	case SNDRV_SEQ_EVENT_PORT_EXIT:
 	case SNDRV_SEQ_EVENT_PORT_CHANGE:
-	case SNDRV_SEQ_EVENT_SAMPLE:
-	case SNDRV_SEQ_EVENT_SAMPLE_START:
-	case SNDRV_SEQ_EVENT_SAMPLE_STOP:
-	case SNDRV_SEQ_EVENT_SAMPLE_FREQ:
-	case SNDRV_SEQ_EVENT_SAMPLE_VOLUME:
-	case SNDRV_SEQ_EVENT_SAMPLE_LOOP:
-	case SNDRV_SEQ_EVENT_SAMPLE_POSITION:
 	case SNDRV_SEQ_EVENT_ECHO:
 	not_yet:
 	default:
@@ -241,13 +241,14 @@ snd_midi_process_event(snd_midi_op_t *ops,
  * release note
  */
 static void
-note_off(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan, int note, int vel)
+note_off(struct snd_midi_op *ops, void *drv, struct snd_midi_channel *chan,
+	 int note, int vel)
 {
 	if (chan->gm_hold) {
 		/* Hold this note until pedal is turned off */
 		chan->note[note] |= SNDRV_MIDI_NOTE_RELEASED;
-	} else if (chan->note[note] & SNDRV_MIDI_NOTE_SUSTENUTO) {
-		/* Mark this note as release; it will be turned off when sustenuto
+	} else if (chan->note[note] & SNDRV_MIDI_NOTE_SOSTENUTO) {
+		/* Mark this note as release; it will be turned off when sostenuto
 		 * is turned off */
 		chan->note[note] |= SNDRV_MIDI_NOTE_RELEASED;
 	} else {
@@ -258,12 +259,12 @@ note_off(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan, int note, int 
 }
 
 /*
- * Do all driver independent operations for this controler and pass
+ * Do all driver independent operations for this controller and pass
  * events that need to take place immediately to the driver.
  */
 static void
-do_control(snd_midi_op_t *ops, void *drv, snd_midi_channel_set_t *chset,
-	   snd_midi_channel_t *chan, int control, int value)
+do_control(struct snd_midi_op *ops, void *drv, struct snd_midi_channel_set *chset,
+	   struct snd_midi_channel *chan, int control, int value)
 {
 	int  i;
 
@@ -289,18 +290,18 @@ do_control(snd_midi_op_t *ops, void *drv, snd_midi_channel_set_t *chset,
 		break;
 	case MIDI_CTL_PORTAMENTO:
 		break;
-	case MIDI_CTL_SUSTENUTO:
+	case MIDI_CTL_SOSTENUTO:
 		if (value) {
 			/* Mark each note that is currently held down */
 			for (i = 0; i < 128; i++) {
 				if (chan->note[i] & SNDRV_MIDI_NOTE_ON)
-					chan->note[i] |= SNDRV_MIDI_NOTE_SUSTENUTO;
+					chan->note[i] |= SNDRV_MIDI_NOTE_SOSTENUTO;
 			}
 		} else {
 			/* release all notes that were held */
 			for (i = 0; i < 128; i++) {
-				if (chan->note[i] & SNDRV_MIDI_NOTE_SUSTENUTO) {
-					chan->note[i] &= ~SNDRV_MIDI_NOTE_SUSTENUTO;
+				if (chan->note[i] & SNDRV_MIDI_NOTE_SOSTENUTO) {
+					chan->note[i] &= ~SNDRV_MIDI_NOTE_SOSTENUTO;
 					if (chan->note[i] & SNDRV_MIDI_NOTE_RELEASED) {
 						chan->note[i] = SNDRV_MIDI_NOTE_OFF;
 						if (ops->note_off)
@@ -378,7 +379,7 @@ do_control(snd_midi_op_t *ops, void *drv, snd_midi_channel_set_t *chset,
  * initialize the MIDI status
  */
 void
-snd_midi_channel_set_clear(snd_midi_channel_set_t *chset)
+snd_midi_channel_set_clear(struct snd_midi_channel_set *chset)
 {
 	int i;
 
@@ -386,7 +387,7 @@ snd_midi_channel_set_clear(snd_midi_channel_set_t *chset)
 	chset->gs_master_volume = 127;
 
 	for (i = 0; i < chset->max_channels; i++) {
-		snd_midi_channel_t *chan = chset->channels + i;
+		struct snd_midi_channel *chan = chset->channels + i;
 		memset(chan->note, 0, sizeof(chan->note));
 
 		chan->midi_aftertouch = 0;
@@ -409,8 +410,8 @@ snd_midi_channel_set_clear(snd_midi_channel_set_t *chset)
  * Process a rpn message.
  */
 static void
-rpn(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan,
-    snd_midi_channel_set_t *chset)
+rpn(struct snd_midi_op *ops, void *drv, struct snd_midi_channel *chan,
+    struct snd_midi_channel_set *chset)
 {
 	int type;
 	int val;
@@ -449,8 +450,8 @@ rpn(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan,
  * Process an nrpn message.
  */
 static void
-nrpn(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan,
-     snd_midi_channel_set_t *chset)
+nrpn(struct snd_midi_op *ops, void *drv, struct snd_midi_channel *chan,
+     struct snd_midi_channel_set *chset)
 {
 	/* parse XG NRPNs here if possible */
 	if (ops->nrpn)
@@ -477,7 +478,8 @@ get_channel(unsigned char cmd)
  * Process a sysex message.
  */
 static void
-sysex(snd_midi_op_t *ops, void *private, unsigned char *buf, int len, snd_midi_channel_set_t *chset)
+sysex(struct snd_midi_op *ops, void *private, unsigned char *buf, int len,
+      struct snd_midi_channel_set *chset)
 {
 	/* GM on */
 	static unsigned char gm_on_macro[] = {
@@ -551,12 +553,12 @@ sysex(snd_midi_op_t *ops, void *private, unsigned char *buf, int len, snd_midi_c
 
 		} else if (buf[5] == 0x01 && buf[6] == 0x30) {
 			/* reverb mode */
-			parsed = SNDRV_MIDI_SYSEX_GS_CHORUS_MODE;
+			parsed = SNDRV_MIDI_SYSEX_GS_REVERB_MODE;
 			chset->gs_reverb_mode = buf[7];
 
 		} else if (buf[5] == 0x01 && buf[6] == 0x38) {
 			/* chorus mode */
-			parsed = SNDRV_MIDI_SYSEX_GS_REVERB_MODE;
+			parsed = SNDRV_MIDI_SYSEX_GS_CHORUS_MODE;
 			chset->gs_chorus_mode = buf[7];
 
 		} else if (buf[5] == 0x00 && buf[6] == 0x04) {
@@ -590,7 +592,7 @@ sysex(snd_midi_op_t *ops, void *private, unsigned char *buf, int len, snd_midi_c
  * all sound off
  */
 static void
-all_sounds_off(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan)
+all_sounds_off(struct snd_midi_op *ops, void *drv, struct snd_midi_channel *chan)
 {
 	int n;
 
@@ -608,7 +610,7 @@ all_sounds_off(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan)
  * all notes off
  */
 static void
-all_notes_off(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan)
+all_notes_off(struct snd_midi_op *ops, void *drv, struct snd_midi_channel *chan)
 {
 	int n;
 
@@ -623,12 +625,12 @@ all_notes_off(snd_midi_op_t *ops, void *drv, snd_midi_channel_t *chan)
 /*
  * Initialise a single midi channel control block.
  */
-void snd_midi_channel_init(snd_midi_channel_t *p, int n)
+static void snd_midi_channel_init(struct snd_midi_channel *p, int n)
 {
 	if (p == NULL)
 		return;
 
-	memset(p, 0, sizeof(snd_midi_channel_t));
+	memset(p, 0, sizeof(struct snd_midi_channel));
 	p->private = NULL;
 	p->number = n;
 
@@ -644,12 +646,12 @@ void snd_midi_channel_init(snd_midi_channel_t *p, int n)
 /*
  * Allocate and initialise a set of midi channel control blocks.
  */
-snd_midi_channel_t *snd_midi_channel_init_set(int n)
+static struct snd_midi_channel *snd_midi_channel_init_set(int n)
 {
-	snd_midi_channel_t *chan;
+	struct snd_midi_channel *chan;
 	int  i;
 
-	chan = kmalloc(n * sizeof(snd_midi_channel_t), GFP_KERNEL);
+	chan = kmalloc(n * sizeof(struct snd_midi_channel), GFP_KERNEL);
 	if (chan) {
 		for (i = 0; i < n; i++)
 			snd_midi_channel_init(chan+i, i);
@@ -662,11 +664,11 @@ snd_midi_channel_t *snd_midi_channel_init_set(int n)
  * reset all midi channels
  */
 static void
-reset_all_channels(snd_midi_channel_set_t *chset)
+reset_all_channels(struct snd_midi_channel_set *chset)
 {
 	int ch;
 	for (ch = 0; ch < chset->max_channels; ch++) {
-		snd_midi_channel_t *chan = chset->channels + ch;
+		struct snd_midi_channel *chan = chset->channels + ch;
 		snd_midi_reset_controllers(chan);
 		chan->gm_rpn_pitch_bend_range = 256; /* 2 semitones */
 		chan->gm_rpn_fine_tuning = 0;
@@ -683,9 +685,9 @@ reset_all_channels(snd_midi_channel_set_t *chset)
 /*
  * Allocate and initialise a midi channel set.
  */
-snd_midi_channel_set_t *snd_midi_channel_alloc_set(int n)
+struct snd_midi_channel_set *snd_midi_channel_alloc_set(int n)
 {
-	snd_midi_channel_set_t *chset;
+	struct snd_midi_channel_set *chset;
 
 	chset = kmalloc(sizeof(*chset), GFP_KERNEL);
 	if (chset) {
@@ -699,7 +701,7 @@ snd_midi_channel_set_t *snd_midi_channel_alloc_set(int n)
 /*
  * Reset the midi controllers on a particular channel to default values.
  */
-void snd_midi_reset_controllers(snd_midi_channel_t *chan)
+static void snd_midi_reset_controllers(struct snd_midi_channel *chan)
 {
 	memset(chan->control, 0, sizeof(chan->control));
 	chan->gm_volume = 127;
@@ -711,12 +713,11 @@ void snd_midi_reset_controllers(snd_midi_channel_t *chan)
 /*
  * Free a midi channel set.
  */
-void snd_midi_channel_free_set(snd_midi_channel_set_t *chset)
+void snd_midi_channel_free_set(struct snd_midi_channel_set *chset)
 {
 	if (chset == NULL)
 		return;
-	if (chset->channels != NULL)
-		kfree(chset->channels);
+	kfree(chset->channels);
 	kfree(chset);
 }
 
@@ -734,7 +735,5 @@ module_exit(alsa_seq_midi_emul_exit)
 
 EXPORT_SYMBOL(snd_midi_process_event);
 EXPORT_SYMBOL(snd_midi_channel_set_clear);
-EXPORT_SYMBOL(snd_midi_channel_init);
-EXPORT_SYMBOL(snd_midi_channel_init_set);
 EXPORT_SYMBOL(snd_midi_channel_alloc_set);
 EXPORT_SYMBOL(snd_midi_channel_free_set);

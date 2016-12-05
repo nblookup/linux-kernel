@@ -17,7 +17,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *  
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *     
@@ -33,9 +33,12 @@
 #include <net/irda/irlmp.h>		/* struct lsap_cb */
 #include <net/irda/irttp.h>		/* struct tsap_cb */
 #include <net/irda/discovery.h>		/* struct discovery_t */
+#include <net/sock.h>
 
 /* IrDA Socket */
 struct irda_sock {
+	/* struct sock has to be the first member of irda_sock */
+	struct sock sk;
 	__u32 saddr;          /* my local address */
 	__u32 daddr;          /* peer address */
 
@@ -69,7 +72,6 @@ struct irda_sock {
 
 	int errno;            /* status of the IAS query */
 
-	struct sock *sk;
 	wait_queue_head_t query_wait;	/* Wait for the answer to a query */
 	struct timer_list watchdog;	/* Timeout for discovery */
 
@@ -77,6 +79,9 @@ struct irda_sock {
 	LOCAL_FLOW rx_flow;
 };
 
-#define irda_sk(__sk) ((struct irda_sock *)(__sk)->sk_protinfo)
+static inline struct irda_sock *irda_sk(struct sock *sk)
+{
+	return (struct irda_sock *)sk;
+}
 
 #endif /* AF_IRDA_H */

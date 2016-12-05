@@ -29,24 +29,18 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Id: msnd_pinnacle.c,v 1.8 2000/12/30 00:33:21 sycamore Exp $
- *
  * 12-3-2000  Modified IO port validation  Steve Sycamore
- *
- *
- * $$$: msnd_pinnacle.c,v 1.75 1999/03/21 16:50:09 andrewtv $$$ $
  *
  ********************************************************************/
 
 #include <linux/kernel.h>
-#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
+#include <linux/gfp.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 #include "sound_config.h"
@@ -85,6 +79,7 @@
 					 dev.rec_sample_rate /		\
 					 dev.rec_channels)
 
+static DEFINE_MUTEX(msnd_pinnacle_mutex);
 static multisound_dev_t			dev;
 
 #ifndef HAVE_DSPCODEH
@@ -109,18 +104,18 @@ static void reset_play_queue(void)
 	LPDAQD lpDAQ;
 
 	dev.last_playbank = -1;
-	isa_writew(PCTODSP_OFFSET(0 * DAQDS__size), dev.DAPQ + JQS_wHead);
-	isa_writew(PCTODSP_OFFSET(0 * DAQDS__size), dev.DAPQ + JQS_wTail);
+	writew(PCTODSP_OFFSET(0 * DAQDS__size), dev.DAPQ + JQS_wHead);
+	writew(PCTODSP_OFFSET(0 * DAQDS__size), dev.DAPQ + JQS_wTail);
 
 	for (n = 0, lpDAQ = dev.base + DAPQ_DATA_BUFF; n < 3; ++n, lpDAQ += DAQDS__size) {
-		isa_writew(PCTODSP_BASED((DWORD)(DAP_BUFF_SIZE * n)), lpDAQ + DAQDS_wStart);
-		isa_writew(0, lpDAQ + DAQDS_wSize);
-		isa_writew(1, lpDAQ + DAQDS_wFormat);
-		isa_writew(dev.play_sample_size, lpDAQ + DAQDS_wSampleSize);
-		isa_writew(dev.play_channels, lpDAQ + DAQDS_wChannels);
-		isa_writew(dev.play_sample_rate, lpDAQ + DAQDS_wSampleRate);
-		isa_writew(HIMT_PLAY_DONE * 0x100 + n, lpDAQ + DAQDS_wIntMsg);
-		isa_writew(n, lpDAQ + DAQDS_wFlags);
+		writew(PCTODSP_BASED((DWORD)(DAP_BUFF_SIZE * n)), lpDAQ + DAQDS_wStart);
+		writew(0, lpDAQ + DAQDS_wSize);
+		writew(1, lpDAQ + DAQDS_wFormat);
+		writew(dev.play_sample_size, lpDAQ + DAQDS_wSampleSize);
+		writew(dev.play_channels, lpDAQ + DAQDS_wChannels);
+		writew(dev.play_sample_rate, lpDAQ + DAQDS_wSampleRate);
+		writew(HIMT_PLAY_DONE * 0x100 + n, lpDAQ + DAQDS_wIntMsg);
+		writew(n, lpDAQ + DAQDS_wFlags);
 	}
 }
 
@@ -131,25 +126,25 @@ static void reset_record_queue(void)
 	unsigned long flags;
 
 	dev.last_recbank = 2;
-	isa_writew(PCTODSP_OFFSET(0 * DAQDS__size), dev.DARQ + JQS_wHead);
-	isa_writew(PCTODSP_OFFSET(dev.last_recbank * DAQDS__size), dev.DARQ + JQS_wTail);
+	writew(PCTODSP_OFFSET(0 * DAQDS__size), dev.DARQ + JQS_wHead);
+	writew(PCTODSP_OFFSET(dev.last_recbank * DAQDS__size), dev.DARQ + JQS_wTail);
 
 	/* Critical section: bank 1 access */
 	spin_lock_irqsave(&dev.lock, flags);
-	outb(HPBLKSEL_1, dev.io + HP_BLKS);
-	isa_memset_io(dev.base, 0, DAR_BUFF_SIZE * 3);
-	outb(HPBLKSEL_0, dev.io + HP_BLKS);
+	msnd_outb(HPBLKSEL_1, dev.io + HP_BLKS);
+	memset_io(dev.base, 0, DAR_BUFF_SIZE * 3);
+	msnd_outb(HPBLKSEL_0, dev.io + HP_BLKS);
 	spin_unlock_irqrestore(&dev.lock, flags);
 
 	for (n = 0, lpDAQ = dev.base + DARQ_DATA_BUFF; n < 3; ++n, lpDAQ += DAQDS__size) {
-		isa_writew(PCTODSP_BASED((DWORD)(DAR_BUFF_SIZE * n)) + 0x4000, lpDAQ + DAQDS_wStart);
-		isa_writew(DAR_BUFF_SIZE, lpDAQ + DAQDS_wSize);
-		isa_writew(1, lpDAQ + DAQDS_wFormat);
-		isa_writew(dev.rec_sample_size, lpDAQ + DAQDS_wSampleSize);
-		isa_writew(dev.rec_channels, lpDAQ + DAQDS_wChannels);
-		isa_writew(dev.rec_sample_rate, lpDAQ + DAQDS_wSampleRate);
-		isa_writew(HIMT_RECORD_DONE * 0x100 + n, lpDAQ + DAQDS_wIntMsg);
-		isa_writew(n, lpDAQ + DAQDS_wFlags);
+		writew(PCTODSP_BASED((DWORD)(DAR_BUFF_SIZE * n)) + 0x4000, lpDAQ + DAQDS_wStart);
+		writew(DAR_BUFF_SIZE, lpDAQ + DAQDS_wSize);
+		writew(1, lpDAQ + DAQDS_wFormat);
+		writew(dev.rec_sample_size, lpDAQ + DAQDS_wSampleSize);
+		writew(dev.rec_channels, lpDAQ + DAQDS_wChannels);
+		writew(dev.rec_sample_rate, lpDAQ + DAQDS_wSampleRate);
+		writew(HIMT_RECORD_DONE * 0x100 + n, lpDAQ + DAQDS_wIntMsg);
+		writew(n, lpDAQ + DAQDS_wFlags);
 	}
 }
 
@@ -185,9 +180,9 @@ static int dsp_set_format(struct file *file, int val)
 
 	for (i = 0; i < 3; ++i, lpDAQ += DAQDS__size, lpDARQ += DAQDS__size) {
 		if (file->f_mode & FMODE_WRITE)
-			isa_writew(data, lpDAQ + DAQDS_wSampleSize);
+			writew(data, lpDAQ + DAQDS_wSampleSize);
 		if (file->f_mode & FMODE_READ)
-			isa_writew(data, lpDARQ + DAQDS_wSampleSize);
+			writew(data, lpDARQ + DAQDS_wSampleSize);
 	}
 	if (file->f_mode & FMODE_WRITE)
 		dev.play_sample_size = data;
@@ -212,6 +207,7 @@ static int dsp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	LPDAQD lpDAQ, lpDARQ;
         audio_buf_info abinfo;
 	unsigned long flags;
+	int __user *p = (int __user *)arg;
 
 	lpDAQ = dev.base + DAPQ_DATA_BUFF;
 	lpDARQ = dev.base + DARQ_DATA_BUFF;
@@ -238,7 +234,7 @@ static int dsp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 abinfo.fragstotal = dev.DAPF.n / abinfo.fragsize;
                 abinfo.fragments = abinfo.bytes / abinfo.fragsize;
 		spin_unlock_irqrestore(&dev.lock, flags);
-		return copy_to_user((void *)arg, &abinfo, sizeof(abinfo)) ? -EFAULT : 0;
+		return copy_to_user((void __user *)arg, &abinfo, sizeof(abinfo)) ? -EFAULT : 0;
 
 	case SNDCTL_DSP_GETISPACE:
 		if (!(file->f_mode & FMODE_READ))
@@ -249,7 +245,7 @@ static int dsp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 abinfo.fragstotal = dev.DARF.n / abinfo.fragsize;
                 abinfo.fragments = abinfo.bytes / abinfo.fragsize;
 		spin_unlock_irqrestore(&dev.lock, flags);
-		return copy_to_user((void *)arg, &abinfo, sizeof(abinfo)) ? -EFAULT : 0;
+		return copy_to_user((void __user *)arg, &abinfo, sizeof(abinfo)) ? -EFAULT : 0;
 
 	case SNDCTL_DSP_RESET:
 		dev.nresets = 0;
@@ -262,18 +258,18 @@ static int dsp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	case SNDCTL_DSP_GETBLKSIZE:
 		tmp = dsp_get_frag_size();
-		if (put_user(tmp, (int *)arg))
+		if (put_user(tmp, p))
                         return -EFAULT;
 		return 0;
 
 	case SNDCTL_DSP_GETFMTS:
 		val = AFMT_S16_LE | AFMT_U8;
-		if (put_user(val, (int *)arg))
+		if (put_user(val, p))
 			return -EFAULT;
 		return 0;
 
 	case SNDCTL_DSP_SETFMT:
-		if (get_user(val, (int *)arg))
+		if (get_user(val, p))
 			return -EFAULT;
 
 		if (file->f_mode & FMODE_WRITE)
@@ -285,7 +281,7 @@ static int dsp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 				? dev.rec_sample_size
 				: dsp_set_format(file, val);
 
-		if (put_user(data, (int *)arg))
+		if (put_user(data, p))
 			return -EFAULT;
 		return 0;
 
@@ -299,12 +295,12 @@ static int dsp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	case SNDCTL_DSP_GETCAPS:
 		val = DSP_CAP_DUPLEX | DSP_CAP_BATCH;
-		if (put_user(val, (int *)arg))
+		if (put_user(val, p))
 			return -EFAULT;
 		return 0;
 
 	case SNDCTL_DSP_SPEED:
-		if (get_user(val, (int *)arg))
+		if (get_user(val, p))
 			return -EFAULT;
 
 		if (val < 8000)
@@ -317,22 +313,22 @@ static int dsp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 		for (i = 0; i < 3; ++i, lpDAQ += DAQDS__size, lpDARQ += DAQDS__size) {
 			if (file->f_mode & FMODE_WRITE)
-				isa_writew(data, lpDAQ + DAQDS_wSampleRate);
+				writew(data, lpDAQ + DAQDS_wSampleRate);
 			if (file->f_mode & FMODE_READ)
-				isa_writew(data, lpDARQ + DAQDS_wSampleRate);
+				writew(data, lpDARQ + DAQDS_wSampleRate);
 		}
 		if (file->f_mode & FMODE_WRITE)
 			dev.play_sample_rate = data;
 		if (file->f_mode & FMODE_READ)
 			dev.rec_sample_rate = data;
 
-		if (put_user(data, (int *)arg))
+		if (put_user(data, p))
 			return -EFAULT;
 		return 0;
 
 	case SNDCTL_DSP_CHANNELS:
 	case SNDCTL_DSP_STEREO:
-		if (get_user(val, (int *)arg))
+		if (get_user(val, p))
 			return -EFAULT;
 
 		if (cmd == SNDCTL_DSP_CHANNELS) {
@@ -360,16 +356,16 @@ static int dsp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 		for (i = 0; i < 3; ++i, lpDAQ += DAQDS__size, lpDARQ += DAQDS__size) {
 			if (file->f_mode & FMODE_WRITE)
-				isa_writew(data, lpDAQ + DAQDS_wChannels);
+				writew(data, lpDAQ + DAQDS_wChannels);
 			if (file->f_mode & FMODE_READ)
-				isa_writew(data, lpDARQ + DAQDS_wChannels);
+				writew(data, lpDARQ + DAQDS_wChannels);
 		}
 		if (file->f_mode & FMODE_WRITE)
 			dev.play_channels = data;
 		if (file->f_mode & FMODE_READ)
 			dev.rec_channels = data;
 
-		if (put_user(val, (int *)arg))
+		if (put_user(val, p))
 			return -EFAULT;
 		return 0;
 	}
@@ -400,27 +396,27 @@ static int mixer_get(int d)
 }
 
 #define update_volm(a,b)						\
-	isa_writew((dev.left_levels[a] >> 1) *				\
-	       isa_readw(dev.SMA + SMA_wCurrMastVolLeft) / 0xffff,	\
+	writew((dev.left_levels[a] >> 1) *				\
+	       readw(dev.SMA + SMA_wCurrMastVolLeft) / 0xffff,	\
 	       dev.SMA + SMA_##b##Left);				\
-	isa_writew((dev.right_levels[a] >> 1)  *			\
-	       isa_readw(dev.SMA + SMA_wCurrMastVolRight) / 0xffff,	\
+	writew((dev.right_levels[a] >> 1)  *			\
+	       readw(dev.SMA + SMA_wCurrMastVolRight) / 0xffff,	\
 	       dev.SMA + SMA_##b##Right);
 
 #define update_potm(d,s,ar)						\
-	isa_writeb((dev.left_levels[d] >> 8) *				\
-	       isa_readw(dev.SMA + SMA_wCurrMastVolLeft) / 0xffff,	\
+	writeb((dev.left_levels[d] >> 8) *				\
+	       readw(dev.SMA + SMA_wCurrMastVolLeft) / 0xffff,	\
 	       dev.SMA + SMA_##s##Left);				\
-	isa_writeb((dev.right_levels[d] >> 8) *				\
-	       isa_readw(dev.SMA + SMA_wCurrMastVolRight) / 0xffff,	\
+	writeb((dev.right_levels[d] >> 8) *				\
+	       readw(dev.SMA + SMA_wCurrMastVolRight) / 0xffff,	\
 	       dev.SMA + SMA_##s##Right);				\
 	if (msnd_send_word(&dev, 0, 0, ar) == 0)			\
 		chk_send_dsp_cmd(&dev, HDEX_AUX_REQ);
 
 #define update_pot(d,s,ar)				\
-	isa_writeb(dev.left_levels[d] >> 8,		\
+	writeb(dev.left_levels[d] >> 8,		\
 	       dev.SMA + SMA_##s##Left);		\
-	isa_writeb(dev.right_levels[d] >> 8,		\
+	writeb(dev.right_levels[d] >> 8,		\
 	       dev.SMA + SMA_##s##Right);		\
 	if (msnd_send_word(&dev, 0, 0, ar) == 0)	\
 		chk_send_dsp_cmd(&dev, HDEX_AUX_REQ);
@@ -449,23 +445,23 @@ static int mixer_set(int d, int value)
 		/* master volume unscaled controls */
 	case SOUND_MIXER_LINE:			/* line pot control */
 		/* scaled by IMIX in digital mix */
-		isa_writeb(bLeft, dev.SMA + SMA_bInPotPosLeft);
-		isa_writeb(bRight, dev.SMA + SMA_bInPotPosRight);
+		writeb(bLeft, dev.SMA + SMA_bInPotPosLeft);
+		writeb(bRight, dev.SMA + SMA_bInPotPosRight);
 		if (msnd_send_word(&dev, 0, 0, HDEXAR_IN_SET_POTS) == 0)
 			chk_send_dsp_cmd(&dev, HDEX_AUX_REQ);
 		break;
 #ifndef MSND_CLASSIC
 	case SOUND_MIXER_MIC:			/* mic pot control */
 		/* scaled by IMIX in digital mix */
-		isa_writeb(bLeft, dev.SMA + SMA_bMicPotPosLeft);
-		isa_writeb(bRight, dev.SMA + SMA_bMicPotPosRight);
+		writeb(bLeft, dev.SMA + SMA_bMicPotPosLeft);
+		writeb(bRight, dev.SMA + SMA_bMicPotPosRight);
 		if (msnd_send_word(&dev, 0, 0, HDEXAR_MIC_SET_POTS) == 0)
 			chk_send_dsp_cmd(&dev, HDEX_AUX_REQ);
 		break;
 #endif
 	case SOUND_MIXER_VOLUME:		/* master volume */
-		isa_writew(wLeft, dev.SMA + SMA_wCurrMastVolLeft);
-		isa_writew(wRight, dev.SMA + SMA_wCurrMastVolRight);
+		writew(wLeft, dev.SMA + SMA_wCurrMastVolLeft);
+		writew(wRight, dev.SMA + SMA_wCurrMastVolRight);
 		/* fall through */
 
 	case SOUND_MIXER_LINE1:			/* aux pot control */
@@ -565,13 +561,13 @@ static int mixer_ioctl(unsigned int cmd, unsigned long arg)
 		mixer_info info;
 		set_mixer_info();
 		info.modify_counter = dev.mixer_mod_count;
-		if (copy_to_user((void *)arg, &info, sizeof(info)))
+		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
 	} else if (cmd == SOUND_OLD_MIXER_INFO) {
 		_old_mixer_info info;
 		set_mixer_info();
-		if (copy_to_user((void *)arg, &info, sizeof(info)))
+		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
 	} else if (cmd == SOUND_MIXER_PRIVATE1) {
@@ -584,19 +580,19 @@ static int mixer_ioctl(unsigned int cmd, unsigned long arg)
 		if (_SIOC_DIR(cmd) & _SIOC_WRITE) {
 			switch (cmd & 0xff) {
 			case SOUND_MIXER_RECSRC:
-				if (get_user(val, (int *)arg))
+				if (get_user(val, (int __user *)arg))
 					return -EFAULT;
 				val = set_recsrc(val);
 				break;
 
 			default:
-				if (get_user(val, (int *)arg))
+				if (get_user(val, (int __user *)arg))
 					return -EFAULT;
 				val = mixer_set(cmd & 0xff, val);
 				break;
 			}
 			++dev.mixer_mod_count;
-			return put_user(val, (int *)arg);
+			return put_user(val, (int __user *)arg);
 		} else {
 			switch (cmd & 0xff) {
 			case SOUND_MIXER_RECSRC:
@@ -638,27 +634,32 @@ static int mixer_ioctl(unsigned int cmd, unsigned long arg)
 			}
 		}
 
-		return put_user(val, (int *)arg); 
+		return put_user(val, (int __user *)arg); 
 	}
 
 	return -EINVAL;
 }
 
-static int dev_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+static long dev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	int minor = iminor(inode);
+	int minor = iminor(file->f_path.dentry->d_inode);
+	int ret;
 
 	if (cmd == OSS_GETVERSION) {
 		int sound_version = SOUND_VERSION;
-		return put_user(sound_version, (int *)arg);
+		return put_user(sound_version, (int __user *)arg);
 	}
 
-	if (minor == dev.dsp_minor)
-		return dsp_ioctl(file, cmd, arg);
-	else if (minor == dev.mixer_minor)
-		return mixer_ioctl(cmd, arg);
+	ret = -EINVAL;
 
-	return -EINVAL;
+	mutex_lock(&msnd_pinnacle_mutex);
+	if (minor == dev.dsp_minor)
+		ret = dsp_ioctl(file, cmd, arg);
+	else if (minor == dev.mixer_minor)
+		ret = mixer_ioctl(cmd, arg);
+	mutex_unlock(&msnd_pinnacle_mutex);
+
+	return ret;
 }
 
 static void dsp_write_flush(void)
@@ -761,12 +762,15 @@ static int dev_open(struct inode *inode, struct file *file)
 	int minor = iminor(inode);
 	int err = 0;
 
+	mutex_lock(&msnd_pinnacle_mutex);
 	if (minor == dev.dsp_minor) {
 		if ((file->f_mode & FMODE_WRITE &&
 		     test_bit(F_AUDIO_WRITE_INUSE, &dev.flags)) ||
 		    (file->f_mode & FMODE_READ &&
-		     test_bit(F_AUDIO_READ_INUSE, &dev.flags)))
-			return -EBUSY;
+		     test_bit(F_AUDIO_READ_INUSE, &dev.flags))) {
+			err = -EBUSY;
+			goto out;
+		}
 
 		if ((err = dsp_open(file)) >= 0) {
 			dev.nresets = 0;
@@ -787,7 +791,8 @@ static int dev_open(struct inode *inode, struct file *file)
 		/* nothing */
 	} else
 		err = -EINVAL;
-
+out:
+	mutex_unlock(&msnd_pinnacle_mutex);
 	return err;
 }
 
@@ -796,48 +801,45 @@ static int dev_release(struct inode *inode, struct file *file)
 	int minor = iminor(inode);
 	int err = 0;
 
-	lock_kernel();
+	mutex_lock(&msnd_pinnacle_mutex);
 	if (minor == dev.dsp_minor)
 		err = dsp_release(file);
 	else if (minor == dev.mixer_minor) {
 		/* nothing */
 	} else
 		err = -EINVAL;
-	unlock_kernel();
+	mutex_unlock(&msnd_pinnacle_mutex);
 	return err;
 }
 
 static __inline__ int pack_DARQ_to_DARF(register int bank)
 {
-	register int size, n, timeout = 3;
+	register int size, timeout = 3;
 	register WORD wTmp;
 	LPDAQD DAQD;
 
 	/* Increment the tail and check for queue wrap */
-	wTmp = isa_readw(dev.DARQ + JQS_wTail) + PCTODSP_OFFSET(DAQDS__size);
-	if (wTmp > isa_readw(dev.DARQ + JQS_wSize))
+	wTmp = readw(dev.DARQ + JQS_wTail) + PCTODSP_OFFSET(DAQDS__size);
+	if (wTmp > readw(dev.DARQ + JQS_wSize))
 		wTmp = 0;
-	while (wTmp == isa_readw(dev.DARQ + JQS_wHead) && timeout--)
+	while (wTmp == readw(dev.DARQ + JQS_wHead) && timeout--)
 		udelay(1);
-	isa_writew(wTmp, dev.DARQ + JQS_wTail);
+	writew(wTmp, dev.DARQ + JQS_wTail);
 
 	/* Get our digital audio queue struct */
 	DAQD = bank * DAQDS__size + dev.base + DARQ_DATA_BUFF;
 
 	/* Get length of data */
-	size = isa_readw(DAQD + DAQDS_wSize);
+	size = readw(DAQD + DAQDS_wSize);
 
 	/* Read data from the head (unprotected bank 1 access okay
            since this is only called inside an interrupt) */
-	outb(HPBLKSEL_1, dev.io + HP_BLKS);
-	if ((n = msnd_fifo_write(
+	msnd_outb(HPBLKSEL_1, dev.io + HP_BLKS);
+	msnd_fifo_write_io(
 		&dev.DARF,
-		(char *)(dev.base + bank * DAR_BUFF_SIZE),
-		size, 0)) <= 0) {
-		outb(HPBLKSEL_0, dev.io + HP_BLKS);
-		return n;
-	}
-	outb(HPBLKSEL_0, dev.io + HP_BLKS);
+		dev.base + bank * DAR_BUFF_SIZE,
+		size);
+	msnd_outb(HPBLKSEL_0, dev.io + HP_BLKS);
 
 	return 1;
 }
@@ -848,8 +850,8 @@ static __inline__ int pack_DAPF_to_DAPQ(register int start)
 	register int protect = start, nbanks = 0;
 	LPDAQD DAQD;
 
-	DAPQ_tail = isa_readw(dev.DAPQ + JQS_wTail);
-	while (DAPQ_tail != isa_readw(dev.DAPQ + JQS_wHead) || start) {
+	DAPQ_tail = readw(dev.DAPQ + JQS_wTail);
+	while (DAPQ_tail != readw(dev.DAPQ + JQS_wHead) || start) {
 		register int bank_num = DAPQ_tail / PCTODSP_OFFSET(DAQDS__size);
 		register int n;
 		unsigned long flags;
@@ -858,21 +860,16 @@ static __inline__ int pack_DAPF_to_DAPQ(register int start)
 		if (protect) {
 			/* Critical section: protect fifo in non-interrupt */
 			spin_lock_irqsave(&dev.lock, flags);
-			if ((n = msnd_fifo_read(
+			n = msnd_fifo_read_io(
 				&dev.DAPF,
-				(char *)(dev.base + bank_num * DAP_BUFF_SIZE),
-				DAP_BUFF_SIZE, 0)) < 0) {
-				spin_unlock_irqrestore(&dev.lock, flags);
-				return n;
-			}
+				dev.base + bank_num * DAP_BUFF_SIZE,
+				DAP_BUFF_SIZE);
 			spin_unlock_irqrestore(&dev.lock, flags);
 		} else {
-			if ((n = msnd_fifo_read(
+			n = msnd_fifo_read_io(
 				&dev.DAPF,
-				(char *)(dev.base + bank_num * DAP_BUFF_SIZE),
-				DAP_BUFF_SIZE, 0)) < 0) {
-				return n;
-			}
+				dev.base + bank_num * DAP_BUFF_SIZE,
+				DAP_BUFF_SIZE);
 		}
 		if (!n)
 			break;
@@ -884,36 +881,47 @@ static __inline__ int pack_DAPF_to_DAPQ(register int start)
 		DAQD = bank_num * DAQDS__size + dev.base + DAPQ_DATA_BUFF;
 
 		/* Write size of this bank */
-		isa_writew(n, DAQD + DAQDS_wSize);
+		writew(n, DAQD + DAQDS_wSize);
 		++nbanks;
 
 		/* Then advance the tail */
 		DAPQ_tail = (++bank_num % 3) * PCTODSP_OFFSET(DAQDS__size);
-		isa_writew(DAPQ_tail, dev.DAPQ + JQS_wTail);
+		writew(DAPQ_tail, dev.DAPQ + JQS_wTail);
 		/* Tell the DSP to play the bank */
 		msnd_send_dsp_cmd(&dev, HDEX_PLAY_START);
 	}
 	return nbanks;
 }
 
-static int dsp_read(char *buf, size_t len)
+static int dsp_read(char __user *buf, size_t len)
 {
 	int count = len;
+	char *page = (char *)__get_free_page(GFP_KERNEL);
+
+	if (!page)
+		return -ENOMEM;
 
 	while (count > 0) {
-		int n;
+		int n, k;
 		unsigned long flags;
+
+		k = PAGE_SIZE;
+		if (k > count)
+			k = count;
 
 		/* Critical section: protect fifo in non-interrupt */
 		spin_lock_irqsave(&dev.lock, flags);
-		if ((n = msnd_fifo_read(&dev.DARF, buf, count, 1)) < 0) {
-			printk(KERN_WARNING LOGNAME ": FIFO read error\n");
-			spin_unlock_irqrestore(&dev.lock, flags);
-			return n;
-		}
+		n = msnd_fifo_read(&dev.DARF, page, k);
 		spin_unlock_irqrestore(&dev.lock, flags);
+		if (copy_to_user(buf, page, n)) {
+			free_page((unsigned long)page);
+			return -EFAULT;
+		}
 		buf += n;
 		count -= n;
+
+		if (n == k && count)
+			continue;
 
 		if (!test_bit(F_READING, &dev.flags) && dev.mode & FMODE_READ) {
 			dev.last_recbank = -1;
@@ -921,8 +929,10 @@ static int dsp_read(char *buf, size_t len)
 				set_bit(F_READING, &dev.flags);
 		}
 
-		if (dev.rec_ndelay)
+		if (dev.rec_ndelay) {
+			free_page((unsigned long)page);
 			return count == len ? -EAGAIN : len - count;
+		}
 
 		if (count > 0) {
 			set_bit(F_READBLOCK, &dev.flags);
@@ -931,32 +941,46 @@ static int dsp_read(char *buf, size_t len)
 				get_rec_delay_jiffies(DAR_BUFF_SIZE)))
 				clear_bit(F_READING, &dev.flags);
 			clear_bit(F_READBLOCK, &dev.flags);
-			if (signal_pending(current))
+			if (signal_pending(current)) {
+				free_page((unsigned long)page);
 				return -EINTR;
+			}
 		}
 	}
-
+	free_page((unsigned long)page);
 	return len - count;
 }
 
-static int dsp_write(const char *buf, size_t len)
+static int dsp_write(const char __user *buf, size_t len)
 {
 	int count = len;
+	char *page = (char *)__get_free_page(GFP_KERNEL);
+
+	if (!page)
+		return -ENOMEM;
 
 	while (count > 0) {
-		int n;
+		int n, k;
 		unsigned long flags;
+
+		k = PAGE_SIZE;
+		if (k > count)
+			k = count;
+
+		if (copy_from_user(page, buf, k)) {
+			free_page((unsigned long)page);
+			return -EFAULT;
+		}
 
 		/* Critical section: protect fifo in non-interrupt */
 		spin_lock_irqsave(&dev.lock, flags);
-		if ((n = msnd_fifo_write(&dev.DAPF, buf, count, 1)) < 0) {
-			printk(KERN_WARNING LOGNAME ": FIFO write error\n");
-			spin_unlock_irqrestore(&dev.lock, flags);
-			return n;
-		}
+		n = msnd_fifo_write(&dev.DAPF, page, k);
 		spin_unlock_irqrestore(&dev.lock, flags);
 		buf += n;
 		count -= n;
+
+		if (count && n == k)
+			continue;
 
 		if (!test_bit(F_WRITING, &dev.flags) && (dev.mode & FMODE_WRITE)) {
 			dev.last_playbank = -1;
@@ -964,8 +988,10 @@ static int dsp_write(const char *buf, size_t len)
 				set_bit(F_WRITING, &dev.flags);
 		}
 
-		if (dev.play_ndelay)
+		if (dev.play_ndelay) {
+			free_page((unsigned long)page);
 			return count == len ? -EAGAIN : len - count;
+		}
 
 		if (count > 0) {
 			set_bit(F_WRITEBLOCK, &dev.flags);
@@ -973,26 +999,29 @@ static int dsp_write(const char *buf, size_t len)
 				&dev.writeblock,
 				get_play_delay_jiffies(DAP_BUFF_SIZE));
 			clear_bit(F_WRITEBLOCK, &dev.flags);
-			if (signal_pending(current))
+			if (signal_pending(current)) {
+				free_page((unsigned long)page);
 				return -EINTR;
+			}
 		}
 	}
 
+	free_page((unsigned long)page);
 	return len - count;
 }
 
-static ssize_t dev_read(struct file *file, char *buf, size_t count, loff_t *off)
+static ssize_t dev_read(struct file *file, char __user *buf, size_t count, loff_t *off)
 {
-	int minor = iminor(file->f_dentry->d_inode);
+	int minor = iminor(file->f_path.dentry->d_inode);
 	if (minor == dev.dsp_minor)
 		return dsp_read(buf, count);
 	else
 		return -EINVAL;
 }
 
-static ssize_t dev_write(struct file *file, const char *buf, size_t count, loff_t *off)
+static ssize_t dev_write(struct file *file, const char __user *buf, size_t count, loff_t *off)
 {
-	int minor = iminor(file->f_dentry->d_inode);
+	int minor = iminor(file->f_path.dentry->d_inode);
 	if (minor == dev.dsp_minor)
 		return dsp_write(buf, count);
 	else
@@ -1063,47 +1092,48 @@ static __inline__ void eval_dsp_msg(register WORD wMessage)
 	}
 }
 
-static irqreturn_t intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t intr(int irq, void *dev_id)
 {
 	/* Send ack to DSP */
-	inb(dev.io + HP_RXL);
+	msnd_inb(dev.io + HP_RXL);
 
 	/* Evaluate queued DSP messages */
-	while (isa_readw(dev.DSPQ + JQS_wTail) != isa_readw(dev.DSPQ + JQS_wHead)) {
+	while (readw(dev.DSPQ + JQS_wTail) != readw(dev.DSPQ + JQS_wHead)) {
 		register WORD wTmp;
 
-		eval_dsp_msg(isa_readw(dev.pwDSPQData + 2*isa_readw(dev.DSPQ + JQS_wHead)));
+		eval_dsp_msg(readw(dev.pwDSPQData + 2*readw(dev.DSPQ + JQS_wHead)));
 
-		if ((wTmp = isa_readw(dev.DSPQ + JQS_wHead) + 1) > isa_readw(dev.DSPQ + JQS_wSize))
-			isa_writew(0, dev.DSPQ + JQS_wHead);
+		if ((wTmp = readw(dev.DSPQ + JQS_wHead) + 1) > readw(dev.DSPQ + JQS_wSize))
+			writew(0, dev.DSPQ + JQS_wHead);
 		else
-			isa_writew(wTmp, dev.DSPQ + JQS_wHead);
+			writew(wTmp, dev.DSPQ + JQS_wHead);
 	}
 	return IRQ_HANDLED;
 }
 
-static struct file_operations dev_fileops = {
+static const struct file_operations dev_fileops = {
 	.owner		= THIS_MODULE,
 	.read		= dev_read,
 	.write		= dev_write,
-	.ioctl		= dev_ioctl,
+	.unlocked_ioctl	= dev_ioctl,
 	.open		= dev_open,
 	.release	= dev_release,
+	.llseek		= noop_llseek,
 };
 
 static int reset_dsp(void)
 {
 	int timeout = 100;
 
-	outb(HPDSPRESET_ON, dev.io + HP_DSPR);
+	msnd_outb(HPDSPRESET_ON, dev.io + HP_DSPR);
 	mdelay(1);
 #ifndef MSND_CLASSIC
-	dev.info = inb(dev.io + HP_INFO);
+	dev.info = msnd_inb(dev.io + HP_INFO);
 #endif
-	outb(HPDSPRESET_OFF, dev.io + HP_DSPR);
+	msnd_outb(HPDSPRESET_OFF, dev.io + HP_DSPR);
 	mdelay(1);
 	while (timeout-- > 0) {
-		if (inb(dev.io + HP_CVR) == HP_CVR_DEF)
+		if (msnd_inb(dev.io + HP_CVR) == HP_CVR_DEF)
 			return 0;
 		mdelay(1);
 	}
@@ -1120,11 +1150,10 @@ static int __init probe_multisound(void)
 	char *pinfiji = "Pinnacle/Fiji";
 #endif
 
-	if (check_region(dev.io, dev.numio)) {
+	if (!request_region(dev.io, dev.numio, "probing")) {
 		printk(KERN_ERR LOGNAME ": I/O port conflict\n");
 		return -ENODEV;
 	}
-	request_region(dev.io, dev.numio, "probing");
 
 	if (reset_dsp() < 0) {
 		release_region(dev.io, dev.numio);
@@ -1158,7 +1187,7 @@ static int __init probe_multisound(void)
 	}
 	printk(KERN_INFO LOGNAME ": %s revision %s, Xilinx version %s, "
 #endif /* MSND_CLASSIC */
-	       "I/O 0x%x-0x%x, IRQ %d, memory mapped to 0x%lX-0x%lX\n",
+	       "I/O 0x%x-0x%x, IRQ %d, memory mapped to %p-%p\n",
 	       dev.name,
 #ifndef MSND_CLASSIC
 	       rev, xv,
@@ -1178,21 +1207,21 @@ static int init_sma(void)
 	unsigned long flags;
 
 #ifdef MSND_CLASSIC
-	outb(dev.memid, dev.io + HP_MEMM);
+	msnd_outb(dev.memid, dev.io + HP_MEMM);
 #endif
-	outb(HPBLKSEL_0, dev.io + HP_BLKS);
+	msnd_outb(HPBLKSEL_0, dev.io + HP_BLKS);
 	if (initted) {
-		mastVolLeft = isa_readw(dev.SMA + SMA_wCurrMastVolLeft);
-		mastVolRight = isa_readw(dev.SMA + SMA_wCurrMastVolRight);
+		mastVolLeft = readw(dev.SMA + SMA_wCurrMastVolLeft);
+		mastVolRight = readw(dev.SMA + SMA_wCurrMastVolRight);
 	} else
 		mastVolLeft = mastVolRight = 0;
-	isa_memset_io(dev.base, 0, 0x8000);
+	memset_io(dev.base, 0, 0x8000);
 
 	/* Critical section: bank 1 access */
 	spin_lock_irqsave(&dev.lock, flags);
-	outb(HPBLKSEL_1, dev.io + HP_BLKS);
-	isa_memset_io(dev.base, 0, 0x8000);
-	outb(HPBLKSEL_0, dev.io + HP_BLKS);
+	msnd_outb(HPBLKSEL_1, dev.io + HP_BLKS);
+	memset_io(dev.base, 0, 0x8000);
+	msnd_outb(HPBLKSEL_0, dev.io + HP_BLKS);
 	spin_unlock_irqrestore(&dev.lock, flags);
 
 	dev.pwDSPQData = (dev.base + DSPQ_DATA_BUFF);
@@ -1224,19 +1253,19 @@ static int init_sma(void)
 
 	/* Setup some DSP values */
 #ifndef MSND_CLASSIC
-	isa_writew(1, dev.SMA + SMA_wCurrPlayFormat);
-	isa_writew(dev.play_sample_size, dev.SMA + SMA_wCurrPlaySampleSize);
-	isa_writew(dev.play_channels, dev.SMA + SMA_wCurrPlayChannels);
-	isa_writew(dev.play_sample_rate, dev.SMA + SMA_wCurrPlaySampleRate);
+	writew(1, dev.SMA + SMA_wCurrPlayFormat);
+	writew(dev.play_sample_size, dev.SMA + SMA_wCurrPlaySampleSize);
+	writew(dev.play_channels, dev.SMA + SMA_wCurrPlayChannels);
+	writew(dev.play_sample_rate, dev.SMA + SMA_wCurrPlaySampleRate);
 #endif
-	isa_writew(dev.play_sample_rate, dev.SMA + SMA_wCalFreqAtoD);
-	isa_writew(mastVolLeft, dev.SMA + SMA_wCurrMastVolLeft);
-	isa_writew(mastVolRight, dev.SMA + SMA_wCurrMastVolRight);
+	writew(dev.play_sample_rate, dev.SMA + SMA_wCalFreqAtoD);
+	writew(mastVolLeft, dev.SMA + SMA_wCurrMastVolLeft);
+	writew(mastVolRight, dev.SMA + SMA_wCurrMastVolRight);
 #ifndef MSND_CLASSIC
-	isa_writel(0x00010000, dev.SMA + SMA_dwCurrPlayPitch);
-	isa_writel(0x00000001, dev.SMA + SMA_dwCurrPlayRate);
+	writel(0x00010000, dev.SMA + SMA_dwCurrPlayPitch);
+	writel(0x00000001, dev.SMA + SMA_dwCurrPlayRate);
 #endif
-	isa_writew(0x303, dev.SMA + SMA_wCurrInputTagBits);
+	writew(0x303, dev.SMA + SMA_wCurrInputTagBits);
 
 	initted = 1;
 
@@ -1245,12 +1274,12 @@ static int init_sma(void)
 
 static int __init calibrate_adc(WORD srate)
 {
-	isa_writew(srate, dev.SMA + SMA_wCalFreqAtoD);
+	writew(srate, dev.SMA + SMA_wCalFreqAtoD);
 	if (dev.calibrate_signal == 0)
-		isa_writew(isa_readw(dev.SMA + SMA_wCurrHostStatusFlags)
+		writew(readw(dev.SMA + SMA_wCurrHostStatusFlags)
 		       | 0x0001, dev.SMA + SMA_wCurrHostStatusFlags);
 	else
-		isa_writew(isa_readw(dev.SMA + SMA_wCurrHostStatusFlags)
+		writew(readw(dev.SMA + SMA_wCurrHostStatusFlags)
 		       & ~0x0001, dev.SMA + SMA_wCurrHostStatusFlags);
 	if (msnd_send_word(&dev, 0, 0, HDEXAR_CAL_A_TO_D) == 0 &&
 	    chk_send_dsp_cmd(&dev, HDEX_AUX_REQ) == 0) {
@@ -1265,7 +1294,7 @@ static int __init calibrate_adc(WORD srate)
 
 static int upload_dsp_code(void)
 {
-	outb(HPBLKSEL_0, dev.io + HP_BLKS);
+	msnd_outb(HPBLKSEL_0, dev.io + HP_BLKS);
 #ifndef HAVE_DSPCODEH
 	INITCODESIZE = mod_firmware_load(INITCODEFILE, &INITCODE);
 	if (!INITCODE) {
@@ -1280,7 +1309,7 @@ static int upload_dsp_code(void)
 		return -EBUSY;
 	}
 #endif
-	isa_memcpy_toio(dev.base, PERMCODE, PERMCODESIZE);
+	memcpy_toio(dev.base, PERMCODE, PERMCODESIZE);
 	if (msnd_upload_host(&dev, INITCODE, INITCODESIZE) < 0) {
 		printk(KERN_WARNING LOGNAME ": Error uploading to DSP\n");
 		return -ENODEV;
@@ -1302,9 +1331,9 @@ static int upload_dsp_code(void)
 #ifdef MSND_CLASSIC
 static void reset_proteus(void)
 {
-	outb(HPPRORESET_ON, dev.io + HP_PROR);
+	msnd_outb(HPPRORESET_ON, dev.io + HP_PROR);
 	mdelay(TIME_PRO_RESET);
-	outb(HPPRORESET_OFF, dev.io + HP_PROR);
+	msnd_outb(HPPRORESET_OFF, dev.io + HP_PROR);
 	mdelay(TIME_PRO_RESET_DONE);
 }
 #endif
@@ -1314,8 +1343,8 @@ static int initialize(void)
 	int err, timeout;
 
 #ifdef MSND_CLASSIC
-	outb(HPWAITSTATE_0, dev.io + HP_WAIT);
-	outb(HPBITMODE_16, dev.io + HP_BITM);
+	msnd_outb(HPWAITSTATE_0, dev.io + HP_WAIT);
+	msnd_outb(HPBITMODE_16, dev.io + HP_BITM);
 
 	reset_proteus();
 #endif
@@ -1333,7 +1362,7 @@ static int initialize(void)
 	}
 
 	timeout = 200;
-	while (isa_readw(dev.base)) {
+	while (readw(dev.base)) {
 		mdelay(1);
 		if (!timeout--) {
 			printk(KERN_DEBUG LOGNAME ": DSP reset timeout\n");
@@ -1373,9 +1402,13 @@ static int __init attach_multisound(void)
 		printk(KERN_ERR LOGNAME ": Couldn't grab IRQ %d\n", dev.irq);
 		return err;
 	}
-	request_region(dev.io, dev.numio, dev.name);
+	if (request_region(dev.io, dev.numio, dev.name) == NULL) {
+		free_irq(dev.irq, &dev);
+		return -EBUSY;
+	}
 
-        if ((err = dsp_full_reset()) < 0) {
+	err = dsp_full_reset();
+	if (err < 0) {
 		release_region(dev.io, dev.numio);
 		free_irq(dev.irq, &dev);
 		return err;
@@ -1431,9 +1464,9 @@ static void __exit unload_multisound(void)
 
 static int __init msnd_write_cfg(int cfg, int reg, int value)
 {
-	outb(reg, cfg);
-	outb(value, cfg + 1);
-	if (value != inb(cfg + 1)) {
+	msnd_outb(reg, cfg);
+	msnd_outb(value, cfg + 1);
+	if (value != msnd_inb(cfg + 1)) {
 		printk(KERN_ERR LOGNAME ": msnd_write_cfg: I/O error\n");
 		return -EIO;
 	}
@@ -1579,24 +1612,6 @@ MODULE_AUTHOR				("Andrew Veliath <andrewtv@usa.net>");
 MODULE_DESCRIPTION			("Turtle Beach " LONGNAME " Linux Driver");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM				(io, "i");
-MODULE_PARM				(irq, "i");
-MODULE_PARM				(mem, "i");
-MODULE_PARM				(write_ndelay, "i");
-MODULE_PARM				(fifosize, "i");
-MODULE_PARM				(calibrate_signal, "i");
-#ifndef MSND_CLASSIC
-MODULE_PARM				(digital, "i");
-MODULE_PARM				(cfg, "i");
-MODULE_PARM				(reset, "i");
-MODULE_PARM				(mpu_io, "i");
-MODULE_PARM				(mpu_irq, "i");
-MODULE_PARM				(ide_io0, "i");
-MODULE_PARM				(ide_io1, "i");
-MODULE_PARM				(ide_irq, "i");
-MODULE_PARM				(joystick_io, "i");
-#endif
-
 static int io __initdata =		-1;
 static int irq __initdata =		-1;
 static int mem __initdata =		-1;
@@ -1702,6 +1717,23 @@ static int
 calibrate_signal __initdata =		CONFIG_MSND_CALSIGNAL;
 #endif /* MODULE */
 
+module_param				(io, int, 0);
+module_param				(irq, int, 0);
+module_param				(mem, int, 0);
+module_param				(write_ndelay, int, 0);
+module_param				(fifosize, int, 0);
+module_param				(calibrate_signal, int, 0);
+#ifndef MSND_CLASSIC
+module_param				(digital, bool, 0);
+module_param				(cfg, int, 0);
+module_param				(reset, int, 0);
+module_param				(mpu_io, int, 0);
+module_param				(mpu_irq, int, 0);
+module_param				(ide_io0, int, 0);
+module_param				(ide_io1, int, 0);
+module_param				(ide_irq, int, 0);
+module_param				(joystick_io, int, 0);
+#endif
 
 static int __init msnd_init(void)
 {
@@ -1808,12 +1840,11 @@ static int __init msnd_init(void)
 		/* Joystick */
 		pinnacle_devs[3].io0 = joystick_io;
 
-		if (check_region(cfg, 2)) {
+		if (!request_region(cfg, 2, "Pinnacle/Fiji Config")) {
 			printk(KERN_ERR LOGNAME ": Config port 0x%x conflict\n", cfg);
 			return -EIO;
 		}
 
-		request_region(cfg, 2, "Pinnacle/Fiji Config");
 		if (msnd_pinnacle_cfg_devices(cfg, reset, pinnacle_devs)) {
 			printk(KERN_ERR LOGNAME ": Device configuration error\n");
 			release_region(cfg, 2);
@@ -1838,7 +1869,7 @@ static int __init msnd_init(void)
 	dev.io = io;
 	dev.numio = DSP_NUMIO;
 	dev.irq = irq;
-	dev.base = mem;
+	dev.base = ioremap(mem, 0x8000);
 	dev.fifosize = fifosize * 1024;
 	dev.calibrate_signal = calibrate_signal ? 1 : 0;
 	dev.recsrc = 0;

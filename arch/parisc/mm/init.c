@@ -5,37 +5,39 @@
  *  Copyright 1999 SuSE GmbH
  *    changed by Philipp Rumpf
  *  Copyright 1999 Philipp Rumpf (prumpf@tux.org)
+ *  Copyright 2004 Randolph Chung (tausq@debian.org)
+ *  Copyright 2006-2007 Helge Deller (deller@gmx.de)
  *
  */
 
-#include <linux/config.h>
 
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/bootmem.h>
+#include <linux/gfp.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/pci.h>		/* for hppa_dma_ops and pcxl_dma_ops */
 #include <linux/initrd.h>
 #include <linux/swap.h>
 #include <linux/unistd.h>
+#include <linux/nodemask.h>	/* for node_online_map */
+#include <linux/pagemap.h>	/* for release_pages and page_cache_release */
 
 #include <asm/pgalloc.h>
+#include <asm/pgtable.h>
 #include <asm/tlb.h>
 #include <asm/pdc_chassis.h>
+#include <asm/mmzone.h>
+#include <asm/sections.h>
 
 DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
-extern char _text;	/* start of kernel code, defined by linker */
 extern int  data_start;
-extern char _end;	/* end of BSS, defined by linker */
-extern char __init_begin, __init_end;
 
 #ifdef CONFIG_DISCONTIGMEM
-struct node_map_data node_data[MAX_PHYSMEM_RANGES];
-bootmem_data_t bmem_data[MAX_PHYSMEM_RANGES];
-unsigned char *chunkmap;
-unsigned int maxchunkmap;
+struct node_map_data node_data[MAX_NUMNODES] __read_mostly;
+unsigned char pfnnid_map[PFNNID_MAP_MAX] __read_mostly;
 #endif
 
 static struct resource data_resource = {
@@ -55,35 +57,32 @@ static struct resource pdcdata_resource = {
 	.flags	= IORESOURCE_BUSY | IORESOURCE_MEM,
 };
 
-static struct resource sysram_resources[MAX_PHYSMEM_RANGES];
-
-static unsigned long max_pfn;
+static struct resource sysram_resources[MAX_PHYSMEM_RANGES] __read_mostly;
 
 /* The following array is initialized from the firmware specific
  * information retrieved in kernel/inventory.c.
  */
 
-physmem_range_t pmem_ranges[MAX_PHYSMEM_RANGES];
-int npmem_ranges;
+physmem_range_t pmem_ranges[MAX_PHYSMEM_RANGES] __read_mostly;
+int npmem_ranges __read_mostly;
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 #define MAX_MEM         (~0UL)
-#else /* !__LP64__ */
+#else /* !CONFIG_64BIT */
 #define MAX_MEM         (3584U*1024U*1024U)
-#endif /* !__LP64__ */
+#endif /* !CONFIG_64BIT */
 
-static unsigned long mem_limit = MAX_MEM;
+static unsigned long mem_limit __read_mostly = MAX_MEM;
 
 static void __init mem_limit_func(void)
 {
 	char *cp, *end;
 	unsigned long limit;
-	extern char saved_command_line[];
 
 	/* We need this before __setup() functions are called */
 
 	limit = MAX_MEM;
-	for (cp = saved_command_line; *cp; ) {
+	for (cp = boot_command_line; *cp; ) {
 		if (memcmp(cp, "mem=", 4) == 0) {
 			cp += 4;
 			limit = memparse(cp, &end);
@@ -119,21 +118,6 @@ static void __init setup_bootmem(void)
 
 	disable_sr_hashing(); /* Turn off space register hashing */
 
-#ifdef CONFIG_DISCONTIGMEM
-	/*
-	 * The below is still true as of 2.4.2. If this is ever fixed,
-	 * we can remove this warning!
-	 */
-
-	printk(KERN_WARNING "\n\n");
-	printk(KERN_WARNING "CONFIG_DISCONTIGMEM is enabled, which is probably a mistake. This\n");
-	printk(KERN_WARNING "option can lead to heavy swapping, even when there are gigabytes\n");
-	printk(KERN_WARNING "of free memory.\n\n");
-#endif
-
-#ifdef __LP64__
-
-#ifndef CONFIG_DISCONTIGMEM
 	/*
 	 * Sort the ranges. Since the number of ranges is typically
 	 * small, and performance is not an issue here, just do
@@ -160,11 +144,10 @@ static void __init setup_bootmem(void)
 		}
 	}
 
+#ifndef CONFIG_DISCONTIGMEM
 	/*
 	 * Throw out ranges that are too far apart (controlled by
-	 * MAX_GAP). If CONFIG_DISCONTIGMEM wasn't implemented so
-	 * poorly, we would recommend enabling that option, but,
-	 * until it is fixed, this is the best way to go.
+	 * MAX_GAP).
 	 */
 
 	for (i = 1; i < npmem_ranges; i++) {
@@ -172,6 +155,11 @@ static void __init setup_bootmem(void)
 			(pmem_ranges[i-1].start_pfn +
 			 pmem_ranges[i-1].pages) > MAX_GAP) {
 			npmem_ranges = i;
+			printk("Large gap in memory detected (%ld pages). "
+			       "Consider turning on CONFIG_DISCONTIGMEM\n",
+			       pmem_ranges[i].start_pfn -
+			       (pmem_ranges[i-1].start_pfn +
+			        pmem_ranges[i-1].pages));
 			break;
 		}
 	}
@@ -189,12 +177,10 @@ static void __init setup_bootmem(void)
 
 			size = (pmem_ranges[i].pages << PAGE_SHIFT);
 			start = (pmem_ranges[i].start_pfn << PAGE_SHIFT);
-			printk(KERN_INFO "%2d) Start 0x%016lx End 0x%016lx Size %6ld Mb\n",
+			printk(KERN_INFO "%2d) Start 0x%016lx End 0x%016lx Size %6ld MB\n",
 				i,start, start + (size - 1), size >> 20);
 		}
 	}
-
-#endif /* __LP64__ */
 
 	sysram_resource_count = npmem_ranges;
 	for (i = 0; i < sysram_resource_count; i++) {
@@ -218,12 +204,13 @@ static void __init setup_bootmem(void)
 	mem_limit_func();       /* check for "mem=" argument */
 
 	mem_max = 0;
+	num_physpages = 0;
 	for (i = 0; i < npmem_ranges; i++) {
 		unsigned long rsize;
 
 		rsize = pmem_ranges[i].pages << PAGE_SHIFT;
 		if ((mem_max + rsize) > mem_limit) {
-			printk(KERN_WARNING "Memory truncated to %ld Mb\n", mem_limit >> 20);
+			printk(KERN_WARNING "Memory truncated to %ld MB\n", mem_limit >> 20);
 			if (mem_max == mem_limit)
 				npmem_ranges = i;
 			else {
@@ -232,15 +219,16 @@ static void __init setup_bootmem(void)
 				npmem_ranges = i + 1;
 				mem_max = mem_limit;
 			}
+	        num_physpages += pmem_ranges[i].pages;
 			break;
 		}
+	    num_physpages += pmem_ranges[i].pages;
 		mem_max += rsize;
 	}
 
-	printk(KERN_INFO "Total Memory: %ld Mb\n",mem_max >> 20);
+	printk(KERN_INFO "Total Memory: %ld MB\n",mem_max >> 20);
 
 #ifndef CONFIG_DISCONTIGMEM
-
 	/* Merge the ranges, keeping track of the holes */
 
 	{
@@ -272,9 +260,18 @@ static void __init setup_bootmem(void)
 	bootmap_start_pfn = PAGE_ALIGN(__pa((unsigned long) &_end)) >> PAGE_SHIFT;
 
 #ifdef CONFIG_DISCONTIGMEM
-	for (i = 0; i < npmem_ranges; i++)
-		node_data[i].pg_data.bdata = &bmem_data[i];
+	for (i = 0; i < MAX_PHYSMEM_RANGES; i++) {
+		memset(NODE_DATA(i), 0, sizeof(pg_data_t));
+		NODE_DATA(i)->bdata = &bootmem_node_data[i];
+	}
+	memset(pfnnid_map, 0xff, sizeof(pfnnid_map));
+
+	for (i = 0; i < npmem_ranges; i++) {
+		node_set_state(i, N_NORMAL_MEMORY);
+		node_set_online(i);
+	}
 #endif
+
 	/*
 	 * Initialize and free the full range of memory in each range.
 	 * Note that the only writing these routines do are to the bootmap,
@@ -303,21 +300,28 @@ static void __init setup_bootmem(void)
 			max_pfn = start_pfn + npages;
 	}
 
-	if ((bootmap_pfn - bootmap_start_pfn) != bootmap_pages) {
-		printk(KERN_WARNING "WARNING! bootmap sizing is messed up!\n");
-		BUG();
-	}
+	/* IOMMU is always used to access "high mem" on those boxes
+	 * that can support enough mem that a PCI device couldn't
+	 * directly DMA to any physical addresses.
+	 * ISA DMA support will need to revisit this.
+	 */
+	max_low_pfn = max_pfn;
+
+	/* bootmap sizing messed up? */
+	BUG_ON((bootmap_pfn - bootmap_start_pfn) != bootmap_pages);
 
 	/* reserve PAGE0 pdc memory, kernel text/data/bss & bootmap */
 
 #define PDC_CONSOLE_IO_IODC_SIZE 32768
 
 	reserve_bootmem_node(NODE_DATA(0), 0UL,
-			(unsigned long)(PAGE0->mem_free + PDC_CONSOLE_IO_IODC_SIZE));
-	reserve_bootmem_node(NODE_DATA(0),__pa((unsigned long)&_text),
-			(unsigned long)(&_end - &_text));
+			(unsigned long)(PAGE0->mem_free +
+				PDC_CONSOLE_IO_IODC_SIZE), BOOTMEM_DEFAULT);
+	reserve_bootmem_node(NODE_DATA(0), __pa((unsigned long)_text),
+			(unsigned long)(_end - _text), BOOTMEM_DEFAULT);
 	reserve_bootmem_node(NODE_DATA(0), (bootmap_start_pfn << PAGE_SHIFT),
-			((bootmap_pfn - bootmap_start_pfn) << PAGE_SHIFT));
+			((bootmap_pfn - bootmap_start_pfn) << PAGE_SHIFT),
+			BOOTMEM_DEFAULT);
 
 #ifndef CONFIG_DISCONTIGMEM
 
@@ -326,7 +330,8 @@ static void __init setup_bootmem(void)
 	for (i = 0; i < npmem_holes; i++) {
 		reserve_bootmem_node(NODE_DATA(0),
 				(pmem_holes[i].start_pfn << PAGE_SHIFT),
-				(pmem_holes[i].pages << PAGE_SHIFT));
+				(pmem_holes[i].pages << PAGE_SHIFT),
+				BOOTMEM_DEFAULT);
 	}
 #endif
 
@@ -344,14 +349,15 @@ static void __init setup_bootmem(void)
 			initrd_below_start_ok = 1;
 			printk(KERN_INFO "initrd: reserving %08lx-%08lx (mem_max %08lx)\n", __pa(initrd_start), __pa(initrd_start) + initrd_reserve, mem_max);
 
-			reserve_bootmem_node(NODE_DATA(0),__pa(initrd_start), initrd_reserve);
+			reserve_bootmem_node(NODE_DATA(0), __pa(initrd_start),
+					initrd_reserve, BOOTMEM_DEFAULT);
 		}
 	}
 #endif
 
 	data_resource.start =  virt_to_phys(&data_start);
-	data_resource.end = virt_to_phys(&_end)-1;
-	code_resource.start = virt_to_phys(&_text);
+	data_resource.end = virt_to_phys(_end) - 1;
+	code_resource.start = virt_to_phys(_text);
 	code_resource.end = virt_to_phys(&data_start)-1;
 
 	/* We don't know which region the kernel will be in, so try
@@ -367,40 +373,25 @@ static void __init setup_bootmem(void)
 
 void free_initmem(void)
 {
-	/* FIXME: */
-#if 0
-	printk(KERN_INFO "NOT FREEING INITMEM (%dk)\n",
-			(&__init_end - &__init_begin) >> 10);
-	return;
-#else
 	unsigned long addr;
-	
-	printk(KERN_INFO "Freeing unused kernel memory: ");
+	unsigned long init_begin = (unsigned long)__init_begin;
+	unsigned long init_end = (unsigned long)__init_end;
 
-#if 1
+#ifdef CONFIG_DEBUG_KERNEL
 	/* Attempt to catch anyone trying to execute code here
 	 * by filling the page with BRK insns.
-	 * 
-	 * If we disable interrupts for all CPUs, then IPI stops working.
-	 * Kinda breaks the global cache flushing.
 	 */
-	local_irq_disable();
-
-	memset(&__init_begin, 0x00, 
-		(unsigned long)&__init_end - (unsigned long)&__init_begin);
-
-	flush_data_cache();
-	asm volatile("sync" : : );
-	flush_icache_range((unsigned long)&__init_begin, (unsigned long)&__init_end);
-	asm volatile("sync" : : );
-
-	local_irq_enable();
+	memset((void *)init_begin, 0x00, init_end - init_begin);
+	flush_icache_range(init_begin, init_end);
 #endif
 	
-	addr = (unsigned long)(&__init_begin);
-	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
+	/* align __init_begin and __init_end to page size,
+	   ignoring linker script where we might have tried to save RAM */
+	init_begin = PAGE_ALIGN(init_begin);
+	init_end = PAGE_ALIGN(init_end);
+	for (addr = init_begin; addr < init_end; addr += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(addr));
-		set_page_count(virt_to_page(addr), 1);
+		init_page_count(virt_to_page(addr));
 		free_page(addr);
 		num_physpages++;
 		totalram_pages++;
@@ -409,9 +400,21 @@ void free_initmem(void)
 	/* set up a new led state on systems shipped LED State panel */
 	pdc_chassis_send_status(PDC_CHASSIS_DIRECT_BCOMPLETE);
 	
-	printk("%luk freed\n", (unsigned long)(&__init_end - &__init_begin) >> 10);
-#endif
+	printk(KERN_INFO "Freeing unused kernel memory: %luk freed\n",
+		(init_end - init_begin) >> 10);
 }
+
+
+#ifdef CONFIG_DEBUG_RODATA
+void mark_rodata_ro(void)
+{
+	/* rodata memory was already mapped with KERNEL_RO access rights by
+           pagetable_init() and map_pages(). No need to do additional stuff here */
+	printk (KERN_INFO "Write protecting the kernel read-only data: %luk\n",
+		(unsigned long)(__end_rodata - __start_rodata) >> 10);
+}
+#endif
+
 
 /*
  * Just an arbitrary offset to serve as a "hole" between mapping areas
@@ -424,62 +427,133 @@ void free_initmem(void)
  * a hole of 4kB between each vmalloced area for the same reason.
  */
 
-#define MAP_START 0x4000 /* Leave room for gateway page expansion */
+ /* Leave room for gateway page expansion */
+#if KERNEL_MAP_START < GATEWAY_PAGE_SIZE
+#error KERNEL_MAP_START is in gateway reserved region
+#endif
+#define MAP_START (KERNEL_MAP_START)
+
 #define VM_MAP_OFFSET  (32*1024)
 #define SET_MAP_OFFSET(x) ((void *)(((unsigned long)(x) + VM_MAP_OFFSET) \
 				     & ~(VM_MAP_OFFSET-1)))
 
-void *vmalloc_start;
-EXPORT_SYMBOL(vmalloc_start);
+void *parisc_vmalloc_start __read_mostly;
+EXPORT_SYMBOL(parisc_vmalloc_start);
 
 #ifdef CONFIG_PA11
-unsigned long pcxl_dma_start;
+unsigned long pcxl_dma_start __read_mostly;
 #endif
 
 void __init mem_init(void)
 {
-	int i;
+	int codesize, reservedpages, datasize, initsize;
+
+	/* Do sanity checks on page table constants */
+	BUILD_BUG_ON(PTE_ENTRY_SIZE != sizeof(pte_t));
+	BUILD_BUG_ON(PMD_ENTRY_SIZE != sizeof(pmd_t));
+	BUILD_BUG_ON(PGD_ENTRY_SIZE != sizeof(pgd_t));
+	BUILD_BUG_ON(PAGE_SHIFT + BITS_PER_PTE + BITS_PER_PMD + BITS_PER_PGD
+			> BITS_PER_LONG);
 
 	high_memory = __va((max_pfn << PAGE_SHIFT));
-	max_mapnr = (virt_to_page(high_memory - 1) - mem_map) + 1;
 
-	num_physpages = 0;
-	mem_map = zone_table[0]->zone_mem_map;
-	for (i = 0; i < npmem_ranges; i++)
-		num_physpages += free_all_bootmem_node(NODE_DATA(i));
-	totalram_pages = num_physpages;
+#ifndef CONFIG_DISCONTIGMEM
+	max_mapnr = page_to_pfn(virt_to_page(high_memory - 1)) + 1;
+	totalram_pages += free_all_bootmem();
+#else
+	{
+		int i;
 
-	printk(KERN_INFO "Memory: %luk available\n", num_physpages << (PAGE_SHIFT-10));
+		for (i = 0; i < npmem_ranges; i++)
+			totalram_pages += free_all_bootmem_node(NODE_DATA(i));
+	}
+#endif
+
+	codesize = (unsigned long)_etext - (unsigned long)_text;
+	datasize = (unsigned long)_edata - (unsigned long)_etext;
+	initsize = (unsigned long)__init_end - (unsigned long)__init_begin;
+
+	reservedpages = 0;
+{
+	unsigned long pfn;
+#ifdef CONFIG_DISCONTIGMEM
+	int i;
+
+	for (i = 0; i < npmem_ranges; i++) {
+		for (pfn = node_start_pfn(i); pfn < node_end_pfn(i); pfn++) {
+			if (PageReserved(pfn_to_page(pfn)))
+				reservedpages++;
+		}
+	}
+#else /* !CONFIG_DISCONTIGMEM */
+	for (pfn = 0; pfn < max_pfn; pfn++) {
+		/*
+		 * Only count reserved RAM pages
+		 */
+		if (PageReserved(pfn_to_page(pfn)))
+			reservedpages++;
+	}
+#endif
+}
 
 #ifdef CONFIG_PA11
 	if (hppa_dma_ops == &pcxl_dma_ops) {
 		pcxl_dma_start = (unsigned long)SET_MAP_OFFSET(MAP_START);
-		vmalloc_start = SET_MAP_OFFSET(pcxl_dma_start + PCXL_DMA_MAP_SIZE);
+		parisc_vmalloc_start = SET_MAP_OFFSET(pcxl_dma_start
+						+ PCXL_DMA_MAP_SIZE);
 	} else {
 		pcxl_dma_start = 0;
-		vmalloc_start = SET_MAP_OFFSET(MAP_START);
+		parisc_vmalloc_start = SET_MAP_OFFSET(MAP_START);
 	}
 #else
-	vmalloc_start = SET_MAP_OFFSET(MAP_START);
+	parisc_vmalloc_start = SET_MAP_OFFSET(MAP_START);
 #endif
 
+	printk(KERN_INFO "Memory: %luk/%luk available (%dk kernel code, %dk reserved, %dk data, %dk init)\n",
+		nr_free_pages() << (PAGE_SHIFT-10),
+		num_physpages << (PAGE_SHIFT-10),
+		codesize >> 10,
+		reservedpages << (PAGE_SHIFT-10),
+		datasize >> 10,
+		initsize >> 10
+	);
+
+#ifdef CONFIG_DEBUG_KERNEL /* double-sanity-check paranoia */
+	printk("virtual kernel memory layout:\n"
+	       "    vmalloc : 0x%p - 0x%p   (%4ld MB)\n"
+	       "    memory  : 0x%p - 0x%p   (%4ld MB)\n"
+	       "      .init : 0x%p - 0x%p   (%4ld kB)\n"
+	       "      .data : 0x%p - 0x%p   (%4ld kB)\n"
+	       "      .text : 0x%p - 0x%p   (%4ld kB)\n",
+
+	       (void*)VMALLOC_START, (void*)VMALLOC_END,
+	       (VMALLOC_END - VMALLOC_START) >> 20,
+
+	       __va(0), high_memory,
+	       ((unsigned long)high_memory - (unsigned long)__va(0)) >> 20,
+
+	       __init_begin, __init_end,
+	       ((unsigned long)__init_end - (unsigned long)__init_begin) >> 10,
+
+	       _etext, _edata,
+	       ((unsigned long)_edata - (unsigned long)_etext) >> 10,
+
+	       _text, _etext,
+	       ((unsigned long)_etext - (unsigned long)_text) >> 10);
+#endif
 }
 
-int do_check_pgt_cache(int low, int high)
-{
-	return 0;
-}
+unsigned long *empty_zero_page __read_mostly;
+EXPORT_SYMBOL(empty_zero_page);
 
-unsigned long *empty_zero_page;
-
-void show_mem(void)
+void show_mem(unsigned int filter)
 {
 	int i,free = 0,total = 0,reserved = 0;
 	int shared = 0, cached = 0;
 
 	printk(KERN_INFO "Mem-info:\n");
 	show_free_areas();
-	printk(KERN_INFO "Free swap:	 %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
+#ifndef CONFIG_DISCONTIGMEM
 	i = max_mapnr;
 	while (i-- > 0) {
 		total++;
@@ -487,15 +561,61 @@ void show_mem(void)
 			reserved++;
 		else if (PageSwapCache(mem_map+i))
 			cached++;
-		else if (!atomic_read(&mem_map[i].count))
+		else if (!page_count(&mem_map[i]))
 			free++;
 		else
-			shared += atomic_read(&mem_map[i].count) - 1;
+			shared += page_count(&mem_map[i]) - 1;
 	}
+#else
+	for (i = 0; i < npmem_ranges; i++) {
+		int j;
+
+		for (j = node_start_pfn(i); j < node_end_pfn(i); j++) {
+			struct page *p;
+			unsigned long flags;
+
+			pgdat_resize_lock(NODE_DATA(i), &flags);
+			p = nid_page_nr(i, j) - node_start_pfn(i);
+
+			total++;
+			if (PageReserved(p))
+				reserved++;
+			else if (PageSwapCache(p))
+				cached++;
+			else if (!page_count(p))
+				free++;
+			else
+				shared += page_count(p) - 1;
+			pgdat_resize_unlock(NODE_DATA(i), &flags);
+        	}
+	}
+#endif
 	printk(KERN_INFO "%d pages of RAM\n", total);
 	printk(KERN_INFO "%d reserved pages\n", reserved);
 	printk(KERN_INFO "%d pages shared\n", shared);
 	printk(KERN_INFO "%d pages swap cached\n", cached);
+
+
+#ifdef CONFIG_DISCONTIGMEM
+	{
+		struct zonelist *zl;
+		int i, j;
+
+		for (i = 0; i < npmem_ranges; i++) {
+			zl = node_zonelist(i, 0);
+			for (j = 0; j < MAX_NR_ZONES; j++) {
+				struct zoneref *z;
+				struct zone *zone;
+
+				printk("Zone list for zone %d on node %d: ", j, i);
+				for_each_zone_zonelist(zone, z, zl, j)
+					printk("[%d/%s] ", zone_to_nid(zone),
+								zone->name);
+				printk("\n");
+			}
+		}
+	}
+#endif
 }
 
 
@@ -517,7 +637,7 @@ static void __init map_pages(unsigned long start_vaddr, unsigned long start_padd
 	extern const unsigned long fault_vector_20;
 	extern void * const linux_gateway_page;
 
-	ro_start = __pa((unsigned long)&_text);
+	ro_start = __pa((unsigned long)_text);
 	ro_end   = __pa((unsigned long)&data_start);
 	fv_addr  = __pa((unsigned long)&fault_vector_20) & PAGE_MASK;
 	gw_addr  = __pa((unsigned long)&linux_gateway_page) & PAGE_MASK;
@@ -538,18 +658,18 @@ static void __init map_pages(unsigned long start_vaddr, unsigned long start_padd
 #if PTRS_PER_PMD == 1
 		pmd = (pmd_t *)__pa(pg_dir);
 #else
-		pmd = (pmd_t *) (PAGE_MASK & pgd_val(*pg_dir));
+		pmd = (pmd_t *)pgd_address(*pg_dir);
 
 		/*
 		 * pmd is physical at this point
 		 */
 
 		if (!pmd) {
-			pmd = (pmd_t *) alloc_bootmem_low_pages_node(NODE_DATA(0),PAGE_SIZE);
+			pmd = (pmd_t *) alloc_bootmem_low_pages_node(NODE_DATA(0),PAGE_SIZE << PMD_ORDER);
 			pmd = (pmd_t *) __pa(pmd);
 		}
 
-		pgd_val(*pg_dir) = _PAGE_TABLE | (unsigned long) pmd;
+		pgd_populate(NULL, pg_dir, __va(pmd));
 #endif
 		pg_dir++;
 
@@ -562,15 +682,14 @@ static void __init map_pages(unsigned long start_vaddr, unsigned long start_padd
 			 * pg_table is physical at this point
 			 */
 
-			pg_table = (pte_t *) (PAGE_MASK & pmd_val(*pmd));
+			pg_table = (pte_t *)pmd_address(*pmd);
 			if (!pg_table) {
 				pg_table = (pte_t *)
 					alloc_bootmem_low_pages_node(NODE_DATA(0),PAGE_SIZE);
 				pg_table = (pte_t *) __pa(pg_table);
 			}
 
-			pmd_val(*pmd) = _PAGE_TABLE |
-					   (unsigned long) pg_table;
+			pmd_populate_kernel(NULL, pmd, __va(pg_table));
 
 			/* now change pg_table to kernel virtual addresses */
 
@@ -578,12 +697,11 @@ static void __init map_pages(unsigned long start_vaddr, unsigned long start_padd
 			for (tmp2 = start_pte; tmp2 < PTRS_PER_PTE; tmp2++,pg_table++) {
 				pte_t pte;
 
-#if !defined(CONFIG_STI_CONSOLE)
-#warning STI console should explicitly allocate executable pages but does not
 				/*
 				 * Map the fault vector writable so we can
 				 * write the HPMC checksum.
 				 */
+#if defined(CONFIG_PARISC_PAGE_SIZE_4KB)
 				if (address >= ro_start && address < ro_end
 							&& address != fv_addr
 							&& address != gw_addr)
@@ -637,7 +755,7 @@ static void __init pagetable_init(void)
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_end && initrd_end > mem_limit) {
-		printk("initrd: mapping %08lx-%08lx\n", initrd_start, initrd_end);
+		printk(KERN_INFO "initrd: mapping %08lx-%08lx\n", initrd_start, initrd_end);
 		map_pages(initrd_start, __pa(initrd_start),
 			initrd_end - initrd_start, PAGE_KERNEL);
 	}
@@ -704,7 +822,7 @@ map_hpux_gateway_page(struct task_struct *tsk, struct mm_struct *mm)
 #if PTRS_PER_PMD == 1
 	pmd = (pmd_t *)__pa(pg_dir);
 #else
-	pmd = (pmd_t *) (PAGE_MASK & pgd_val(*pg_dir));
+	pmd = (pmd_t *) pgd_address(*pg_dir);
 
 	/*
 	 * pmd is physical at this point
@@ -715,7 +833,7 @@ map_hpux_gateway_page(struct task_struct *tsk, struct mm_struct *mm)
 		pmd = (pmd_t *) __pa(pmd);
 	}
 
-	pgd_val(*pg_dir) = _PAGE_TABLE | (unsigned long) pmd;
+	__pgd_val_set(*pg_dir, PxD_FLAG_PRESENT | PxD_FLAG_VALID | (unsigned long) pmd);
 #endif
 	/* now change pmd to kernel virtual addresses */
 
@@ -725,11 +843,11 @@ map_hpux_gateway_page(struct task_struct *tsk, struct mm_struct *mm)
 	 * pg_table is physical at this point
 	 */
 
-	pg_table = (pte_t *) (PAGE_MASK & pmd_val(*pmd));
+	pg_table = (pte_t *) pmd_address(*pmd);
 	if (!pg_table)
 		pg_table = (pte_t *) __pa(get_zeroed_page(GFP_KERNEL));
 
-	pmd_val(*pmd) = _PAGE_TABLE | (unsigned long) pg_table;
+	__pmd_val_set(*pmd, PxD_FLAG_PRESENT | PxD_FLAG_VALID | (unsigned long) pg_table);
 
 	/* now change pg_table to kernel virtual addresses */
 
@@ -739,8 +857,6 @@ map_hpux_gateway_page(struct task_struct *tsk, struct mm_struct *mm)
 EXPORT_SYMBOL(map_hpux_gateway_page);
 #endif
 
-extern void flush_tlb_all_local(void);
-
 void __init paging_init(void)
 {
 	int i;
@@ -749,70 +865,35 @@ void __init paging_init(void)
 	pagetable_init();
 	gateway_init();
 	flush_cache_all_local(); /* start with known state */
-	flush_tlb_all_local();
+	flush_tlb_all_local(NULL);
 
 	for (i = 0; i < npmem_ranges; i++) {
-		unsigned long zones_size[MAX_NR_ZONES] = { 0, 0, 0, };
+		unsigned long zones_size[MAX_NR_ZONES] = { 0, };
 
-		zones_size[ZONE_DMA] = pmem_ranges[i].pages;
-		free_area_init_node(i,NODE_DATA(i),NULL,zones_size,
-				(pmem_ranges[i].start_pfn << PAGE_SHIFT),0);
-	}
+		zones_size[ZONE_NORMAL] = pmem_ranges[i].pages;
 
 #ifdef CONFIG_DISCONTIGMEM
-	/*
-	 * Initialize support for virt_to_page() macro.
-	 *
-	 * Note that MAX_ADDRESS is the largest virtual address that
-	 * we can map. However, since we map all physical memory into
-	 * the kernel address space, it also has an effect on the maximum
-	 * physical address we can map (MAX_ADDRESS - PAGE_OFFSET).
-	 */
-
-	maxchunkmap = MAX_ADDRESS >> CHUNKSHIFT;
-	chunkmap = (unsigned char *)alloc_bootmem(maxchunkmap);
-
-	for (i = 0; i < maxchunkmap; i++)
-	    chunkmap[i] = BADCHUNK;
-
-	for (i = 0; i < npmem_ranges; i++) {
-
-		ADJ_NODE_MEM_MAP(i) = NODE_MEM_MAP(i) - pmem_ranges[i].start_pfn;
+		/* Need to initialize the pfnnid_map before we can initialize
+		   the zone */
 		{
-			unsigned long chunk_paddr;
-			unsigned long end_paddr;
-			int chunknum;
-
-			chunk_paddr = (pmem_ranges[i].start_pfn << PAGE_SHIFT);
-			end_paddr = chunk_paddr + (pmem_ranges[i].pages << PAGE_SHIFT);
-			chunk_paddr &= CHUNKMASK;
-
-			chunknum = (int)CHUNKNUM(chunk_paddr);
-			while (chunk_paddr < end_paddr) {
-				if (chunknum >= maxchunkmap)
-					goto badchunkmap1;
-				if (chunkmap[chunknum] != BADCHUNK)
-					goto badchunkmap2;
-				chunkmap[chunknum] = (unsigned char)i;
-				chunk_paddr += CHUNKSZ;
-				chunknum++;
-			}
+		    int j;
+		    for (j = (pmem_ranges[i].start_pfn >> PFNNID_SHIFT);
+			 j <= ((pmem_ranges[i].start_pfn + pmem_ranges[i].pages) >> PFNNID_SHIFT);
+			 j++) {
+			pfnnid_map[j] = i;
+		    }
 		}
-	}
-
-	return;
-
-badchunkmap1:
-	panic("paging_init: Physical address exceeds maximum address space!\n");
-badchunkmap2:
-	panic("paging_init: Collision in chunk map array. CHUNKSZ needs to be smaller\n");
 #endif
+
+		free_area_init_node(i, zones_size,
+				pmem_ranges[i].start_pfn, NULL);
+	}
 }
 
 #ifdef CONFIG_PA20
 
 /*
- * Currently, all PA20 chips have 18 bit protection id's, which is the
+ * Currently, all PA20 chips have 18 bit protection IDs, which is the
  * limiting factor (space ids are 32 bits).
  */
 
@@ -821,10 +902,10 @@ badchunkmap2:
 #else
 
 /*
- * Currently we have a one-to-one relationship between space id's and
- * protection id's. Older parisc chips (PCXS, PCXT, PCXL, PCXL2) only
- * support 15 bit protection id's, so that is the limiting factor.
- * PCXT' has 18 bit protection id's, but only 16 bit spaceids, so it's
+ * Currently we have a one-to-one relationship between space IDs and
+ * protection IDs. Older parisc chips (PCXS, PCXT, PCXL, PCXL2) only
+ * support 15 bit protection IDs, so that is the limiting factor.
+ * PCXT' has 18 bit protection IDs, but only 16 bit spaceids, so it's
  * probably not worth the effort for a special case here.
  */
 
@@ -841,7 +922,7 @@ static unsigned long space_id_index;
 static unsigned long free_space_ids = NR_SPACE_IDS - 1;
 static unsigned long dirty_space_ids = 0;
 
-static spinlock_t sid_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(sid_lock);
 
 unsigned long alloc_sid(void)
 {
@@ -855,8 +936,7 @@ unsigned long alloc_sid(void)
 			flush_tlb_all(); /* flush_tlb_all() calls recycle_sids() */
 			spin_lock(&sid_lock);
 		}
-		if (free_space_ids == 0)
-			BUG();
+		BUG_ON(free_space_ids == 0);
 	}
 
 	free_space_ids--;
@@ -880,8 +960,7 @@ void free_sid(unsigned long spaceid)
 
 	spin_lock(&sid_lock);
 
-	if (*dirty_space_offset & (1L << index))
-	    BUG(); /* attempt to free space id twice */
+	BUG_ON(*dirty_space_offset & (1L << index)); /* attempt to free space id twice */
 
 	*dirty_space_offset |= (1L << index);
 	dirty_space_ids++;
@@ -956,7 +1035,7 @@ static void recycle_sids(void)
 
 static unsigned long recycle_ndirty;
 static unsigned long recycle_dirty_array[SID_ARRAY_SIZE];
-static unsigned int recycle_inuse = 0;
+static unsigned int recycle_inuse;
 
 void flush_tlb_all(void)
 {
@@ -965,15 +1044,13 @@ void flush_tlb_all(void)
 	do_recycle = 0;
 	spin_lock(&sid_lock);
 	if (dirty_space_ids > RECYCLE_THRESHOLD) {
-	    if (recycle_inuse) {
-		BUG();  /* FIXME: Use a semaphore/wait queue here */
-	    }
+	    BUG_ON(recycle_inuse);  /* FIXME: Use a semaphore/wait queue here */
 	    get_dirty_sids(&recycle_ndirty,recycle_dirty_array);
 	    recycle_inuse++;
 	    do_recycle++;
 	}
 	spin_unlock(&sid_lock);
-	on_each_cpu((void (*)(void *))flush_tlb_all_local, NULL, 1, 1);
+	on_each_cpu(flush_tlb_all_local, NULL, 1);
 	if (do_recycle) {
 	    spin_lock(&sid_lock);
 	    recycle_sids(recycle_ndirty,recycle_dirty_array);
@@ -985,7 +1062,7 @@ void flush_tlb_all(void)
 void flush_tlb_all(void)
 {
 	spin_lock(&sid_lock);
-	flush_tlb_all_local();
+	flush_tlb_all_local(NULL);
 	recycle_sids();
 	spin_unlock(&sid_lock);
 }
@@ -994,16 +1071,15 @@ void flush_tlb_all(void)
 #ifdef CONFIG_BLK_DEV_INITRD
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
-#if 0
-	if (start < end)
-		printk(KERN_INFO "Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
+	if (start >= end)
+		return;
+	printk(KERN_INFO "Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 	for (; start < end; start += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(start));
-		set_page_count(virt_to_page(start), 1);
+		init_page_count(virt_to_page(start));
 		free_page(start);
 		num_physpages++;
 		totalram_pages++;
 	}
-#endif
 }
 #endif

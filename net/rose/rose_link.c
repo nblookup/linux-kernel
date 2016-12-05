@@ -16,6 +16,7 @@
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
@@ -31,24 +32,29 @@
 static void rose_ftimer_expiry(unsigned long);
 static void rose_t0timer_expiry(unsigned long);
 
+static void rose_transmit_restart_confirmation(struct rose_neigh *neigh);
+static void rose_transmit_restart_request(struct rose_neigh *neigh);
+
 void rose_start_ftimer(struct rose_neigh *neigh)
 {
 	del_timer(&neigh->ftimer);
 
 	neigh->ftimer.data     = (unsigned long)neigh;
 	neigh->ftimer.function = &rose_ftimer_expiry;
-	neigh->ftimer.expires  = jiffies + sysctl_rose_link_fail_timeout;
+	neigh->ftimer.expires  =
+		jiffies + msecs_to_jiffies(sysctl_rose_link_fail_timeout);
 
 	add_timer(&neigh->ftimer);
 }
 
-void rose_start_t0timer(struct rose_neigh *neigh)
+static void rose_start_t0timer(struct rose_neigh *neigh)
 {
 	del_timer(&neigh->t0timer);
 
 	neigh->t0timer.data     = (unsigned long)neigh;
 	neigh->t0timer.function = &rose_t0timer_expiry;
-	neigh->t0timer.expires  = jiffies + sysctl_rose_restart_request_timeout;
+	neigh->t0timer.expires  =
+		jiffies + msecs_to_jiffies(sysctl_rose_restart_request_timeout);
 
 	add_timer(&neigh->t0timer);
 }
@@ -68,7 +74,7 @@ int rose_ftimer_running(struct rose_neigh *neigh)
 	return timer_pending(&neigh->ftimer);
 }
 
-int rose_t0timer_running(struct rose_neigh *neigh)
+static int rose_t0timer_running(struct rose_neigh *neigh)
 {
 	return timer_pending(&neigh->t0timer);
 }
@@ -96,15 +102,19 @@ static void rose_t0timer_expiry(unsigned long param)
 static int rose_send_frame(struct sk_buff *skb, struct rose_neigh *neigh)
 {
 	ax25_address *rose_call;
+	ax25_cb *ax25s;
 
 	if (ax25cmp(&rose_callsign, &null_ax25_address) == 0)
 		rose_call = (ax25_address *)neigh->dev->dev_addr;
 	else
 		rose_call = &rose_callsign;
 
+	ax25s = neigh->ax25;
 	neigh->ax25 = ax25_send_frame(skb, 260, rose_call, &neigh->callsign, neigh->digipeat, neigh->dev);
+	if (ax25s)
+		ax25_cb_put(ax25s);
 
-	return (neigh->ax25 != NULL);
+	return neigh->ax25 != NULL;
 }
 
 /*
@@ -115,15 +125,19 @@ static int rose_send_frame(struct sk_buff *skb, struct rose_neigh *neigh)
 static int rose_link_up(struct rose_neigh *neigh)
 {
 	ax25_address *rose_call;
+	ax25_cb *ax25s;
 
 	if (ax25cmp(&rose_callsign, &null_ax25_address) == 0)
 		rose_call = (ax25_address *)neigh->dev->dev_addr;
 	else
 		rose_call = &rose_callsign;
 
+	ax25s = neigh->ax25;
 	neigh->ax25 = ax25_find_cb(rose_call, &neigh->callsign, neigh->digipeat, neigh->dev);
+	if (ax25s)
+		ax25_cb_put(ax25s);
 
-	return (neigh->ax25 != NULL);
+	return neigh->ax25 != NULL;
 }
 
 /*
@@ -165,7 +179,7 @@ void rose_link_rx_restart(struct sk_buff *skb, struct rose_neigh *neigh, unsigne
 /*
  *	This routine is called when a Restart Request is needed
  */
-void rose_transmit_restart_request(struct rose_neigh *neigh)
+static void rose_transmit_restart_request(struct rose_neigh *neigh)
 {
 	struct sk_buff *skb;
 	unsigned char *dptr;
@@ -194,7 +208,7 @@ void rose_transmit_restart_request(struct rose_neigh *neigh)
 /*
  * This routine is called when a Restart Confirmation is needed
  */
-void rose_transmit_restart_confirmation(struct rose_neigh *neigh)
+static void rose_transmit_restart_confirmation(struct rose_neigh *neigh)
 {
 	struct sk_buff *skb;
 	unsigned char *dptr;
@@ -213,34 +227,6 @@ void rose_transmit_restart_confirmation(struct rose_neigh *neigh)
 	*dptr++ = ROSE_GFI;
 	*dptr++ = 0x00;
 	*dptr++ = ROSE_RESTART_CONFIRMATION;
-
-	if (!rose_send_frame(skb, neigh))
-		kfree_skb(skb);
-}
-
-/*
- * This routine is called when a Diagnostic is required.
- */
-void rose_transmit_diagnostic(struct rose_neigh *neigh, unsigned char diag)
-{
-	struct sk_buff *skb;
-	unsigned char *dptr;
-	int len;
-
-	len = AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + ROSE_MIN_LEN + 2;
-
-	if ((skb = alloc_skb(len, GFP_ATOMIC)) == NULL)
-		return;
-
-	skb_reserve(skb, AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN);
-
-	dptr = skb_put(skb, ROSE_MIN_LEN + 2);
-
-	*dptr++ = AX25_P_ROSE;
-	*dptr++ = ROSE_GFI;
-	*dptr++ = 0x00;
-	*dptr++ = ROSE_DIAGNOSTIC;
-	*dptr++ = diag;
 
 	if (!rose_send_frame(skb, neigh))
 		kfree_skb(skb);

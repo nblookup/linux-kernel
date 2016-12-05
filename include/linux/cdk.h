@@ -3,7 +3,7 @@
 /*
  *	cdk.h  -- CDK interface definitions.
  *
- *	Copyright (C) 1996-1998  Stallion Technologies (support@stallion.oz.au).
+ *	Copyright (C) 1996-1998  Stallion Technologies
  *	Copyright (C) 1994-1996  Greg Ungerer.
  *
  *	This program is free software; you can redistribute it and/or modify
@@ -149,7 +149,7 @@ typedef struct cdkhdr {
 /*
  *	Define the memory mapping structure. This structure is pointed to by
  *	the memp field in the stlcdkhdr struct. As many as these structures
- *	as required are layed out in shared memory to define how the rest of
+ *	as required are laid out in shared memory to define how the rest of
  *	shared memory is divided up. There will be one for each port.
  */
 typedef struct cdkmem {

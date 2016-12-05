@@ -1,6 +1,4 @@
 /*
- * $Id: solutionengine.c,v 1.10 2003/05/21 12:45:20 dwmw2 Exp $
- *
  * Flash and EPROM on Hitachi Solution Engine and similar boards.
  *
  * (C) 2001 Red Hat, Inc.
@@ -16,8 +14,7 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
-#include <linux/config.h>
-
+#include <linux/errno.h>
 
 static struct mtd_info *flash_mtd;
 static struct mtd_info *eprom_mtd;
@@ -27,13 +24,13 @@ static struct mtd_partition *parsed_parts;
 struct map_info soleng_eprom_map = {
 	.name = "Solution Engine EPROM",
 	.size = 0x400000,
-	.buswidth = 4,
+	.bankwidth = 4,
 };
 
 struct map_info soleng_flash_map = {
 	.name = "Solution Engine FLASH",
 	.size = 0x400000,
-	.buswidth = 4,
+	.bankwidth = 4,
 };
 
 static const char *probes[] = { "RedBoot", "cmdlinepart", NULL };
@@ -62,12 +59,12 @@ static int __init init_soleng_maps(void)
 
 	/* First probe at offset 0 */
 	soleng_flash_map.phys = 0;
-	soleng_flash_map.virt = P2SEGADDR(0);
+	soleng_flash_map.virt = (void __iomem *)P2SEGADDR(0);
 	soleng_eprom_map.phys = 0x01000000;
-	soleng_eprom_map.virt = P1SEGADDR(0x01000000);
+	soleng_eprom_map.virt = (void __iomem *)P1SEGADDR(0x01000000);
 	simple_map_init(&soleng_eprom_map);
 	simple_map_init(&soleng_flash_map);
-	
+
 	printk(KERN_NOTICE "Probing for flash chips at 0x00000000:\n");
 	flash_mtd = do_map_probe("cfi_probe", &soleng_flash_map);
 	if (!flash_mtd) {
@@ -97,7 +94,7 @@ static int __init init_soleng_maps(void)
 
 	nr_parts = parse_mtd_partitions(flash_mtd, probes, &parsed_parts, 0);
 
-#if CONFIG_MTD_SUPERH_RESERVE
+#ifdef CONFIG_MTD_SUPERH_RESERVE
 	if (nr_parts <= 0) {
 		printk(KERN_NOTICE "Using configured partition at 0x%08x.\n",
 		       CONFIG_MTD_SUPERH_RESERVE);

@@ -2,75 +2,102 @@
 # This makefile is used to generate the kernel documentation,
 # primarily based on in-line comments in various source files.
 # See Documentation/kernel-doc-nano-HOWTO.txt for instruction in how
-# to ducument the SRC - and how to read it.
+# to document the SRC - and how to read it.
 # To add a new book the only step required is to add the book to the
 # list of DOCBOOKS.
 
-DOCBOOKS := wanbook.sgml z8530book.sgml mcabook.sgml videobook.sgml \
-	    parportbook.sgml kernel-hacking.sgml \
-	    kernel-locking.sgml via-audio.sgml mousedrivers.sgml \
-	    deviceiobook.sgml procfs-guide.sgml tulip-user.sgml \
-	    writing_usb_driver.sgml scsidrivers.sgml sis900.sgml \
-	    kernel-api.sgml journal-api.sgml lsm.sgml usb.sgml \
-	    gadget.sgml libata.sgml
+DOCBOOKS := z8530book.xml mcabook.xml device-drivers.xml \
+	    kernel-hacking.xml kernel-locking.xml deviceiobook.xml \
+	    writing_usb_driver.xml networking.xml \
+	    kernel-api.xml filesystems.xml lsm.xml usb.xml kgdb.xml \
+	    gadget.xml libata.xml mtdnand.xml librs.xml rapidio.xml \
+	    genericirq.xml s390-drivers.xml uio-howto.xml scsi.xml \
+	    80211.xml debugobjects.xml sh.xml regulator.xml \
+	    alsa-driver-api.xml writing-an-alsa-driver.xml \
+	    tracepoint.xml media.xml drm.xml
 
 ###
 # The build process is as follows (targets):
-#              (sgmldocs)
-# file.tmpl --> file.sgml +--> file.ps  (psdocs)
-#                         +--> file.pdf  (pdfdocs)
-#                         +--> DIR=file  (htmldocs)
-#                         +--> man/      (mandocs)
+#              (xmldocs) [by docproc]
+# file.tmpl --> file.xml +--> file.ps   (psdocs)   [by db2ps or xmlto]
+#                        +--> file.pdf  (pdfdocs)  [by db2pdf or xmlto]
+#                        +--> DIR=file  (htmldocs) [by xmlto]
+#                        +--> man/      (mandocs)  [by xmlto]
+
+
+# for PDF and PS output you can choose between xmlto and docbook-utils tools
+PDF_METHOD	= $(prefer-db2x)
+PS_METHOD	= $(prefer-db2x)
+
 
 ###
 # The targets that may be used.
-.PHONY:	sgmldocs psdocs pdfdocs htmldocs mandocs installmandocs
+PHONY += xmldocs sgmldocs psdocs pdfdocs htmldocs mandocs installmandocs cleandocs xmldoclinks
 
 BOOKS := $(addprefix $(obj)/,$(DOCBOOKS))
-sgmldocs: $(BOOKS)
+xmldocs: $(BOOKS)
+sgmldocs: xmldocs
 
-PS := $(patsubst %.sgml, %.ps, $(BOOKS))
+PS := $(patsubst %.xml, %.ps, $(BOOKS))
 psdocs: $(PS)
 
-PDF := $(patsubst %.sgml, %.pdf, $(BOOKS))
+PDF := $(patsubst %.xml, %.pdf, $(BOOKS))
 pdfdocs: $(PDF)
 
-HTML := $(patsubst %.sgml, %.html, $(BOOKS))
-htmldocs: $(HTML)
+HTML := $(sort $(patsubst %.xml, %.html, $(BOOKS)))
+htmldocs: $(HTML) xmldoclinks
+	$(call build_main_index)
+	$(call build_images)
 
-MAN := $(patsubst %.sgml, %.9, $(BOOKS))
+MAN := $(patsubst %.xml, %.9, $(BOOKS))
 mandocs: $(MAN)
 
+build_images = mkdir -p $(objtree)/Documentation/DocBook/media/ && \
+	       cp $(srctree)/Documentation/DocBook/dvb/*.png \
+	          $(srctree)/Documentation/DocBook/v4l/*.gif \
+		  $(objtree)/Documentation/DocBook/media/
+
+xmldoclinks:
+ifneq ($(objtree),$(srctree))
+	for dep in dvb media-entities.tmpl media-indices.tmpl v4l; do \
+		rm -f $(objtree)/Documentation/DocBook/$$dep \
+		&& ln -s $(srctree)/Documentation/DocBook/$$dep $(objtree)/Documentation/DocBook/ \
+		|| exit; \
+	done
+endif
+
 installmandocs: mandocs
-	$(MAKEMAN) install Documentation/DocBook/man
+	mkdir -p /usr/local/man/man9/
+	install Documentation/DocBook/man/*.9.gz /usr/local/man/man9/
 
 ###
 #External programs used
-KERNELDOC = scripts/kernel-doc
-DOCPROC   = scripts/docproc
-SPLITMAN  = $(PERL) $(srctree)/scripts/split-man
-MAKEMAN   = $(PERL) $(srctree)/scripts/makeman
+KERNELDOC = $(srctree)/scripts/kernel-doc
+DOCPROC   = $(objtree)/scripts/basic/docproc
+
+XMLTOFLAGS = -m $(srctree)/Documentation/DocBook/stylesheet.xsl
+XMLTOFLAGS += --skip-validation
 
 ###
 # DOCPROC is used for two purposes:
 # 1) To generate a dependency list for a .tmpl file
 # 2) To preprocess a .tmpl file and call kernel-doc with
 #     appropriate parameters.
-# The following rules are used to generate the .sgml documentation
+# The following rules are used to generate the .xml documentation
 # required to generate the final targets. (ps, pdf, html).
 quiet_cmd_docproc = DOCPROC $@
-      cmd_docproc = $(DOCPROC) doc $< >$@
+      cmd_docproc = SRCTREE=$(srctree)/ $(DOCPROC) doc $< >$@
 define rule_docproc
 	set -e;								\
         $(if $($(quiet)cmd_$(1)),echo '  $($(quiet)cmd_$(1))';) 	\
         $(cmd_$(1)); 							\
         ( 								\
           echo 'cmd_$@ := $(cmd_$(1))'; 				\
-          echo $@: `$(DOCPROC) depend $<`; 				\
+          echo $@: `SRCTREE=$(srctree) $(DOCPROC) depend $<`; 		\
         ) > $(dir $@).$(notdir $@).cmd
 endef
 
-%.sgml: %.tmpl FORCE
+%.xml: %.tmpl xmldoclinks FORCE
 	$(call if_changed_rule,docproc)
 
 ###
@@ -85,82 +112,100 @@ endif
 # Changes in kernel-doc force a rebuild of all documentation
 $(BOOKS): $(KERNELDOC)
 
-###
-# procfs guide uses a .c file as example code.
-# This requires an explicit dependency
-C-procfs-example = procfs_example.sgml
-C-procfs-example2 = $(addprefix $(obj)/,$(C-procfs-example))
-$(obj)/procfs-guide.sgml: $(C-procfs-example2)
+# Tell kbuild to always build the programs
+always := $(hostprogs-y)
 
-###
-# The parportbook includes a few images.
-# Force them to be build before the books 
-IMG-parportbook := parport-share.fig parport-multi.fig parport-structure.fig
-IMG-parportbook2 := $(addprefix $(obj)/,$(IMG-parportbook))
-EPS-parportbook := $(patsubst %.fig,%.eps, $(IMG-parportbook2))
-PNG-parportbook := $(patsubst %.fig,%.png, $(IMG-parportbook2))
-$(obj)/parportbook.html: $(PNG-parportbook)
-$(obj)/parportbook.ps $(obj)/parportbook.pdf: $(EPS-parportbook) $(PNG-parportbook)
+notfoundtemplate = echo "*** You have to install docbook-utils or xmlto ***"; \
+		   exit 1
+db2xtemplate = db2TYPE -o $(dir $@) $<
+xmltotemplate = xmlto TYPE $(XMLTOFLAGS) -o $(dir $@) $<
 
-###
-# Rules to generate postscript, PDF and HTML
-# db2html creates a directory. Generate a html file used for timestamp
+# determine which methods are available
+ifeq ($(shell which db2ps >/dev/null 2>&1 && echo found),found)
+	use-db2x = db2x
+	prefer-db2x = db2x
+else
+	use-db2x = notfound
+	prefer-db2x = $(use-xmlto)
+endif
+ifeq ($(shell which xmlto >/dev/null 2>&1 && echo found),found)
+	use-xmlto = xmlto
+	prefer-xmlto = xmlto
+else
+	use-xmlto = notfound
+	prefer-xmlto = $(use-db2x)
+endif
 
-quiet_cmd_db2ps = DB2PS   $@
-      cmd_db2ps = db2ps -o $(dir $@) $<
-%.ps : %.sgml
-	@(which db2ps > /dev/null 2>&1) || \
-	 (echo "*** You need to install DocBook stylesheets ***"; \
-	  exit 1)
+# the commands, generated from the chosen template
+quiet_cmd_db2ps = PS      $@
+      cmd_db2ps = $(subst TYPE,ps, $($(PS_METHOD)template))
+%.ps : %.xml
 	$(call cmd,db2ps)
 
-quiet_cmd_db2pdf = DB2PDF  $@
-      cmd_db2pdf = db2pdf -o $(dir $@) $<
-%.pdf : %.sgml
-	@(which db2pdf > /dev/null 2>&1) || \
-	 (echo "*** You need to install DocBook stylesheets ***"; \
-	  exit 1)
+quiet_cmd_db2pdf = PDF     $@
+      cmd_db2pdf = $(subst TYPE,pdf, $($(PDF_METHOD)template))
+%.pdf : %.xml
 	$(call cmd,db2pdf)
 
-quiet_cmd_db2html = DB2HTML $@
-      cmd_db2html = db2html -o $(patsubst %.html,%,$@) $< &&		      \
-		echo '<a HREF="$(patsubst %.html,%,$(notdir $@))/book1.html"> \
-         Goto $(patsubst %.html,%,$(notdir $@))</a><p>' > $@
 
-%.html:	%.sgml
-	@(which db2html > /dev/null 2>&1) || \
-	 (echo "*** You need to install DocBook stylesheets ***"; \
+index = index.html
+main_idx = Documentation/DocBook/$(index)
+build_main_index = rm -rf $(main_idx) && \
+		   echo '<h1>Linux Kernel HTML Documentation</h1>' >> $(main_idx) && \
+		   echo '<h2>Kernel Version: $(KERNELVERSION)</h2>' >> $(main_idx) && \
+		   cat $(HTML) >> $(main_idx)
+
+quiet_cmd_db2html = HTML    $@
+      cmd_db2html = xmlto xhtml $(XMLTOFLAGS) -o $(patsubst %.html,%,$@) $< && \
+		echo '<a HREF="$(patsubst %.html,%,$(notdir $@))/index.html"> \
+        $(patsubst %.html,%,$(notdir $@))</a><p>' > $@
+
+%.html:	%.xml
+	@(which xmlto > /dev/null 2>&1) || \
+	 (echo "*** You need to install xmlto ***"; \
 	  exit 1)
 	@rm -rf $@ $(patsubst %.html,%,$@)
 	$(call cmd,db2html)
 	@if [ ! -z "$(PNG-$(basename $(notdir $@)))" ]; then \
             cp $(PNG-$(basename $(notdir $@))) $(patsubst %.html,%,$@); fi
 
-###
-# Rule to generate man files - output is placed in the man subdirectory
+quiet_cmd_db2man = MAN     $@
+      cmd_db2man = if grep -q refentry $<; then xmlto man $(XMLTOFLAGS) -o $(obj)/man $< ; gzip -f $(obj)/man/*.9; fi
+%.9 : %.xml
+	@(which xmlto > /dev/null 2>&1) || \
+	 (echo "*** You need to install xmlto ***"; \
+	  exit 1)
+	$(Q)mkdir -p $(obj)/man
+	$(call cmd,db2man)
+	@touch $@
 
-%.9:	%.sgml
-	$(SPLITMAN) $< $(objtree)/Documentation/DocBook/man "$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)"
-	$(MAKEMAN) convert $(objtree)/Documentation/DocBook/man $<
-
 ###
-# Rules to generate postscripts and PNG imgages from .fig format files
+# Rules to generate postscripts and PNG images from .fig format files
 quiet_cmd_fig2eps = FIG2EPS $@
       cmd_fig2eps = fig2dev -Leps $< $@
 
 %.eps: %.fig
+	@(which fig2dev > /dev/null 2>&1) || \
+	 (echo "*** You need to install transfig ***"; \
+	  exit 1)
 	$(call cmd,fig2eps)
 
 quiet_cmd_fig2png = FIG2PNG $@
       cmd_fig2png = fig2dev -Lpng $< $@
 
 %.png: %.fig
+	@(which fig2dev > /dev/null 2>&1) || \
+	 (echo "*** You need to install transfig ***"; \
+	  exit 1)
 	$(call cmd,fig2png)
 
 ###
-# Rule to convert a .c file to inline SGML documentation
-%.sgml: %.c
-	@echo '  GEN     $@'
+# Rule to convert a .c file to inline XML documentation
+       gen_xml = :
+ quiet_gen_xml = echo '  GEN     $@'
+silent_gen_xml = :
+%.xml: %.c
+	@$($(quiet)gen_xml)
 	@(                            \
 	   echo "<programlisting>";   \
 	   expand --tabs=8 < $< |     \
@@ -172,29 +217,36 @@ quiet_cmd_fig2png = FIG2PNG $@
 ###
 # Help targets as used by the top-level makefile
 dochelp:
-	@echo  '  Linux kernel internal documentation in different formats:'
-	@echo  '  sgmldocs (SGML), psdocs (Postscript), pdfdocs (PDF)'
-	@echo  '  htmldocs (HTML), mandocs (man pages, use installmandocs to install)'
+	@echo  ' Linux kernel internal documentation in different formats:'
+	@echo  '  htmldocs        - HTML'
+	@echo  '  pdfdocs         - PDF'
+	@echo  '  psdocs          - Postscript'
+	@echo  '  xmldocs         - XML DocBook'
+	@echo  '  mandocs         - man pages'
+	@echo  '  installmandocs  - install man pages generated by mandocs'
+	@echo  '  cleandocs       - clean all generated DocBook files'
 
 ###
 # Temporary files left by various tools
 clean-files := $(DOCBOOKS) \
-	$(patsubst %.sgml, %.dvi,  $(DOCBOOKS)) \
-	$(patsubst %.sgml, %.aux,  $(DOCBOOKS)) \
-	$(patsubst %.sgml, %.tex,  $(DOCBOOKS)) \
-	$(patsubst %.sgml, %.log,  $(DOCBOOKS)) \
-	$(patsubst %.sgml, %.out,  $(DOCBOOKS)) \
-	$(patsubst %.sgml, %.ps,   $(DOCBOOKS)) \
-	$(patsubst %.sgml, %.pdf,  $(DOCBOOKS)) \
-	$(patsubst %.sgml, %.html, $(DOCBOOKS)) \
-	$(patsubst %.sgml, %.9,    $(DOCBOOKS)) \
-	$(patsubst %.fig,%.eps,    $(IMG-parportbook)) \
-	$(patsubst %.fig,%.png,    $(IMG-parportbook)) \
-	$(C-procfs-example)
+	$(patsubst %.xml, %.dvi,  $(DOCBOOKS)) \
+	$(patsubst %.xml, %.aux,  $(DOCBOOKS)) \
+	$(patsubst %.xml, %.tex,  $(DOCBOOKS)) \
+	$(patsubst %.xml, %.log,  $(DOCBOOKS)) \
+	$(patsubst %.xml, %.out,  $(DOCBOOKS)) \
+	$(patsubst %.xml, %.ps,   $(DOCBOOKS)) \
+	$(patsubst %.xml, %.pdf,  $(DOCBOOKS)) \
+	$(patsubst %.xml, %.html, $(DOCBOOKS)) \
+	$(patsubst %.xml, %.9,    $(DOCBOOKS)) \
+	$(index)
 
-ifneq ($(wildcard $(patsubst %.html,%,$(HTML))),)
-clean-rule := rm -rf $(wildcard $(patsubst %.html,%,$(HTML)))
-endif
+clean-dirs := $(patsubst %.xml,%,$(DOCBOOKS)) man
 
-#man put files in man subdir - traverse down
-subdir- := man/
+cleandocs:
+	$(Q)rm -f $(call objectify, $(clean-files))
+	$(Q)rm -rf $(call objectify, $(clean-dirs))
+
+# Declare the contents of the .PHONY variable as phony.  We keep that
+# information in a variable se we can use it in if_changed and friends.
+
+.PHONY: $(PHONY)

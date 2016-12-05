@@ -19,8 +19,8 @@
 /* There is only *one* pci_eisa device per machine, right ? */
 static struct eisa_root_device pci_eisa_root;
 
-static int __devinit pci_eisa_init (struct pci_dev *pdev,
-				    const struct pci_device_id *ent)
+static int __init pci_eisa_init(struct pci_dev *pdev,
+				const struct pci_device_id *ent)
 {
 	int rc;
 
@@ -31,11 +31,11 @@ static int __devinit pci_eisa_init (struct pci_dev *pdev,
 	}
 
 	pci_eisa_root.dev              = &pdev->dev;
-	pci_eisa_root.dev->driver_data = &pci_eisa_root;
 	pci_eisa_root.res	       = pdev->bus->resource[0];
 	pci_eisa_root.bus_base_addr    = pdev->bus->resource[0]->start;
 	pci_eisa_root.slots	       = EISA_MAX_SLOTS;
 	pci_eisa_root.dma_mask         = pdev->dma_mask;
+	dev_set_drvdata(pci_eisa_root.dev, &pci_eisa_root);
 
 	if (eisa_root_register (&pci_eisa_root)) {
 		printk (KERN_ERR "pci_eisa : Could not register EISA root\n");
@@ -59,7 +59,8 @@ static struct pci_driver pci_eisa_driver = {
 
 static int __init pci_eisa_init_module (void)
 {
-	return pci_module_init (&pci_eisa_driver);
+	return pci_register_driver (&pci_eisa_driver);
 }
 
 device_initcall(pci_eisa_init_module);
+MODULE_DEVICE_TABLE(pci, pci_eisa_pci_tbl);

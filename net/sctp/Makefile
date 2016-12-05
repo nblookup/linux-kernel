@@ -3,21 +3,19 @@
 #
 
 obj-$(CONFIG_IP_SCTP) += sctp.o
+obj-$(CONFIG_NET_SCTPPROBE) += sctp_probe.o
 
 sctp-y := sm_statetable.o sm_statefuns.o sm_sideeffect.o \
 	  protocol.o endpointola.o associola.o \
 	  transport.o chunk.o sm_make_chunk.o ulpevent.o \
 	  inqueue.o outqueue.o ulpqueue.o command.o \
 	  tsnmap.o bind_addr.o socket.o primitive.o \
-	  output.o input.o debug.o ssnmap.o proc.o
+	  output.o input.o debug.o ssnmap.o auth.o
 
-ifeq ($(CONFIG_SCTP_ADLER32), y)
-sctp-y += adler32.o
-else
-sctp-y += crc32c.o
-endif
+sctp_probe-y := probe.o
 
 sctp-$(CONFIG_SCTP_DBG_OBJCNT) += objcnt.o
+sctp-$(CONFIG_PROC_FS) += proc.o
 sctp-$(CONFIG_SYSCTL) += sysctl.o
 
 sctp-$(subst m,y,$(CONFIG_IPV6))	+= ipv6.o

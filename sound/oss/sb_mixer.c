@@ -1,5 +1,5 @@
 /*
- * sound/sb_mixer.c
+ * sound/oss/sb_mixer.c
  *
  * The low level mixer driver for the Sound Blaster compatible cards.
  */
@@ -15,6 +15,8 @@
  * Rolf Fokkens (Dec 20 1998)	: Moved ESS stuff into sb_ess.[ch]
  * Stanislav Voronyi <stas@esc.kharkov.com>	: Support for AWE 3DSE device (Jun 7 1999)
  */
+
+#include <linux/slab.h>
 
 #include "sound_config.h"
 
@@ -273,6 +275,9 @@ int sb_common_mixer_set(sb_devc * devc, int dev, int left, int right)
 	int regoffs;
 	unsigned char val;
 
+	if ((dev < 0) || (dev >= devc->iomap_sz))
+		return -EINVAL;
+
 	regoffs = (*devc->iomap)[dev][LEFT_CHN].regno;
 
 	if (regoffs == 0)
@@ -333,6 +338,9 @@ static int smw_mixer_set(sb_devc * devc, int dev, int left, int right)
 			break;
 
 		default:
+			/* bounds check */
+			if (dev < 0 || dev >= ARRAY_SIZE(smw_mix_regs))
+				return -EINVAL;
 			reg = smw_mix_regs[dev];
 			if (reg == 0)
 				return -EINVAL;
@@ -355,7 +363,7 @@ static int sb_mixer_set(sb_devc * devc, int dev, int value)
 	if (right > 100)
 		right = 100;
 
-	if (dev > 31)
+	if ((dev < 0) || (dev > 31))
 		return -EINVAL;
 
 	if (!(devc->supported_devices & (1 << dev)))	/*
@@ -522,10 +530,11 @@ static int set_outmask(sb_devc * devc, int mask)
 	return devc->outmask;
 }
 
-static int sb_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
+static int sb_mixer_ioctl(int dev, unsigned int cmd, void __user *arg)
 {
 	sb_devc *devc = mixer_devs[dev]->devc;
 	int val, ret;
+	int __user *p = arg;
 
 	/*
 	 * Use ioctl(fd, SOUND_MIXER_AGC, &mode) to turn AGC off (0) or on (1).
@@ -535,7 +544,7 @@ static int sb_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	if (devc->model == MDL_SB16) {
 		if (cmd == SOUND_MIXER_AGC) 
 		{
-			if (get_user(val, (int *)arg))
+			if (get_user(val, p))
 				return -EFAULT;
 			sb_setmixer(devc, 0x43, (~val) & 0x01);
 			return 0;
@@ -546,14 +555,14 @@ static int sb_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 			   At least my 4.13 havn't 3DSE, 4.16 has it. */
 			if (devc->minor < 15)
 				return -EINVAL;
-			if (get_user(val, (int *)arg))
+			if (get_user(val, p))
 				return -EFAULT;
 			if (val == 0 || val == 1)
 				sb_chgmixer(devc, AWE_3DSE, 0x01, val);
 			else if (val == 2)
 			{
 				ret = sb_getmixer(devc, AWE_3DSE)&0x01;
-				return put_user(ret, (int *)arg);
+				return put_user(ret, p);
 			}
 			else
 				return -EINVAL;
@@ -564,7 +573,7 @@ static int sb_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	{
 		if (_SIOC_DIR(cmd) & _SIOC_WRITE) 
 		{
-			if (get_user(val, (int *)arg))
+			if (get_user(val, p))
 				return -EFAULT;
 			switch (cmd & 0xff) 
 			{
@@ -619,7 +628,7 @@ static int sb_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 				ret = sb_mixer_get(devc, cmd & 0xff);
 				break;
 		}
-		return put_user(ret, (int *)arg); 
+		return put_user(ret, p); 
 	} else
 		return -EINVAL;
 }
@@ -684,6 +693,7 @@ int sb_mixer_init(sb_devc * devc, struct module *owner)
 			devc->supported_devices = SBPRO_MIXER_DEVICES;
 			devc->supported_rec_devices = SBPRO_RECORDING_DEVICES;
 			devc->iomap = &sbpro_mix;
+			devc->iomap_sz = ARRAY_SIZE(sbpro_mix);
 			break;
 
 		case MDL_ESS:
@@ -695,6 +705,7 @@ int sb_mixer_init(sb_devc * devc, struct module *owner)
 			devc->supported_devices = 0;
 			devc->supported_rec_devices = 0;
 			devc->iomap = &sbpro_mix;
+			devc->iomap_sz = ARRAY_SIZE(sbpro_mix);
 			smw_mixer_init(devc);
 			break;
 
@@ -706,11 +717,13 @@ int sb_mixer_init(sb_devc * devc, struct module *owner)
 			{
 				devc->supported_devices = SB16_MIXER_DEVICES;
 				devc->iomap = &sb16_mix;
+				devc->iomap_sz = ARRAY_SIZE(sb16_mix);
 			}
 			else
 			{
 				devc->supported_devices = ALS007_MIXER_DEVICES;
 				devc->iomap = &als007_mix;
+				devc->iomap_sz = ARRAY_SIZE(als007_mix);
 			}
 			break;
 
@@ -723,7 +736,7 @@ int sb_mixer_init(sb_devc * devc, struct module *owner)
 	if (m == -1)
 		return 0;
 
-	mixer_devs[m] = (struct mixer_operations *)kmalloc(sizeof(struct mixer_operations), GFP_KERNEL);
+	mixer_devs[m] = kmalloc(sizeof(struct mixer_operations), GFP_KERNEL);
 	if (mixer_devs[m] == NULL)
 	{
 		printk(KERN_ERR "sb_mixer: Can't allocate memory\n");

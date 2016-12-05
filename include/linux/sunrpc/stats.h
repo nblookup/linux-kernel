@@ -9,7 +9,6 @@
 #ifndef _LINUX_SUNRPC_STATS_H
 #define _LINUX_SUNRPC_STATS_H
 
-#include <linux/config.h>
 #include <linux/proc_fs.h>
 
 struct rpc_stat {
@@ -39,8 +38,21 @@ struct svc_stat {
 				rpcbadclnt;
 };
 
-void			rpc_proc_init(void);
-void			rpc_proc_exit(void);
+struct net;
+#ifdef CONFIG_PROC_FS
+int			rpc_proc_init(struct net *);
+void			rpc_proc_exit(struct net *);
+#else
+static inline int rpc_proc_init(struct net *net)
+{
+	return 0;
+}
+
+static inline void rpc_proc_exit(struct net *net)
+{
+}
+#endif
+
 #ifdef MODULE
 void			rpc_modcount(struct inode *, int);
 #endif
@@ -48,31 +60,25 @@ void			rpc_modcount(struct inode *, int);
 #ifdef CONFIG_PROC_FS
 struct proc_dir_entry *	rpc_proc_register(struct rpc_stat *);
 void			rpc_proc_unregister(const char *);
-int			rpc_proc_read(char *, char **, off_t, int,
-					int *, void *);
 void			rpc_proc_zero(struct rpc_program *);
-struct proc_dir_entry *	svc_proc_register(struct svc_stat *);
+struct proc_dir_entry *	svc_proc_register(struct svc_stat *,
+					  const struct file_operations *);
 void			svc_proc_unregister(const char *);
-int			svc_proc_read(char *, char **, off_t, int,
-					int *, void *);
-void			svc_proc_zero(struct svc_program *);
 
-extern struct proc_dir_entry	*proc_net_rpc;
-
+void			svc_seq_show(struct seq_file *,
+				     const struct svc_stat *);
 #else
 
 static inline struct proc_dir_entry *rpc_proc_register(struct rpc_stat *s) { return NULL; }
 static inline void rpc_proc_unregister(const char *p) {}
-static inline int rpc_proc_read(char *a, char **b, off_t c, int d, int *e, void *f) { return 0; }
 static inline void rpc_proc_zero(struct rpc_program *p) {}
 
-static inline struct proc_dir_entry *svc_proc_register(struct svc_stat *s) { return NULL; }
+static inline struct proc_dir_entry *svc_proc_register(struct svc_stat *s,
+						       const struct file_operations *f) { return NULL; }
 static inline void svc_proc_unregister(const char *p) {}
-static inline int svc_proc_read(char *a, char **b, off_t c, int d, int *e, void *f) { return 0; }
-static inline void svc_proc_zero(struct svc_program *p) {}
 
-#define proc_net_rpc NULL
-
+static inline void svc_seq_show(struct seq_file *seq,
+				const struct svc_stat *st) {}
 #endif
 
 #endif /* _LINUX_SUNRPC_STATS_H */

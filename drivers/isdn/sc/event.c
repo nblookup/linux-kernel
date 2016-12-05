@@ -20,9 +20,6 @@
 #include "message.h"
 #include "card.h"
 
-extern int cinst;
-extern board *adapter[];
-
 #ifdef DEBUG
 static char *events[] = { "ISDN_STAT_STAVAIL",
 			  "ISDN_STAT_ICALL",
@@ -45,10 +42,12 @@ int indicate_status(int card, int event,ulong Channel,char *Data)
 {
 	isdn_ctrl cmd;
 
+#ifdef DEBUG
 	pr_debug("%s: Indicating event %s on Channel %d\n",
-		adapter[card]->devicename, events[event-256], Channel);
+		sc_adapter[card]->devicename, events[event-256], Channel);
+#endif
 	if (Data != NULL){
-		pr_debug("%s: Event data: %s\n", adapter[card]->devicename,
+		pr_debug("%s: Event data: %s\n", sc_adapter[card]->devicename,
 			Data);
 		switch (event) {
 			case ISDN_STAT_BSENT:
@@ -63,7 +62,7 @@ int indicate_status(int card, int event,ulong Channel,char *Data)
 	}
 
 	cmd.command = event;
-	cmd.driver = adapter[card]->driverId;
+	cmd.driver = sc_adapter[card]->driverId;
 	cmd.arg = Channel;
-	return adapter[card]->card->statcallb(&cmd);
+	return sc_adapter[card]->card->statcallb(&cmd);
 }

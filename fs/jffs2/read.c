@@ -1,13 +1,11 @@
 /*
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
- * Copyright (C) 2001-2003 Red Hat, Inc.
+ * Copyright © 2001-2007 Red Hat, Inc.
  *
- * Created by David Woodhouse <dwmw2@redhat.com>
+ * Created by David Woodhouse <dwmw2@infradead.org>
  *
  * For licensing information, see the file 'LICENCE' in this directory.
- *
- * $Id: read.c,v 1.34 2003/10/04 08:33:06 dwmw2 Exp $
  *
  */
 
@@ -18,8 +16,11 @@
 #include <linux/mtd/mtd.h>
 #include <linux/compiler.h>
 #include "nodelist.h"
+#include "compr.h"
 
-int jffs2_read_dnode(struct jffs2_sb_info *c, struct jffs2_full_dnode *fd, unsigned char *buf, int ofs, int len)
+int jffs2_read_dnode(struct jffs2_sb_info *c, struct jffs2_inode_info *f,
+		     struct jffs2_full_dnode *fd, unsigned char *buf,
+		     int ofs, int len)
 {
 	struct jffs2_raw_inode *ri;
 	size_t readlen;
@@ -40,7 +41,7 @@ int jffs2_read_dnode(struct jffs2_sb_info *c, struct jffs2_full_dnode *fd, unsig
 	}
 	if (readlen != sizeof(*ri)) {
 		jffs2_free_raw_inode(ri);
-		printk(KERN_WARNING "Short read from 0x%08x: wanted 0x%zx bytes, got 0x%zx\n", 
+		printk(KERN_WARNING "Short read from 0x%08x: wanted 0x%zx bytes, got 0x%zx\n",
 		       ref_offset(fd->raw), sizeof(*ri), readlen);
 		return -EIO;
 	}
@@ -58,7 +59,7 @@ int jffs2_read_dnode(struct jffs2_sb_info *c, struct jffs2_full_dnode *fd, unsig
 	}
 	/* There was a bug where we wrote hole nodes out with csize/dsize
 	   swapped. Deal with it */
-	if (ri->compr == JFFS2_COMPR_ZERO && !je32_to_cpu(ri->dsize) && 
+	if (ri->compr == JFFS2_COMPR_ZERO && !je32_to_cpu(ri->dsize) &&
 	    je32_to_cpu(ri->csize)) {
 		ri->dsize = ri->csize;
 		ri->csize = cpu_to_je32(0);
@@ -71,7 +72,7 @@ int jffs2_read_dnode(struct jffs2_sb_info *c, struct jffs2_full_dnode *fd, unsig
 		goto out_ri;
 	});
 
-	
+
 	if (ri->compr == JFFS2_COMPR_ZERO) {
 		memset(buf, 0, len);
 		goto out_ri;
@@ -79,8 +80,8 @@ int jffs2_read_dnode(struct jffs2_sb_info *c, struct jffs2_full_dnode *fd, unsig
 
 	/* Cases:
 	   Reading whole node and it's uncompressed - read directly to buffer provided, check CRC.
-	   Reading whole node and it's compressed - read into comprbuf, check CRC and decompress to buffer provided 
-	   Reading partial node and it's uncompressed - read into readbuf, check CRC, and copy 
+	   Reading whole node and it's compressed - read into comprbuf, check CRC and decompress to buffer provided
+	   Reading partial node and it's uncompressed - read into readbuf, check CRC, and copy
 	   Reading partial node and it's compressed - read into readbuf, check checksum, decompress to decomprbuf and copy
 	*/
 	if (ri->compr == JFFS2_COMPR_NONE && len == je32_to_cpu(ri->dsize)) {
@@ -126,8 +127,8 @@ int jffs2_read_dnode(struct jffs2_sb_info *c, struct jffs2_full_dnode *fd, unsig
 	D2(printk(KERN_DEBUG "Data CRC matches calculated CRC %08x\n", crc));
 	if (ri->compr != JFFS2_COMPR_NONE) {
 		D2(printk(KERN_DEBUG "Decompress %d bytes from %p to %d bytes at %p\n",
-			  je32_to_cpu(ri->csize), readbuf, je32_to_cpu(ri->dsize), decomprbuf)); 
-		ret = jffs2_decompress(ri->compr, readbuf, decomprbuf, je32_to_cpu(ri->csize), je32_to_cpu(ri->dsize));
+			  je32_to_cpu(ri->csize), readbuf, je32_to_cpu(ri->dsize), decomprbuf));
+		ret = jffs2_decompress(c, f, ri->compr | (ri->usercompr << 8), readbuf, decomprbuf, je32_to_cpu(ri->csize), je32_to_cpu(ri->dsize));
 		if (ret) {
 			printk(KERN_WARNING "Error: jffs2_decompress returned %d\n", ret);
 			goto out_decomprbuf;
@@ -163,15 +164,17 @@ int jffs2_read_inode_range(struct jffs2_sb_info *c, struct jffs2_inode_info *f,
 
 	/* XXX FIXME: Where a single physical node actually shows up in two
 	   frags, we read it twice. Don't do that. */
-	/* Now we're pointing at the first frag which overlaps our page */
+	/* Now we're pointing at the first frag which overlaps our page
+	 * (or perhaps is before it, if we've been asked to read off the
+	 * end of the file). */
 	while(offset < end) {
 		D2(printk(KERN_DEBUG "jffs2_read_inode_range: offset %d, end %d\n", offset, end));
-		if (unlikely(!frag || frag->ofs > offset)) {
+		if (unlikely(!frag || frag->ofs > offset ||
+			     frag->ofs + frag->size <= offset)) {
 			uint32_t holesize = end - offset;
-			if (frag) {
+			if (frag && frag->ofs > offset) {
 				D1(printk(KERN_NOTICE "Eep. Hole in ino #%u fraglist. frag->ofs = 0x%08x, offset = 0x%08x\n", f->inocache->ino, frag->ofs, offset));
 				holesize = min(holesize, frag->ofs - offset);
-				D1(jffs2_print_frag_list(f));
 			}
 			D1(printk(KERN_DEBUG "Filling non-frag hole from %d-%d\n", offset, offset+holesize));
 			memset(buf, 0, holesize);
@@ -189,13 +192,13 @@ int jffs2_read_inode_range(struct jffs2_sb_info *c, struct jffs2_inode_info *f,
 		} else {
 			uint32_t readlen;
 			uint32_t fragofs; /* offset within the frag to start reading */
-			
+
 			fragofs = offset - frag->ofs;
 			readlen = min(frag->size - fragofs, end - offset);
 			D1(printk(KERN_DEBUG "Reading %d-%d from node at 0x%08x (%d)\n",
 				  frag->ofs+fragofs, frag->ofs+fragofs+readlen,
 				  ref_offset(frag->node->raw), ref_flags(frag->node->raw)));
-			ret = jffs2_read_dnode(c, frag->node, buf, fragofs + frag->ofs - frag->node->ofs, readlen);
+			ret = jffs2_read_dnode(c, f, frag->node, buf, fragofs + frag->ofs - frag->node->ofs, readlen);
 			D2(printk(KERN_DEBUG "node read done\n"));
 			if (ret) {
 				D1(printk(KERN_DEBUG"jffs2_read_inode_range error %d\n",ret));
@@ -211,33 +214,3 @@ int jffs2_read_inode_range(struct jffs2_sb_info *c, struct jffs2_inode_info *f,
 	return 0;
 }
 
-/* Core function to read symlink target. */
-char *jffs2_getlink(struct jffs2_sb_info *c, struct jffs2_inode_info *f)
-{
-	char *buf;
-	int ret;
-
-	down(&f->sem);
-
-	if (!f->metadata) {
-		printk(KERN_NOTICE "No metadata for symlink inode #%u\n", f->inocache->ino);
-		up(&f->sem);
-		return ERR_PTR(-EINVAL);
-	}
-	buf = kmalloc(f->metadata->size+1, GFP_USER);
-	if (!buf) {
-		up(&f->sem);
-		return ERR_PTR(-ENOMEM);
-	}
-	buf[f->metadata->size]=0;
-
-	ret = jffs2_read_dnode(c, f->metadata, buf, 0, f->metadata->size);
-
-	up(&f->sem);
-
-	if (ret) {
-		kfree(buf);
-		return ERR_PTR(ret);
-	}
-	return buf;
-}

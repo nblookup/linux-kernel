@@ -7,59 +7,35 @@
  */
 
 #include <linux/types.h>
-#include <linux/socket.h>
 #include <linux/module.h>
-#include <linux/in.h>
-#include <linux/utsname.h>
 #include <linux/sunrpc/clnt.h>
-#include <linux/sched.h>
 
 #ifdef RPC_DEBUG
 # define RPCDBG_FACILITY	RPCDBG_AUTH
 #endif
 
-static struct rpc_credops	null_credops;
+static struct rpc_auth null_auth;
+static struct rpc_cred null_cred;
 
 static struct rpc_auth *
 nul_create(struct rpc_clnt *clnt, rpc_authflavor_t flavor)
 {
-	struct rpc_auth	*auth;
-
-	dprintk("RPC: creating NULL authenticator for client %p\n", clnt);
-	if (!(auth = (struct rpc_auth *) kmalloc(sizeof(*auth),GFP_KERNEL)))
-		return NULL;
-	auth->au_cslack = 4;
-	auth->au_rslack = 2;
-	auth->au_ops = &authnull_ops;
-	auth->au_expire = 1800 * HZ;
-	rpcauth_init_credcache(auth);
-
-	return (struct rpc_auth *) auth;
+	atomic_inc(&null_auth.au_count);
+	return &null_auth;
 }
 
 static void
 nul_destroy(struct rpc_auth *auth)
 {
-	dprintk("RPC: destroying NULL authenticator %p\n", auth);
-	rpcauth_free_credcache(auth);
 }
 
 /*
- * Create NULL creds for current process
+ * Lookup NULL creds for current process
  */
 static struct rpc_cred *
-nul_create_cred(struct rpc_auth *auth, struct auth_cred *acred, int flags)
+nul_lookup_cred(struct rpc_auth *auth, struct auth_cred *acred, int flags)
 {
-	struct rpc_cred	*cred;
-
-	if (!(cred = (struct rpc_cred *) kmalloc(sizeof(*cred),GFP_KERNEL)))
-		return NULL;
-	atomic_set(&cred->cr_count, 0);
-	cred->cr_flags = RPCAUTH_CRED_UPTODATE;
-	cred->cr_uid = acred->uid;
-	cred->cr_ops = &null_credops;
-
-	return cred;
+	return get_rpccred(&null_cred);
 }
 
 /*
@@ -68,7 +44,6 @@ nul_create_cred(struct rpc_auth *auth, struct auth_cred *acred, int flags)
 static void
 nul_destroy_cred(struct rpc_cred *cred)
 {
-	kfree(cred);
 }
 
 /*
@@ -83,8 +58,8 @@ nul_match(struct auth_cred *acred, struct rpc_cred *cred, int taskflags)
 /*
  * Marshal credential.
  */
-static u32 *
-nul_marshal(struct rpc_task *task, u32 *p, int ruid)
+static __be32 *
+nul_marshal(struct rpc_task *task, __be32 *p)
 {
 	*p++ = htonl(RPC_AUTH_NULL);
 	*p++ = 0;
@@ -100,11 +75,12 @@ nul_marshal(struct rpc_task *task, u32 *p, int ruid)
 static int
 nul_refresh(struct rpc_task *task)
 {
-	return task->tk_status = -EACCES;
+	set_bit(RPCAUTH_CRED_UPTODATE, &task->tk_rqstp->rq_cred->cr_flags);
+	return 0;
 }
 
-static u32 *
-nul_validate(struct rpc_task *task, u32 *p)
+static __be32 *
+nul_validate(struct rpc_task *task, __be32 *p)
 {
 	rpc_authflavor_t	flavor;
 	u32			size;
@@ -124,22 +100,43 @@ nul_validate(struct rpc_task *task, u32 *p)
 	return p;
 }
 
-struct rpc_authops	authnull_ops = {
+const struct rpc_authops authnull_ops = {
 	.owner		= THIS_MODULE,
 	.au_flavor	= RPC_AUTH_NULL,
-#ifdef RPC_DEBUG
 	.au_name	= "NULL",
-#endif
 	.create		= nul_create,
 	.destroy	= nul_destroy,
-	.crcreate	= nul_create_cred,
+	.lookup_cred	= nul_lookup_cred,
 };
 
 static
-struct rpc_credops	null_credops = {
+struct rpc_auth null_auth = {
+	.au_cslack	= 4,
+	.au_rslack	= 2,
+	.au_ops		= &authnull_ops,
+	.au_flavor	= RPC_AUTH_NULL,
+	.au_count	= ATOMIC_INIT(0),
+};
+
+static
+const struct rpc_credops null_credops = {
+	.cr_name	= "AUTH_NULL",
 	.crdestroy	= nul_destroy_cred,
+	.crbind		= rpcauth_generic_bind_cred,
 	.crmatch	= nul_match,
 	.crmarshal	= nul_marshal,
 	.crrefresh	= nul_refresh,
 	.crvalidate	= nul_validate,
+};
+
+static
+struct rpc_cred null_cred = {
+	.cr_lru		= LIST_HEAD_INIT(null_cred.cr_lru),
+	.cr_auth	= &null_auth,
+	.cr_ops		= &null_credops,
+	.cr_count	= ATOMIC_INIT(1),
+	.cr_flags	= 1UL << RPCAUTH_CRED_UPTODATE,
+#ifdef RPC_DEBUG
+	.cr_magic	= RPCAUTH_CRED_MAGIC,
+#endif
 };

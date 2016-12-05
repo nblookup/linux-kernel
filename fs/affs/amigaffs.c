@@ -8,14 +8,7 @@
  *  Please send bug reports to: hjw@zvw.de
  */
 
-#include <stdarg.h>
-#include <linux/stat.h>
-#include <linux/time.h>
-#include <linux/affs_fs.h>
-#include <linux/string.h>
-#include <linux/mm.h>
-#include <linux/amigaffs.h>
-#include <linux/buffer_head.h>
+#include "affs.h"
 
 extern struct timezone sys_tz;
 
@@ -68,7 +61,7 @@ affs_insert_hash(struct inode *dir, struct buffer_head *bh)
 	mark_buffer_dirty_inode(dir_bh, dir);
 	affs_brelse(dir_bh);
 
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
 	dir->i_version++;
 	mark_inode_dirty(dir);
 
@@ -84,7 +77,8 @@ affs_remove_hash(struct inode *dir, struct buffer_head *rem_bh)
 {
 	struct super_block *sb;
 	struct buffer_head *bh;
-	u32 rem_ino, hash_ino, ino;
+	u32 rem_ino, hash_ino;
+	__be32 ino;
 	int offset, retval;
 
 	sb = dir->i_sb;
@@ -120,7 +114,7 @@ affs_remove_hash(struct inode *dir, struct buffer_head *rem_bh)
 
 	affs_brelse(bh);
 
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
 	dir->i_version++;
 	mark_inode_dirty(dir);
 
@@ -134,7 +128,7 @@ affs_fix_dcache(struct dentry *dentry, u32 entry_ino)
 	void *data = dentry->d_fsdata;
 	struct list_head *head, *next;
 
-	spin_lock(&dcache_lock);
+	spin_lock(&inode->i_lock);
 	head = &inode->i_dentry;
 	next = head->next;
 	while (next != head) {
@@ -145,7 +139,7 @@ affs_fix_dcache(struct dentry *dentry, u32 entry_ino)
 		}
 		next = next->next;
 	}
-	spin_unlock(&dcache_lock);
+	spin_unlock(&inode->i_lock);
 }
 
 
@@ -176,21 +170,27 @@ affs_remove_link(struct dentry *dentry)
 		if (!link_bh)
 			goto done;
 
-		dir = iget(sb, be32_to_cpu(AFFS_TAIL(sb, link_bh)->parent));
-		if (!dir)
+		dir = affs_iget(sb, be32_to_cpu(AFFS_TAIL(sb, link_bh)->parent));
+		if (IS_ERR(dir)) {
+			retval = PTR_ERR(dir);
 			goto done;
+		}
 
 		affs_lock_dir(dir);
 		affs_fix_dcache(dentry, link_ino);
 		retval = affs_remove_hash(dir, link_bh);
-		if (retval)
+		if (retval) {
+			affs_unlock_dir(dir);
 			goto done;
+		}
 		mark_buffer_dirty_inode(link_bh, inode);
 
 		memcpy(AFFS_TAIL(sb, bh)->name, AFFS_TAIL(sb, link_bh)->name, 32);
 		retval = affs_insert_hash(dir, bh);
-		if (retval)
+		if (retval) {
+			affs_unlock_dir(dir);
 			goto done;
+		}
 		mark_buffer_dirty_inode(bh, inode);
 
 		affs_unlock_dir(dir);
@@ -201,11 +201,11 @@ affs_remove_link(struct dentry *dentry)
 			goto done;
 	}
 
-	while ((ino = be32_to_cpu(AFFS_TAIL(sb, bh)->link_chain))) {
+	while ((ino = be32_to_cpu(AFFS_TAIL(sb, bh)->link_chain)) != 0) {
 		if (ino == link_ino) {
-			ino = AFFS_TAIL(sb, link_bh)->link_chain;
-			AFFS_TAIL(sb, bh)->link_chain = ino;
-			affs_adjust_checksum(bh, be32_to_cpu(ino) - link_ino);
+			__be32 ino2 = AFFS_TAIL(sb, link_bh)->link_chain;
+			AFFS_TAIL(sb, bh)->link_chain = ino2;
+			affs_adjust_checksum(bh, be32_to_cpu(ino2) - link_ino);
 			mark_buffer_dirty_inode(bh, inode);
 			retval = 0;
 			/* Fix the link count, if bh is a normal header block without links */
@@ -318,7 +318,7 @@ affs_remove_header(struct dentry *dentry)
 	else
 		inode->i_nlink = 0;
 	affs_unlock_link(inode);
-	inode->i_ctime = CURRENT_TIME;
+	inode->i_ctime = CURRENT_TIME_SEC;
 	mark_inode_dirty(inode);
 
 done:
@@ -341,12 +341,12 @@ done_unlock:
 u32
 affs_checksum_block(struct super_block *sb, struct buffer_head *bh)
 {
-	u32 *ptr = (u32 *)bh->b_data;
+	__be32 *ptr = (__be32 *)bh->b_data;
 	u32 sum;
 	int bsize;
 
 	sum = 0;
-	for (bsize = sb->s_blocksize / sizeof(u32); bsize > 0; bsize--)
+	for (bsize = sb->s_blocksize / sizeof(__be32); bsize > 0; bsize--)
 		sum += be32_to_cpu(*ptr++);
 	return sum;
 }
@@ -359,9 +359,10 @@ affs_checksum_block(struct super_block *sb, struct buffer_head *bh)
 void
 affs_fix_checksum(struct super_block *sb, struct buffer_head *bh)
 {
-	int cnt = sb->s_blocksize / sizeof(u32);
-	u32 *ptr = (u32 *)bh->b_data;
-	u32 checksum, *checksumptr;
+	int cnt = sb->s_blocksize / sizeof(__be32);
+	__be32 *ptr = (__be32 *)bh->b_data;
+	u32 checksum;
+	__be32 *checksumptr;
 
 	checksumptr = ptr + 5;
 	*checksumptr = 0;
@@ -384,9 +385,9 @@ secs_to_datestamp(time_t secs, struct affs_date *ds)
 	minute  = secs / 60;
 	secs   -= minute * 60;
 
-	ds->days = be32_to_cpu(days);
-	ds->mins = be32_to_cpu(minute);
-	ds->ticks = be32_to_cpu(secs * 50);
+	ds->days = cpu_to_be32(days);
+	ds->mins = cpu_to_be32(minute);
+	ds->ticks = cpu_to_be32(secs * 50);
 }
 
 mode_t
@@ -450,7 +451,7 @@ affs_error(struct super_block *sb, const char *function, const char *fmt, ...)
 	va_list	 args;
 
 	va_start(args,fmt);
-	vsprintf(ErrorBuffer,fmt,args);
+	vsnprintf(ErrorBuffer,sizeof(ErrorBuffer),fmt,args);
 	va_end(args);
 
 	printk(KERN_CRIT "AFFS error (device %s): %s(): %s\n", sb->s_id,
@@ -458,7 +459,6 @@ affs_error(struct super_block *sb, const char *function, const char *fmt, ...)
 	if (!(sb->s_flags & MS_RDONLY))
 		printk(KERN_WARNING "AFFS: Remounting filesystem read-only\n");
 	sb->s_flags |= MS_RDONLY;
-	AFFS_SB(sb)->s_flags |= SF_READONLY;	/* Don't allow to remount rw */
 }
 
 void
@@ -467,7 +467,7 @@ affs_warning(struct super_block *sb, const char *function, const char *fmt, ...)
 	va_list	 args;
 
 	va_start(args,fmt);
-	vsprintf(ErrorBuffer,fmt,args);
+	vsnprintf(ErrorBuffer,sizeof(ErrorBuffer),fmt,args);
 	va_end(args);
 
 	printk(KERN_WARNING "AFFS warning (device %s): %s(): %s\n", sb->s_id,

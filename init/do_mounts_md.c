@@ -1,5 +1,6 @@
-
-#include <linux/raid/md.h>
+#include <linux/delay.h>
+#include <linux/raid/md_u.h>
+#include <linux/raid/md_p.h>
 
 #include "do_mounts.h"
 
@@ -12,14 +13,22 @@
  * The code for that is here.
  */
 
+#ifdef CONFIG_MD_AUTODETECT
 static int __initdata raid_noautodetect;
+#else
+static int __initdata raid_noautodetect=1;
+#endif
+static int __initdata raid_autopart;
 
 static struct {
-	char device_set [MAX_MD_DEVS];
-	int pers[MAX_MD_DEVS];
-	int chunk[MAX_MD_DEVS];
-	char *device_names[MAX_MD_DEVS];
-} md_setup_args __initdata;
+	int minor;
+	int partitioned;
+	int level;
+	int chunk;
+	char *device_names;
+} md_setup_args[256] __initdata;
+
+static int md_setup_ents __initdata;
 
 /*
  * Parse the command-line parameters given our kernel, but do not
@@ -43,22 +52,34 @@ static struct {
  */
 static int __init md_setup(char *str)
 {
-	int minor, level, factor, fault, pers;
+	int minor, level, factor, fault, partitioned = 0;
 	char *pername = "";
-	char *str1 = str;
+	char *str1;
+	int ent;
 
+	if (*str == 'd') {
+		partitioned = 1;
+		str++;
+	}
 	if (get_option(&str, &minor) != 2) {	/* MD Number */
 		printk(KERN_WARNING "md: Too few arguments supplied to md=.\n");
 		return 0;
 	}
-	if (minor >= MAX_MD_DEVS) {
-		printk(KERN_WARNING "md: md=%d, Minor device number too high.\n", minor);
+	str1 = str;
+	for (ent=0 ; ent< md_setup_ents ; ent++)
+		if (md_setup_args[ent].minor == minor &&
+		    md_setup_args[ent].partitioned == partitioned) {
+			printk(KERN_WARNING "md: md=%s%d, Specified more than once. "
+			       "Replacing previous definition.\n", partitioned?"d":"", minor);
+			break;
+		}
+	if (ent >= ARRAY_SIZE(md_setup_args)) {
+		printk(KERN_WARNING "md: md=%s%d - too many md initialisations\n", partitioned?"d":"", minor);
 		return 0;
-	} else if (md_setup_args.device_names[minor]) {
-		printk(KERN_WARNING "md: md=%d, Specified more than once. "
-		       "Replacing previous definition.\n", minor);
 	}
-	switch (get_option(&str, &level)) {	/* RAID Personality */
+	if (ent >= md_setup_ents)
+		md_setup_ents++;
+	switch (get_option(&str, &level)) {	/* RAID level */
 	case 2: /* could be 0 or -1.. */
 		if (level == 0 || level == LEVEL_LINEAR) {
 			if (get_option(&str, &factor) != 2 ||	/* Chunk Size */
@@ -66,24 +87,12 @@ static int __init md_setup(char *str)
 				printk(KERN_WARNING "md: Too few arguments supplied to md=.\n");
 				return 0;
 			}
-			md_setup_args.pers[minor] = level;
-			md_setup_args.chunk[minor] = 1 << (factor+12);
-			switch(level) {
-			case LEVEL_LINEAR:
-				pers = LINEAR;
+			md_setup_args[ent].level = level;
+			md_setup_args[ent].chunk = 1 << (factor+12);
+			if (level ==  LEVEL_LINEAR)
 				pername = "linear";
-				break;
-			case 0:
-				pers = RAID0;
+			else
 				pername = "raid0";
-				break;
-			default:
-				printk(KERN_WARNING
-				       "md: The kernel has not been configured for raid%d support!\n",
-				       level);
-				return 0;
-			}
-			md_setup_args.pers[minor] = pers;
 			break;
 		}
 		/* FALL THROUGH */
@@ -91,37 +100,43 @@ static int __init md_setup(char *str)
 		str = str1;
 		/* FALL THROUGH */
 	case 0:
-		md_setup_args.pers[minor] = 0;
+		md_setup_args[ent].level = LEVEL_NONE;
 		pername="super-block";
 	}
 
 	printk(KERN_INFO "md: Will configure md%d (%s) from %s, below.\n",
 		minor, pername, str);
-	md_setup_args.device_names[minor] = str;
+	md_setup_args[ent].device_names = str;
+	md_setup_args[ent].partitioned = partitioned;
+	md_setup_args[ent].minor = minor;
 
 	return 1;
 }
 
 static void __init md_setup_drive(void)
 {
-	int minor, i;
+	int minor, i, ent, partitioned;
 	dev_t dev;
 	dev_t devices[MD_SB_DISKS+1];
 
-	for (minor = 0; minor < MAX_MD_DEVS; minor++) {
+	for (ent = 0; ent < md_setup_ents ; ent++) {
 		int fd;
 		int err = 0;
 		char *devname;
 		mdu_disk_info_t dinfo;
-		char name[16], devfs_name[16];
+		char name[16];
 
-		if (!(devname = md_setup_args.device_names[minor]))
-			continue;
-		
-		sprintf(name, "/dev/md%d", minor);
-		sprintf(devfs_name, "/dev/md/%d", minor);
-		create_dev(name, MKDEV(MD_MAJOR, minor), devfs_name);
-		for (i = 0; i < MD_SB_DISKS && devname != 0; i++) {
+		minor = md_setup_args[ent].minor;
+		partitioned = md_setup_args[ent].partitioned;
+		devname = md_setup_args[ent].device_names;
+
+		sprintf(name, "/dev/md%s%d", partitioned?"_d":"", minor);
+		if (partitioned)
+			dev = MKDEV(mdp_major, minor << MdpMinorShift);
+		else
+			dev = MKDEV(MD_MAJOR, minor);
+		create_dev(name, dev);
+		for (i = 0; i < MD_SB_DISKS && devname != NULL; i++) {
 			char *p;
 			char comp_name[64];
 			u32 rdev;
@@ -143,34 +158,36 @@ static void __init md_setup_drive(void)
 			}
 
 			devices[i] = dev;
-			md_setup_args.device_set[minor] = 1;
 
 			devname = p;
 		}
 		devices[i] = 0;
 
-		if (!md_setup_args.device_set[minor])
+		if (!i)
 			continue;
 
-		printk(KERN_INFO "md: Loading md%d: %s\n", minor, md_setup_args.device_names[minor]);
+		printk(KERN_INFO "md: Loading md%s%d: %s\n",
+			partitioned ? "_d" : "", minor,
+			md_setup_args[ent].device_names);
 
-		fd = open(name, 0, 0);
+		fd = sys_open(name, 0, 0);
 		if (fd < 0) {
-			printk(KERN_ERR "md: open failed - cannot start array %d\n", minor);
+			printk(KERN_ERR "md: open failed - cannot start "
+					"array %s\n", name);
 			continue;
 		}
 		if (sys_ioctl(fd, SET_ARRAY_INFO, 0) == -EBUSY) {
 			printk(KERN_WARNING
 			       "md: Ignoring md=%d, already autodetected. (Use raid=noautodetect)\n",
 			       minor);
-			close(fd);
+			sys_close(fd);
 			continue;
 		}
 
-		if (md_setup_args.pers[minor]) {
+		if (md_setup_args[ent].level != LEVEL_NONE) {
 			/* non-persistent */
 			mdu_array_info_t ainfo;
-			ainfo.level = pers_to_level(md_setup_args.pers[minor]);
+			ainfo.level = md_setup_args[ent].level;
 			ainfo.size = 0;
 			ainfo.nr_disks =0;
 			ainfo.raid_disks =0;
@@ -181,7 +198,7 @@ static void __init md_setup_drive(void)
 
 			ainfo.state = (1 << MD_SB_CLEAN);
 			ainfo.layout = 0;
-			ainfo.chunk_size = md_setup_args.chunk[minor];
+			ainfo.chunk_size = md_setup_args[ent].chunk;
 			err = sys_ioctl(fd, SET_ARRAY_INFO, (long)&ainfo);
 			for (i = 0; !err && i <= MD_SB_DISKS; i++) {
 				dev = devices[i];
@@ -209,7 +226,17 @@ static void __init md_setup_drive(void)
 			err = sys_ioctl(fd, RUN_ARRAY, 0);
 		if (err)
 			printk(KERN_WARNING "md: starting md%d failed\n", minor);
-		close(fd);
+		else {
+			/* reread the partition table.
+			 * I (neilb) and not sure why this is needed, but I cannot
+			 * boot a kernel with devfs compiled in from partitioned md
+			 * array without it
+			 */
+			sys_close(fd);
+			fd = sys_open(name, 0, 0);
+			sys_ioctl(fd, BLKRRPART, 0);
+		}
+		sys_close(fd);
 	}
 }
 
@@ -229,6 +256,12 @@ static int __init raid_setup(char *str)
 
 		if (!strncmp(str, "noautodetect", wlen))
 			raid_noautodetect = 1;
+		if (!strncmp(str, "autodetect", wlen))
+			raid_noautodetect = 0;
+		if (strncmp(str, "partitionable", wlen)==0)
+			raid_autopart = 1;
+		if (strncmp(str, "part", wlen)==0)
+			raid_autopart = 1;
 		pos += wlen+1;
 	}
 	return 1;
@@ -237,17 +270,33 @@ static int __init raid_setup(char *str)
 __setup("raid=", raid_setup);
 __setup("md=", md_setup);
 
+static void __init autodetect_raid(void)
+{
+	int fd;
+
+	/*
+	 * Since we don't want to detect and use half a raid array, we need to
+	 * wait for the known devices to complete their probing
+	 */
+	printk(KERN_INFO "md: Waiting for all devices to be available before autodetect\n");
+	printk(KERN_INFO "md: If you don't use raid, use raid=noautodetect\n");
+
+	wait_for_device_probe();
+
+	fd = sys_open((const char __user __force *) "/dev/md0", 0, 0);
+	if (fd >= 0) {
+		sys_ioctl(fd, RAID_AUTORUN, raid_autopart);
+		sys_close(fd);
+	}
+}
+
 void __init md_run_setup(void)
 {
-	create_dev("/dev/md0", MKDEV(MD_MAJOR, 0), "md/0");
+	create_dev("/dev/md0", MKDEV(MD_MAJOR, 0));
+
 	if (raid_noautodetect)
-		printk(KERN_INFO "md: Skipping autodetection of RAID arrays. (raid=noautodetect)\n");
-	else {
-		int fd = open("/dev/md0", 0, 0);
-		if (fd >= 0) {
-			sys_ioctl(fd, RAID_AUTORUN, 0);
-			close(fd);
-		}
-	}
+		printk(KERN_INFO "md: Skipping autodetection of RAID arrays. (raid=autodetect will force)\n");
+	else
+		autodetect_raid();
 	md_setup_drive();
 }

@@ -1,5 +1,5 @@
 /*
- * sound/sb_common.c
+ * sound/oss/sb_common.c
  *
  * Common routines for Sound Blaster compatible cards.
  *
@@ -26,12 +26,12 @@
  * Chris Rankin <rankinc@zipworld.com.au>
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/spinlock.h>
+#include <linux/slab.h>
 
 #include "sound_config.h"
 #include "sound_firmware.h"
@@ -67,7 +67,7 @@ void *smw_free;
 
 static int jazz16_base;			/* Not detected */
 static unsigned char jazz16_bits;	/* I/O relocation bits */
-static spinlock_t jazz16_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(jazz16_lock);
 
 /*
  * Logitech Soundman Wave specific initialization code
@@ -81,7 +81,7 @@ static int      smw_ucodeLen;
 
 #endif
 
-sb_devc *last_sb;		/* Last sb loaded */
+static sb_devc *last_sb;		/* Last sb loaded */
 
 int sb_dsp_command(sb_devc * devc, unsigned char val)
 {
@@ -133,7 +133,7 @@ static void sb_intr (sb_devc *devc)
 
 		if (src & 4)						/* MPU401 interrupt */
 			if(devc->midi_irq_cookie)
-				uart401intr(devc->irq, devc->midi_irq_cookie, NULL);
+				uart401intr(devc->irq, devc->midi_irq_cookie);
 
 		if (!(src & 3))
 			return;	/* Not a DSP interrupt */
@@ -158,7 +158,7 @@ static void sb_intr (sb_devc *devc)
 				break;
 
 			default:
-				/* printk(KERN_WARN "Sound Blaster: Unexpected interrupt\n"); */
+				/* printk(KERN_WARNING "Sound Blaster: Unexpected interrupt\n"); */
 				;
 		}
 	}
@@ -178,7 +178,7 @@ static void sb_intr (sb_devc *devc)
 				break;
 
 			default:
-				/* printk(KERN_WARN "Sound Blaster: Unexpected interrupt\n"); */
+				/* printk(KERN_WARNING "Sound Blaster: Unexpected interrupt\n"); */
 				;
 		}
 	}
@@ -201,7 +201,7 @@ static void pci_intr(sb_devc *devc)
 		sb_intr(devc);
 }
 
-static irqreturn_t sbintr(int irq, void *dev_id, struct pt_regs *dummy)
+static irqreturn_t sbintr(int irq, void *dev_id)
 {
 	sb_devc *devc = dev_id;
 
@@ -520,15 +520,8 @@ int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio, struct sb_
 	 */
 	
 	DDB(printk("sb_dsp_detect(%x) entered\n", hw_config->io_base));
-	if (check_region(hw_config->io_base, 16))
-	{
-#ifdef MODULE
-		printk(KERN_INFO "sb: I/O region in use.\n");
-#endif
-		return 0;
-	}
 
-	devc->lock = SPIN_LOCK_UNLOCKED;
+	spin_lock_init(&devc->lock);
 	devc->type = hw_config->card_subtype;
 
 	devc->base = hw_config->io_base;
@@ -633,7 +626,7 @@ int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio, struct sb_
 	 */
 
 
-	detected_devc = (sb_devc *)kmalloc(sizeof(sb_devc), GFP_KERNEL);
+	detected_devc = kmalloc(sizeof(sb_devc), GFP_KERNEL);
 	if (detected_devc == NULL)
 	{
 		printk(KERN_ERR "sb: Can't allocate memory for device information\n");
@@ -668,6 +661,7 @@ int sb_dsp_init(struct address_info *hw_config, struct module *owner)
 	if (devc->base != hw_config->io_base)
 	{
 		DDB(printk("I/O port mismatch\n"));
+		release_region(devc->base, 16);
 		return 0;
 	}
 	/*
@@ -684,11 +678,12 @@ int sb_dsp_init(struct address_info *hw_config, struct module *owner)
 		 *	will get shared PCI irq lines we must cope.
 		 */
 		 
-		int i=(devc->caps&SB_PCI_IRQ)?SA_SHIRQ:0;
+		int i=(devc->caps&SB_PCI_IRQ)?IRQF_SHARED:0;
 		
 		if (request_irq(hw_config->irq, sbintr, i, "soundblaster", devc) < 0)
 		{
 			printk(KERN_ERR "SB: Can't allocate IRQ%d\n", hw_config->irq);
+			release_region(devc->base, 16);
 			return 0;
 		}
 		devc->irq_ok = 0;
@@ -697,6 +692,7 @@ int sb_dsp_init(struct address_info *hw_config, struct module *owner)
 			if (!sb16_set_irq_hw(devc, devc->irq))	/* Unsupported IRQ */
 			{
 				free_irq(devc->irq, devc);
+				release_region(devc->base, 16);
 				return 0;
 			}
 		if ((devc->type == 0 || devc->type == MDL_ESS) &&
@@ -735,7 +731,6 @@ int sb_dsp_init(struct address_info *hw_config, struct module *owner)
 			}
 		}
 	}			/* IRQ setup */
-	request_region(hw_config->io_base, 16, "soundblaster");
 
 	last_sb = devc;
 	
@@ -881,14 +876,6 @@ int sb_dsp_init(struct address_info *hw_config, struct module *owner)
 	return 1;
 }
 
-void sb_dsp_disable_midi(int io_base)
-{
-}
-
-void sb_dsp_disable_recording(int io_base)
-{
-}
-
 /* if (sbmpu) below we allow mpu401 to manage the midi devs
    otherwise we have to unload them. (Andrzej Krzysztofowicz) */
    
@@ -928,8 +915,8 @@ void sb_dsp_unload(struct address_info *hw_config, int sbmpu)
 	}
 	else
 		release_region(hw_config->io_base, 16);
-	if(detected_devc)
-		kfree(detected_devc);
+
+	kfree(detected_devc);
 }
 
 /*
@@ -943,7 +930,10 @@ void sb_setmixer(sb_devc * devc, unsigned int port, unsigned int value)
 {
 	unsigned long flags;
 
-	if (devc->model == MDL_ESS) return ess_setmixer (devc, port, value);
+	if (devc->model == MDL_ESS) {
+		ess_setmixer (devc, port, value);
+		return;
+	}
 
 	spin_lock_irqsave(&devc->lock, flags);
 
@@ -1203,7 +1193,7 @@ int probe_sbmpu(struct address_info *hw_config, struct module *owner)
 	if (last_devc == NULL)
 		return 0;
 
-	last_devc = 0;
+	last_devc = NULL;
 
 	if (hw_config->io_base <= 0)
 	{
@@ -1221,20 +1211,26 @@ int probe_sbmpu(struct address_info *hw_config, struct module *owner)
 #if defined(CONFIG_SOUND_MPU401)
 	if (devc->model == MDL_ESS)
 	{
-		if (check_region(hw_config->io_base, 2))
-		{
+		struct resource *ports;
+		ports = request_region(hw_config->io_base, 2, "mpu401");
+		if (!ports) {
 			printk(KERN_ERR "sbmpu: I/O port conflict (%x)\n", hw_config->io_base);
 			return 0;
 		}
-		if (!ess_midi_init(devc, hw_config))
+		if (!ess_midi_init(devc, hw_config)) {
+			release_region(hw_config->io_base, 2);
 			return 0;
+		}
 		hw_config->name = "ESS1xxx MPU";
 		devc->midi_irq_cookie = NULL;
-		if (!probe_mpu401(hw_config))
+		if (!probe_mpu401(hw_config, ports)) {
+			release_region(hw_config->io_base, 2);
 			return 0;
+		}
 		attach_mpu401(hw_config, owner);
 		if (last_sb->irq == -hw_config->irq)
-			last_sb->midi_irq_cookie=(void *)hw_config->slots[1];
+			last_sb->midi_irq_cookie =
+				(void *)(long) hw_config->slots[1];
 		return 1;
 	}
 #endif
@@ -1289,7 +1285,6 @@ void unload_sbmpu(struct address_info *hw_config)
 EXPORT_SYMBOL(sb_dsp_init);
 EXPORT_SYMBOL(sb_dsp_detect);
 EXPORT_SYMBOL(sb_dsp_unload);
-EXPORT_SYMBOL(sb_dsp_disable_midi);
 EXPORT_SYMBOL(sb_be_quiet);
 EXPORT_SYMBOL(probe_sbmpu);
 EXPORT_SYMBOL(unload_sbmpu);

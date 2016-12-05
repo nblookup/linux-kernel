@@ -270,34 +270,31 @@ struct myri_eth {
 	 * to obtain good cache hit rates.
 	 */
 	spinlock_t			irq_lock;
-	struct myri_shmem		*shmem;		/* Shared data structures.    */
-	unsigned long			cregs;		/* Control register space.    */
-	struct recvq			*rqack;		/* Where we ack rx's.         */
-	struct recvq			*rq;		/* Where we put buffers.      */
-	struct sendq			*sq;		/* Where we stuff tx's.       */
+	struct myri_shmem __iomem	*shmem;		/* Shared data structures.    */
+	void __iomem			*cregs;		/* Control register space.    */
+	struct recvq __iomem		*rqack;		/* Where we ack rx's.         */
+	struct recvq __iomem		*rq;		/* Where we put buffers.      */
+	struct sendq __iomem		*sq;		/* Where we stuff tx's.       */
 	struct net_device		*dev;		/* Linux/NET dev struct.      */
 	int				tx_old;		/* To speed up tx cleaning.   */
-	unsigned long			lregs;		/* Quick ptr to LANAI regs.   */
+	void __iomem			*lregs;		/* Quick ptr to LANAI regs.   */
 	struct sk_buff	       *rx_skbs[RX_RING_SIZE+1];/* RX skb's                   */
 	struct sk_buff	       *tx_skbs[TX_RING_SIZE];  /* TX skb's                   */
-	struct net_device_stats		enet_stats;	/* Interface stats.           */
 
 	/* These are less frequently accessed. */
-	unsigned long			regs;          /* MyriCOM register space.    */
-	unsigned short			*lanai;		/* View 2 of register space.  */
-	unsigned int			*lanai3;	/* View 3 of register space.  */
+	void __iomem			*regs;          /* MyriCOM register space.    */
+	void __iomem			*lanai;		/* View 2 of register space.  */
 	unsigned int			myri_bursts;	/* SBUS bursts.               */
 	struct myri_eeprom		eeprom;		/* Local copy of EEPROM.      */
 	unsigned int			reg_size;	/* Size of register space.    */
 	unsigned int			shmem_base;	/* Offset to shared ram.      */
-	struct sbus_dev			*myri_sdev;	/* Our SBUS device struct.    */
-	struct myri_eth			*next_module;	/* Next in adapter chain.     */
+	struct platform_device		*myri_op;	/* Our OF device struct.    */
 };
 
 /* We use this to acquire receive skb's that we can DMA directly into. */
 #define ALIGNED_RX_SKB_ADDR(addr) \
         ((((unsigned long)(addr) + (64 - 1)) & ~(64 - 1)) - (unsigned long)(addr))
-static inline struct sk_buff *myri_alloc_skb(unsigned int length, int gfp_flags)
+static inline struct sk_buff *myri_alloc_skb(unsigned int length, gfp_t gfp_flags)
 {
 	struct sk_buff *skb;
 

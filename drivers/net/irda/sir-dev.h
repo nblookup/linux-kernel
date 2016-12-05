@@ -15,23 +15,14 @@
 #define IRDA_SIR_H
 
 #include <linux/netdevice.h>
+#include <linux/workqueue.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>		// iobuff_t
 
-/* FIXME: unify irda_request with sir_fsm! */
-
-struct irda_request {
-	struct list_head lh_request;
-	unsigned long pending;
-	void (*func)(void *);
-	void *data;
-	struct timer_list timer;
-};
-
 struct sir_fsm {
 	struct semaphore	sem;
-	struct irda_request	rq;
+	struct delayed_work	work;
 	unsigned		state, substate;
 	int			param;
 	int			result;
@@ -121,18 +112,18 @@ extern int sirdev_set_dongle(struct sir_dev *dev, IRDA_DONGLE type);
 extern void sirdev_write_complete(struct sir_dev *dev);
 extern int sirdev_receive(struct sir_dev *dev, const unsigned char *cp, size_t count);
 
+/* low level helpers for SIR device/dongle setup */
+extern int sirdev_raw_write(struct sir_dev *dev, const char *buf, int len);
+extern int sirdev_raw_read(struct sir_dev *dev, char *buf, int len);
+extern int sirdev_set_dtr_rts(struct sir_dev *dev, int dtr, int rts);
+
 /* not exported */
 
 extern int sirdev_get_dongle(struct sir_dev *self, IRDA_DONGLE type);
 extern int sirdev_put_dongle(struct sir_dev *self);
 
-extern int sirdev_raw_write(struct sir_dev *dev, const char *buf, int len);
-extern int sirdev_raw_read(struct sir_dev *dev, char *buf, int len);
 extern void sirdev_enable_rx(struct sir_dev *dev);
-
 extern int sirdev_schedule_request(struct sir_dev *dev, int state, unsigned param);
-extern int __init irda_thread_create(void);
-extern void __exit irda_thread_join(void);
 
 /* inline helpers */
 
@@ -169,7 +160,6 @@ static inline int sirdev_schedule_mode(struct sir_dev *dev, int mode)
 
 struct sir_dev {
 	struct net_device *netdev;
-	struct net_device_stats stats;
 
 	struct irlap_cb    *irlap;
 
@@ -179,6 +169,7 @@ struct sir_dev {
 
 	struct sir_fsm fsm;
 	atomic_t enable_rx;
+	int raw_tx;
 	spinlock_t tx_lock;
 
 	u32 new_speed;
@@ -194,10 +185,6 @@ struct sir_dev {
 	const struct sir_driver * drv;
 	void *priv;
 
-	/* dongle callbacks to the SIR device */
-	int (*read)(struct sir_dev *, char *buf, int len);
-	int (*write)(struct sir_dev *, const char *buf, int len);
-	int (*set_dtr_rts)(struct sir_dev *, int dtr, int rts);
 };
 
 #endif	/* IRDA_SIR_H */

@@ -1,19 +1,15 @@
 #include <linux/pci.h>
 #include <linux/module.h>
+#include <linux/pci-aspm.h>
 #include "pci.h"
-
-#undef DEBUG
-
-#ifdef DEBUG
-#define DBG(x...) printk(x)
-#else
-#define DBG(x...)
-#endif
 
 static void pci_free_resources(struct pci_dev *dev)
 {
 	int i;
 
+ 	msi_remove_pci_irq_vectors(dev);
+
+	pci_cleanup_rom(dev);
 	for (i = 0; i < PCI_NUM_RESOURCES; i++) {
 		struct resource *res = dev->resource + i;
 		if (res->parent)
@@ -21,19 +17,27 @@ static void pci_free_resources(struct pci_dev *dev)
 	}
 }
 
+static void pci_stop_dev(struct pci_dev *dev)
+{
+	if (dev->is_added) {
+		pci_proc_detach_device(dev);
+		pci_remove_sysfs_dev_files(dev);
+		device_unregister(&dev->dev);
+		dev->is_added = 0;
+	}
+
+	if (dev->bus->self)
+		pcie_aspm_exit_link_state(dev);
+}
+
 static void pci_destroy_dev(struct pci_dev *dev)
 {
-	pci_proc_detach_device(dev);
-	device_unregister(&dev->dev);
-
 	/* Remove the device from the device lists, and prevent any further
 	 * list accesses from this device */
-	spin_lock(&pci_bus_lock);
+	down_write(&pci_bus_sem);
 	list_del(&dev->bus_list);
-	list_del(&dev->global_list);
 	dev->bus_list.next = dev->bus_list.prev = NULL;
-	dev->global_list.next = dev->global_list.prev = NULL;
-	spin_unlock(&pci_bus_lock);
+	up_write(&pci_bus_sem);
 
 	pci_free_resources(dev);
 	pci_dev_put(dev);
@@ -48,6 +52,7 @@ static void pci_destroy_dev(struct pci_dev *dev)
  * in question is not being used by a driver.
  * Returns 0 on success.
  */
+#if 0
 int pci_remove_device_safe(struct pci_dev *dev)
 {
 	if (pci_dev_driver(dev))
@@ -55,7 +60,24 @@ int pci_remove_device_safe(struct pci_dev *dev)
 	pci_destroy_dev(dev);
 	return 0;
 }
-EXPORT_SYMBOL(pci_remove_device_safe);
+#endif  /*  0  */
+
+void pci_remove_bus(struct pci_bus *pci_bus)
+{
+	pci_proc_detach_bus(pci_bus);
+
+	down_write(&pci_bus_sem);
+	list_del(&pci_bus->node);
+	up_write(&pci_bus_sem);
+	if (!pci_bus->is_added)
+		return;
+
+	pci_remove_legacy_files(pci_bus);
+	device_remove_file(&pci_bus->dev, &dev_attr_cpuaffinity);
+	device_remove_file(&pci_bus->dev, &dev_attr_cpulistaffinity);
+	device_unregister(&pci_bus->dev);
+}
+EXPORT_SYMBOL(pci_remove_bus);
 
 /**
  * pci_remove_bus_device - remove a PCI device and any children
@@ -71,17 +93,12 @@ EXPORT_SYMBOL(pci_remove_device_safe);
  */
 void pci_remove_bus_device(struct pci_dev *dev)
 {
+	pci_stop_bus_device(dev);
 	if (dev->subordinate) {
 		struct pci_bus *b = dev->subordinate;
 
 		pci_remove_behind_bridge(dev);
-		pci_proc_detach_bus(b);
-
-		spin_lock(&pci_bus_lock);
-		list_del(&b->node);
-		spin_unlock(&pci_bus_lock);
-
-		kfree(b);
+		pci_remove_bus(b);
 		dev->subordinate = NULL;
 	}
 
@@ -100,14 +117,37 @@ void pci_remove_behind_bridge(struct pci_dev *dev)
 {
 	struct list_head *l, *n;
 
-	if (dev->subordinate) {
-		list_for_each_safe(l, n, &dev->subordinate->devices) {
-			struct pci_dev *dev = pci_dev_b(l);
+	if (dev->subordinate)
+		list_for_each_safe(l, n, &dev->subordinate->devices)
+			pci_remove_bus_device(pci_dev_b(l));
+}
 
-			pci_remove_bus_device(dev);
-		}
+static void pci_stop_bus_devices(struct pci_bus *bus)
+{
+	struct list_head *l, *n;
+
+	list_for_each_safe(l, n, &bus->devices) {
+		struct pci_dev *dev = pci_dev_b(l);
+		pci_stop_bus_device(dev);
 	}
+}
+
+/**
+ * pci_stop_bus_device - stop a PCI device and any children
+ * @dev: the device to stop
+ *
+ * Stop a PCI device (detach the driver, remove from the global list
+ * and so on). This also stop any subordinate buses and children in a
+ * depth-first manner.
+ */
+void pci_stop_bus_device(struct pci_dev *dev)
+{
+	if (dev->subordinate)
+		pci_stop_bus_devices(dev->subordinate);
+
+	pci_stop_dev(dev);
 }
 
 EXPORT_SYMBOL(pci_remove_bus_device);
 EXPORT_SYMBOL(pci_remove_behind_bridge);
+EXPORT_SYMBOL_GPL(pci_stop_bus_device);

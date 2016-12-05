@@ -50,13 +50,13 @@
  *   Grant Grundler <grundler@cup.hp.com>: PCI write posting fixes.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/version.h>
+#include <linux/moduleparam.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -66,6 +66,8 @@
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/sockios.h>
+#include <linux/firmware.h>
+#include <linux/slab.h>
 
 #if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
 #include <linux/if_vlan.h>
@@ -85,6 +87,8 @@
 #include <asm/uaccess.h>
 
 
+#define DRV_NAME "acenic"
+
 #undef INDEX_DEBUG
 
 #ifdef CONFIG_ACENIC_OMIT_TIGON_I
@@ -96,7 +100,7 @@
 #endif
 
 #ifndef PCI_VENDOR_ID_ALTEON
-#define PCI_VENDOR_ID_ALTEON		0x12ae	
+#define PCI_VENDOR_ID_ALTEON		0x12ae
 #endif
 #ifndef PCI_DEVICE_ID_ALTEON_ACENIC_FIBRE
 #define PCI_DEVICE_ID_ALTEON_ACENIC_FIBRE  0x0001
@@ -131,8 +135,7 @@
 #define PCI_DEVICE_ID_SGI_ACENIC	0x0009
 #endif
 
-#if LINUX_VERSION_CODE >= 0x20400
-static struct pci_device_id acenic_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(acenic_pci_tbl) = {
 	{ PCI_VENDOR_ID_ALTEON, PCI_DEVICE_ID_ALTEON_ACENIC_FIBRE,
 	  PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_NETWORK_ETHERNET << 8, 0xffff00, },
 	{ PCI_VENDOR_ID_ALTEON, PCI_DEVICE_ID_ALTEON_ACENIC_COPPER,
@@ -156,193 +159,11 @@ static struct pci_device_id acenic_pci_tbl[] = {
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, acenic_pci_tbl);
-#endif
 
-
-#ifndef MODULE_LICENSE
-#define MODULE_LICENSE(a)
-#endif
-
-#ifndef wmb
-#define wmb()	mb()
-#endif
-
-#ifndef __exit
-#define __exit
-#endif
-
-#ifndef __devinit
-#define __devinit	__init
-#endif
-
-#ifndef SMP_CACHE_BYTES
-#define SMP_CACHE_BYTES	L1_CACHE_BYTES
-#endif
-
-#ifndef SET_MODULE_OWNER
-#define SET_MODULE_OWNER(dev)		do{} while(0)
-#define ACE_MOD_INC_USE_COUNT		MOD_INC_USE_COUNT
-#define ACE_MOD_DEC_USE_COUNT		MOD_DEC_USE_COUNT
-#else
-#define ACE_MOD_INC_USE_COUNT		do{} while(0)
-#define ACE_MOD_DEC_USE_COUNT		do{} while(0)
-#endif
-
-#ifndef SET_NETDEV_DEV
-#define SET_NETDEV_DEV(net, pdev)	do{} while(0)
-#endif
-
-#if LINUX_VERSION_CODE >= 0x2051c
 #define ace_sync_irq(irq)	synchronize_irq(irq)
-#else
-#define ace_sync_irq(irq)	synchronize_irq()
-#endif
 
-#if LINUX_VERSION_CODE < 0x2051e
-#define local_irq_save(flags)		do{__save_flags(flags) ; \
-					   __cli();} while(0)
-#define local_irq_restore(flags)	__restore_flags(flags)
-#endif
-
-#if (LINUX_VERSION_CODE < 0x02030d)
-#define pci_resource_start(dev, bar)	dev->base_address[bar]
-#elif (LINUX_VERSION_CODE < 0x02032c)
-#define pci_resource_start(dev, bar)	dev->resource[bar].start
-#endif
-
-#if (LINUX_VERSION_CODE < 0x02030e)
-#define net_device device
-#endif
-
-
-#if (LINUX_VERSION_CODE < 0x02032a)
-typedef u32 dma_addr_t;
-
-static inline void *pci_alloc_consistent(struct pci_dev *hwdev, size_t size,
-					 dma_addr_t *dma_handle)
-{
-	void *virt_ptr;
-
-	virt_ptr = kmalloc(size, GFP_KERNEL);
-	if (!virt_ptr)
-		return NULL;
-	*dma_handle = virt_to_bus(virt_ptr);
-	return virt_ptr;
-}
-
-#define pci_free_consistent(cookie, size, ptr, dma_ptr)	kfree(ptr)
-#define pci_map_page(cookie, page, off, size, dir)	\
-	virt_to_bus(page_address(page)+(off))
-#define pci_unmap_page(cookie, address, size, dir)
-#define pci_set_dma_mask(dev, mask)		\
-	(((u64)(mask) & 0xffffffff00000000) == 0 ? 0 : -EIO)
-#define pci_dma_supported(dev, mask)		\
-	(((u64)(mask) & 0xffffffff00000000) == 0 ? 1 : 0)
-
-#elif (LINUX_VERSION_CODE < 0x02040d)
-
-/*
- * 2.4.13 introduced pci_map_page()/pci_unmap_page() - for 2.4.12 and prior,
- * fall back on pci_map_single()/pci_unnmap_single().
- *
- * We are guaranteed that the page is mapped at this point since
- * pci_map_page() is only used upon valid struct skb's.
- */
-static inline dma_addr_t
-pci_map_page(struct pci_dev *cookie, struct page *page, unsigned long off,
-	     size_t size, int dir)
-{
-	void *page_virt;
-
-	page_virt = page_address(page);
-	if (!page_virt)
-		BUG();
-	return pci_map_single(cookie, (page_virt + off), size, dir);
-}
-#define pci_unmap_page(cookie, dma_addr, size, dir)	\
-	pci_unmap_single(cookie, dma_addr, size, dir)
-#endif
-
-#if (LINUX_VERSION_CODE < 0x020412)
-#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)
-#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)
-#define pci_unmap_addr(PTR, ADDR_NAME)		0
-#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)	do{} while(0)
-#define pci_unmap_len(PTR, LEN_NAME)		0
-#define pci_unmap_len_set(PTR, LEN_NAME, VAL)	do{} while(0)
-#endif
-
-
-#if (LINUX_VERSION_CODE < 0x02032b)
-/*
- * SoftNet
- *
- * For pre-softnet kernels we need to tell the upper layer not to
- * re-enter start_xmit() while we are in there. However softnet
- * guarantees not to enter while we are in there so there is no need
- * to do the netif_stop_queue() dance unless the transmit queue really
- * gets stuck. This should also improve performance according to tests
- * done by Aman Singla.
- */
-#define dev_kfree_skb_irq(a)			dev_kfree_skb(a)
-#define netif_wake_queue(dev)			clear_bit(0, &dev->tbusy)
-#define netif_stop_queue(dev)			set_bit(0, &dev->tbusy)
-#define late_stop_netif_stop_queue(dev)		do{} while(0)
-#define early_stop_netif_stop_queue(dev)	test_and_set_bit(0,&dev->tbusy)
-#define early_stop_netif_wake_queue(dev)	netif_wake_queue(dev)
-
-static inline void netif_start_queue(struct net_device *dev)
-{
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
-}
-
-#define ace_mark_net_bh()			mark_bh(NET_BH)
-#define netif_queue_stopped(dev)		dev->tbusy
-#define netif_running(dev)			dev->start
-#define ace_if_down(dev)			do{dev->start = 0;} while(0)
-
-#define tasklet_struct				tq_struct
-static inline void tasklet_schedule(struct tasklet_struct *tasklet)
-{
-	queue_task(tasklet, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
-}
-
-static inline void tasklet_init(struct tasklet_struct *tasklet,
-				void (*func)(unsigned long),
-				unsigned long data)
-{
-	tasklet->next = NULL;
-	tasklet->sync = 0;
-	tasklet->routine = (void (*)(void *))func;
-	tasklet->data = (void *)data;
-}
-#define tasklet_kill(tasklet)			do{} while(0)
-#else
-#define late_stop_netif_stop_queue(dev)		netif_stop_queue(dev)
-#define early_stop_netif_stop_queue(dev)	0
-#define early_stop_netif_wake_queue(dev)	do{} while(0)
-#define ace_mark_net_bh()			do{} while(0)
-#define ace_if_down(dev)			do{} while(0)
-#endif
-
-#if (LINUX_VERSION_CODE >= 0x02031b)
-#define NEW_NETINIT
-#define ACE_PROBE_ARG				void
-#else
-#define ACE_PROBE_ARG				struct net_device *dev
-#endif
-
-#ifndef min_t
-#define min_t(type,a,b)	(((a)<(b))?(a):(b))
-#endif
-
-#ifndef ARCH_HAS_PREFETCHW
-#ifndef prefetchw
-#define prefetchw(x)				do{} while(0)
-#endif
+#ifndef offset_in_page
+#define offset_in_page(ptr)	((unsigned long)(ptr) & ~PAGE_MASK)
 #endif
 
 #define ACE_MAX_MOD_PARMS	8
@@ -366,8 +187,6 @@ static inline void tasklet_init(struct tasklet_struct *tasklet,
 #define MAX_TEXT_LEN	96*1024
 #define MAX_RODATA_LEN	8*1024
 #define MAX_DATA_LEN	2*1024
-
-#include "acenic_firmware.h"
 
 #ifndef tigon2FwReleaseLocal
 #define tigon2FwReleaseLocal 0
@@ -542,9 +361,9 @@ static inline void tasklet_init(struct tasklet_struct *tasklet,
  */
 #define ACE_MINI_SIZE		100
 
-#define ACE_MINI_BUFSIZE	(ACE_MINI_SIZE + 2 + 16)
-#define ACE_STD_BUFSIZE		(ACE_STD_MTU + ETH_HLEN + 2+4+16)
-#define ACE_JUMBO_BUFSIZE	(ACE_JUMBO_MTU + ETH_HLEN + 2+4+16)
+#define ACE_MINI_BUFSIZE	ACE_MINI_SIZE
+#define ACE_STD_BUFSIZE		(ACE_STD_MTU + ETH_HLEN + 4)
+#define ACE_JUMBO_BUFSIZE	(ACE_JUMBO_MTU + ETH_HLEN + 4)
 
 /*
  * There seems to be a magic difference in the effect between 995 and 996
@@ -586,7 +405,7 @@ static inline void tasklet_init(struct tasklet_struct *tasklet,
 #define DEF_STAT		(2 * TICKS_PER_SEC)
 
 
-static int link[ACE_MAX_MOD_PARMS];
+static int link_state[ACE_MAX_MOD_PARMS];
 static int trace[ACE_MAX_MOD_PARMS];
 static int tx_coal_tick[ACE_MAX_MOD_PARMS];
 static int rx_coal_tick[ACE_MAX_MOD_PARMS];
@@ -595,265 +414,21 @@ static int max_rx_desc[ACE_MAX_MOD_PARMS];
 static int tx_ratio[ACE_MAX_MOD_PARMS];
 static int dis_pci_mem_inval[ACE_MAX_MOD_PARMS] = {1, 1, 1, 1, 1, 1, 1, 1};
 
-static char version[] __initdata = 
-  "acenic.c: v0.92 08/05/2002  Jes Sorensen, linux-acenic@SunSITE.dk\n"
-  "                            http://home.cern.ch/~jes/gige/acenic.html\n";
-
-static struct net_device *root_dev;
-
-static int probed __initdata = 0;
-
-
-int __devinit acenic_probe (ACE_PROBE_ARG)
-{
-#ifdef NEW_NETINIT
-	struct net_device *dev;
-#endif
-	struct ace_private *ap;
-	struct pci_dev *pdev = NULL;
-	int boards_found = 0;
-	int version_disp;
-
-	if (probed)
-		return -ENODEV;
-	probed++;
-
-	version_disp = 0;
-
-	while ((pdev = pci_find_class(PCI_CLASS_NETWORK_ETHERNET<<8, pdev))) {
-
-		if (!((pdev->vendor == PCI_VENDOR_ID_ALTEON) &&
-		      ((pdev->device == PCI_DEVICE_ID_ALTEON_ACENIC_FIBRE) ||
-		       (pdev->device == PCI_DEVICE_ID_ALTEON_ACENIC_COPPER)))&&
-		    !((pdev->vendor == PCI_VENDOR_ID_3COM) &&
-		      (pdev->device == PCI_DEVICE_ID_3COM_3C985)) &&
-		    !((pdev->vendor == PCI_VENDOR_ID_NETGEAR) &&
-		      ((pdev->device == PCI_DEVICE_ID_NETGEAR_GA620) || 
-		       (pdev->device == PCI_DEVICE_ID_NETGEAR_GA620T))) &&
-		/*
-		 * Farallon used the DEC vendor ID on their cards by
-		 * mistake for a while
-		 */
-		    !((pdev->vendor == PCI_VENDOR_ID_DEC) &&
-		      (pdev->device == PCI_DEVICE_ID_FARALLON_PN9000SX)) &&
-		    !((pdev->vendor == PCI_VENDOR_ID_ALTEON) &&
-		      (pdev->device == PCI_DEVICE_ID_FARALLON_PN9100T)) &&
-		    !((pdev->vendor == PCI_VENDOR_ID_SGI) &&
-		      (pdev->device == PCI_DEVICE_ID_SGI_ACENIC)))
-			continue;
-
-		dev = alloc_etherdev(sizeof(struct ace_private));
-		if (dev == NULL) {
-			printk(KERN_ERR "acenic: Unable to allocate "
-			       "net_device structure!\n");
-			break;
-		}
-
-		SET_MODULE_OWNER(dev);
-		SET_NETDEV_DEV(dev, &pdev->dev);
-
-		ap = dev->priv;
-		ap->pdev = pdev;
-
-		dev->open = &ace_open;
-		dev->hard_start_xmit = &ace_start_xmit;
-		dev->features |= NETIF_F_SG | NETIF_F_IP_CSUM;
-#if ACENIC_DO_VLAN
-		dev->features |= NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
-		dev->vlan_rx_register = ace_vlan_rx_register;
-		dev->vlan_rx_kill_vid = ace_vlan_rx_kill_vid;
-#endif
-		if (1) {
-			static void ace_watchdog(struct net_device *dev);
-			dev->tx_timeout = &ace_watchdog;
-			dev->watchdog_timeo = 5*HZ;
-		}
-		dev->stop = &ace_close;
-		dev->get_stats = &ace_get_stats;
-		dev->set_multicast_list = &ace_set_multicast_list;
-		dev->do_ioctl = &ace_ioctl;
-		dev->set_mac_address = &ace_set_mac_addr;
-		dev->change_mtu = &ace_change_mtu;
-
-		/* display version info if adapter is found */
-		if (!version_disp)
-		{
-			/* set display flag to TRUE so that */
-			/* we only display this string ONCE */
-			version_disp = 1;
-			printk(version);
-		}
-
-		if (pci_enable_device(pdev)) {
-			free_netdev(dev);
-			continue;
-		}
-
-		/*
-		 * Enable master mode before we start playing with the
-		 * pci_command word since pci_set_master() will modify
-		 * it.
-		 */
-		pci_set_master(pdev);
-
-		pci_read_config_word(pdev, PCI_COMMAND, &ap->pci_command);
-
-		/* OpenFirmware on Mac's does not set this - DOH.. */ 
-		if (!(ap->pci_command & PCI_COMMAND_MEMORY)) {
-			printk(KERN_INFO "%s: Enabling PCI Memory Mapped "
-			       "access - was not enabled by BIOS/Firmware\n",
-			       dev->name);
-			ap->pci_command = ap->pci_command | PCI_COMMAND_MEMORY;
-			pci_write_config_word(ap->pdev, PCI_COMMAND,
-					      ap->pci_command);
-			wmb();
-		}
-
-		pci_read_config_byte(pdev, PCI_LATENCY_TIMER,
-				     &ap->pci_latency);
-		if (ap->pci_latency <= 0x40) {
-			ap->pci_latency = 0x40;
-			pci_write_config_byte(pdev, PCI_LATENCY_TIMER,
-					      ap->pci_latency);
-		}
-
-		/*
-		 * Remap the regs into kernel space - this is abuse of
-		 * dev->base_addr since it was means for I/O port
-		 * addresses but who gives a damn.
-		 */
-		dev->base_addr = pci_resource_start(pdev, 0);
-		ap->regs = (struct ace_regs *)ioremap(dev->base_addr, 0x4000);
-		if (!ap->regs) {
-			printk(KERN_ERR "%s:  Unable to map I/O register, "
-			       "AceNIC %i will be disabled.\n",
-			       dev->name, boards_found);
-			break;
-		}
-
-		if (register_netdev(dev)) {
-			printk(KERN_ERR "acenic: device registration failed\n");
-			free_netdev(dev);
-			continue;
-		}
-
-		switch(pdev->vendor) {
-		case PCI_VENDOR_ID_ALTEON:
-			if (pdev->device == PCI_DEVICE_ID_FARALLON_PN9100T) {
-				strncpy(ap->name, "Farallon PN9100-T "
-					"Gigabit Ethernet", sizeof (ap->name));
-				printk(KERN_INFO "%s: Farallon PN9100-T ",
-				       dev->name);
-			} else {
-				strncpy(ap->name, "AceNIC Gigabit Ethernet",
-					sizeof (ap->name));
-				printk(KERN_INFO "%s: Alteon AceNIC ",
-				       dev->name);
-			}
-			break;
-		case PCI_VENDOR_ID_3COM:
-			strncpy(ap->name, "3Com 3C985 Gigabit Ethernet",
-				sizeof (ap->name));
-			printk(KERN_INFO "%s: 3Com 3C985 ", dev->name);
-			break;
-		case PCI_VENDOR_ID_NETGEAR:
-			strncpy(ap->name, "NetGear GA620 Gigabit Ethernet",
-				sizeof (ap->name));
-			printk(KERN_INFO "%s: NetGear GA620 ", dev->name);
-			break;
-		case PCI_VENDOR_ID_DEC:
-			if (pdev->device == PCI_DEVICE_ID_FARALLON_PN9000SX) {
-				strncpy(ap->name, "Farallon PN9000-SX "
-					"Gigabit Ethernet", sizeof (ap->name));
-				printk(KERN_INFO "%s: Farallon PN9000-SX ",
-				       dev->name);
-				break;
-			}
-		case PCI_VENDOR_ID_SGI:
-			strncpy(ap->name, "SGI AceNIC Gigabit Ethernet",
-				sizeof (ap->name));
-			printk(KERN_INFO "%s: SGI AceNIC ", dev->name);
-			break;
-		default:
- 			strncpy(ap->name, "Unknown AceNIC based Gigabit "
-				"Ethernet", sizeof (ap->name));
-			printk(KERN_INFO "%s: Unknown AceNIC ", dev->name);
-			break;
-		}
-		ap->name [sizeof (ap->name) - 1] = '\0';
-		printk("Gigabit Ethernet at 0x%08lx, ", dev->base_addr);
-#ifdef __sparc__
-		printk("irq %s\n", __irq_itoa(pdev->irq));
-#else
-		printk("irq %i\n", pdev->irq);
-#endif
-
-#ifdef CONFIG_ACENIC_OMIT_TIGON_I
-		if ((readl(&ap->regs->HostCtrl) >> 28) == 4) {
-			printk(KERN_ERR "%s: Driver compiled without Tigon I"
-			       " support - NIC disabled\n", dev->name);
-			ace_init_cleanup(dev);
-			free_netdev(dev);
-			continue;
-		}
-#endif
-
-		if (ace_allocate_descriptors(dev)) {
-			/*
-			 * ace_allocate_descriptors() calls
-			 * ace_init_cleanup() on error.
-			 */
-			free_netdev(dev);
-			continue;
-		}
-
-#ifdef MODULE
-		if (boards_found >= ACE_MAX_MOD_PARMS)
-			ap->board_idx = BOARD_IDX_OVERFLOW;
-		else
-			ap->board_idx = boards_found;
-#else
-		ap->board_idx = BOARD_IDX_STATIC;
-#endif
-
-		if (ace_init(dev)) {
-			/*
-			 * ace_init() calls ace_init_cleanup() on error.
-			 */
-			free_netdev(dev);
-			continue;
-		}
-
-		if (ap->pci_using_dac)
-			dev->features |= NETIF_F_HIGHDMA;
-
-		boards_found++;
-	}
-
-	/*
-	 * If we're at this point we're going through ace_probe() for
-	 * the first time.  Return success (0) if we've initialized 1
-	 * or more boards. Otherwise, return failure (-ENODEV).
-	 */
-
-	if (boards_found > 0)
-		return 0;
-	else
-		return -ENODEV;
-}
-
-
-#ifdef MODULE
 MODULE_AUTHOR("Jes Sorensen <jes@trained-monkey.org>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("AceNIC/3C985/GA620 Gigabit Ethernet driver");
-MODULE_PARM(link, "1-" __MODULE_STRING(8) "i");
-MODULE_PARM(trace, "1-" __MODULE_STRING(8) "i");
-MODULE_PARM(tx_coal_tick, "1-" __MODULE_STRING(8) "i");
-MODULE_PARM(max_tx_desc, "1-" __MODULE_STRING(8) "i");
-MODULE_PARM(rx_coal_tick, "1-" __MODULE_STRING(8) "i");
-MODULE_PARM(max_rx_desc, "1-" __MODULE_STRING(8) "i");
-MODULE_PARM(tx_ratio, "1-" __MODULE_STRING(8) "i");
+#ifndef CONFIG_ACENIC_OMIT_TIGON_I
+MODULE_FIRMWARE("acenic/tg1.bin");
+#endif
+MODULE_FIRMWARE("acenic/tg2.bin");
+
+module_param_array_named(link, link_state, int, NULL, 0);
+module_param_array(trace, int, NULL, 0);
+module_param_array(tx_coal_tick, int, NULL, 0);
+module_param_array(max_tx_desc, int, NULL, 0);
+module_param_array(rx_coal_tick, int, NULL, 0);
+module_param_array(max_rx_desc, int, NULL, 0);
+module_param_array(tx_ratio, int, NULL, 0);
 MODULE_PARM_DESC(link, "AceNIC/3C985/NetGear link state");
 MODULE_PARM_DESC(trace, "AceNIC/3C985/NetGear firmware trace level");
 MODULE_PARM_DESC(tx_coal_tick, "AceNIC/3C985/GA620 max clock ticks to wait from first tx descriptor arrives");
@@ -861,143 +436,308 @@ MODULE_PARM_DESC(max_tx_desc, "AceNIC/3C985/GA620 max number of transmit descrip
 MODULE_PARM_DESC(rx_coal_tick, "AceNIC/3C985/GA620 max clock ticks to wait from first rx descriptor arrives");
 MODULE_PARM_DESC(max_rx_desc, "AceNIC/3C985/GA620 max number of receive descriptors to wait");
 MODULE_PARM_DESC(tx_ratio, "AceNIC/3C985/GA620 ratio of NIC memory used for TX/RX descriptors (range 0-63)");
+
+
+static const char version[] __devinitconst =
+  "acenic.c: v0.92 08/05/2002  Jes Sorensen, linux-acenic@SunSITE.dk\n"
+  "                            http://home.cern.ch/~jes/gige/acenic.html\n";
+
+static int ace_get_settings(struct net_device *, struct ethtool_cmd *);
+static int ace_set_settings(struct net_device *, struct ethtool_cmd *);
+static void ace_get_drvinfo(struct net_device *, struct ethtool_drvinfo *);
+
+static const struct ethtool_ops ace_ethtool_ops = {
+	.get_settings = ace_get_settings,
+	.set_settings = ace_set_settings,
+	.get_drvinfo = ace_get_drvinfo,
+};
+
+static void ace_watchdog(struct net_device *dev);
+
+static const struct net_device_ops ace_netdev_ops = {
+	.ndo_open		= ace_open,
+	.ndo_stop		= ace_close,
+	.ndo_tx_timeout		= ace_watchdog,
+	.ndo_get_stats		= ace_get_stats,
+	.ndo_start_xmit		= ace_start_xmit,
+	.ndo_set_multicast_list	= ace_set_multicast_list,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= ace_set_mac_addr,
+	.ndo_change_mtu		= ace_change_mtu,
+#if ACENIC_DO_VLAN
+	.ndo_vlan_rx_register	= ace_vlan_rx_register,
+#endif
+};
+
+static int __devinit acenic_probe_one(struct pci_dev *pdev,
+		const struct pci_device_id *id)
+{
+	struct net_device *dev;
+	struct ace_private *ap;
+	static int boards_found;
+
+	dev = alloc_etherdev(sizeof(struct ace_private));
+	if (dev == NULL) {
+		printk(KERN_ERR "acenic: Unable to allocate "
+		       "net_device structure!\n");
+		return -ENOMEM;
+	}
+
+	SET_NETDEV_DEV(dev, &pdev->dev);
+
+	ap = netdev_priv(dev);
+	ap->pdev = pdev;
+	ap->name = pci_name(pdev);
+
+	dev->features |= NETIF_F_SG | NETIF_F_IP_CSUM;
+#if ACENIC_DO_VLAN
+	dev->features |= NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
 #endif
 
+	dev->watchdog_timeo = 5*HZ;
 
-static void __exit ace_module_cleanup(void)
+	dev->netdev_ops = &ace_netdev_ops;
+	SET_ETHTOOL_OPS(dev, &ace_ethtool_ops);
+
+	/* we only display this string ONCE */
+	if (!boards_found)
+		printk(version);
+
+	if (pci_enable_device(pdev))
+		goto fail_free_netdev;
+
+	/*
+	 * Enable master mode before we start playing with the
+	 * pci_command word since pci_set_master() will modify
+	 * it.
+	 */
+	pci_set_master(pdev);
+
+	pci_read_config_word(pdev, PCI_COMMAND, &ap->pci_command);
+
+	/* OpenFirmware on Mac's does not set this - DOH.. */
+	if (!(ap->pci_command & PCI_COMMAND_MEMORY)) {
+		printk(KERN_INFO "%s: Enabling PCI Memory Mapped "
+		       "access - was not enabled by BIOS/Firmware\n",
+		       ap->name);
+		ap->pci_command = ap->pci_command | PCI_COMMAND_MEMORY;
+		pci_write_config_word(ap->pdev, PCI_COMMAND,
+				      ap->pci_command);
+		wmb();
+	}
+
+	pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &ap->pci_latency);
+	if (ap->pci_latency <= 0x40) {
+		ap->pci_latency = 0x40;
+		pci_write_config_byte(pdev, PCI_LATENCY_TIMER, ap->pci_latency);
+	}
+
+	/*
+	 * Remap the regs into kernel space - this is abuse of
+	 * dev->base_addr since it was means for I/O port
+	 * addresses but who gives a damn.
+	 */
+	dev->base_addr = pci_resource_start(pdev, 0);
+	ap->regs = ioremap(dev->base_addr, 0x4000);
+	if (!ap->regs) {
+		printk(KERN_ERR "%s:  Unable to map I/O register, "
+		       "AceNIC %i will be disabled.\n",
+		       ap->name, boards_found);
+		goto fail_free_netdev;
+	}
+
+	switch(pdev->vendor) {
+	case PCI_VENDOR_ID_ALTEON:
+		if (pdev->device == PCI_DEVICE_ID_FARALLON_PN9100T) {
+			printk(KERN_INFO "%s: Farallon PN9100-T ",
+			       ap->name);
+		} else {
+			printk(KERN_INFO "%s: Alteon AceNIC ",
+			       ap->name);
+		}
+		break;
+	case PCI_VENDOR_ID_3COM:
+		printk(KERN_INFO "%s: 3Com 3C985 ", ap->name);
+		break;
+	case PCI_VENDOR_ID_NETGEAR:
+		printk(KERN_INFO "%s: NetGear GA620 ", ap->name);
+		break;
+	case PCI_VENDOR_ID_DEC:
+		if (pdev->device == PCI_DEVICE_ID_FARALLON_PN9000SX) {
+			printk(KERN_INFO "%s: Farallon PN9000-SX ",
+			       ap->name);
+			break;
+		}
+	case PCI_VENDOR_ID_SGI:
+		printk(KERN_INFO "%s: SGI AceNIC ", ap->name);
+		break;
+	default:
+		printk(KERN_INFO "%s: Unknown AceNIC ", ap->name);
+		break;
+	}
+
+	printk("Gigabit Ethernet at 0x%08lx, ", dev->base_addr);
+	printk("irq %d\n", pdev->irq);
+
+#ifdef CONFIG_ACENIC_OMIT_TIGON_I
+	if ((readl(&ap->regs->HostCtrl) >> 28) == 4) {
+		printk(KERN_ERR "%s: Driver compiled without Tigon I"
+		       " support - NIC disabled\n", dev->name);
+		goto fail_uninit;
+	}
+#endif
+
+	if (ace_allocate_descriptors(dev))
+		goto fail_free_netdev;
+
+#ifdef MODULE
+	if (boards_found >= ACE_MAX_MOD_PARMS)
+		ap->board_idx = BOARD_IDX_OVERFLOW;
+	else
+		ap->board_idx = boards_found;
+#else
+	ap->board_idx = BOARD_IDX_STATIC;
+#endif
+
+	if (ace_init(dev))
+		goto fail_free_netdev;
+
+	if (register_netdev(dev)) {
+		printk(KERN_ERR "acenic: device registration failed\n");
+		goto fail_uninit;
+	}
+	ap->name = dev->name;
+
+	if (ap->pci_using_dac)
+		dev->features |= NETIF_F_HIGHDMA;
+
+	pci_set_drvdata(pdev, dev);
+
+	boards_found++;
+	return 0;
+
+ fail_uninit:
+	ace_init_cleanup(dev);
+ fail_free_netdev:
+	free_netdev(dev);
+	return -ENODEV;
+}
+
+static void __devexit acenic_remove_one(struct pci_dev *pdev)
 {
-	struct ace_private *ap;
-	struct ace_regs *regs;
-	struct net_device *next;
+	struct net_device *dev = pci_get_drvdata(pdev);
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 	short i;
 
-	while (root_dev) {
-		ap = root_dev->priv;
-		next = ap->next;
+	unregister_netdev(dev);
 
-		regs = ap->regs;
+	writel(readl(&regs->CpuCtrl) | CPU_HALT, &regs->CpuCtrl);
+	if (ap->version >= 2)
+		writel(readl(&regs->CpuBCtrl) | CPU_HALT, &regs->CpuBCtrl);
 
-		writel(readl(&regs->CpuCtrl) | CPU_HALT, &regs->CpuCtrl);
-		if (ap->version >= 2)
-			writel(readl(&regs->CpuBCtrl) | CPU_HALT,
-			       &regs->CpuBCtrl);
-		/*
-		 * This clears any pending interrupts
-		 */
-		writel(1, &regs->Mb0Lo);
-		readl(&regs->CpuCtrl);	/* flush */
+	/*
+	 * This clears any pending interrupts
+	 */
+	writel(1, &regs->Mb0Lo);
+	readl(&regs->CpuCtrl);	/* flush */
 
-		/*
-		 * Make sure no other CPUs are processing interrupts
-		 * on the card before the buffers are being released.
-		 * Otherwise one might experience some `interesting'
-		 * effects.
-		 *
-		 * Then release the RX buffers - jumbo buffers were
-		 * already released in ace_close().
-		 */
-		ace_sync_irq(root_dev->irq);
+	/*
+	 * Make sure no other CPUs are processing interrupts
+	 * on the card before the buffers are being released.
+	 * Otherwise one might experience some `interesting'
+	 * effects.
+	 *
+	 * Then release the RX buffers - jumbo buffers were
+	 * already released in ace_close().
+	 */
+	ace_sync_irq(dev->irq);
 
-		for (i = 0; i < RX_STD_RING_ENTRIES; i++) {
-			struct sk_buff *skb = ap->skb->rx_std_skbuff[i].skb;
+	for (i = 0; i < RX_STD_RING_ENTRIES; i++) {
+		struct sk_buff *skb = ap->skb->rx_std_skbuff[i].skb;
 
-			if (skb) {
-				struct ring_info *ringp;
-				dma_addr_t mapping;
+		if (skb) {
+			struct ring_info *ringp;
+			dma_addr_t mapping;
 
-				ringp = &ap->skb->rx_std_skbuff[i];
-				mapping = pci_unmap_addr(ringp, mapping);
-				pci_unmap_page(ap->pdev, mapping,
-					       ACE_STD_BUFSIZE - (2 + 16),
-					       PCI_DMA_FROMDEVICE);
+			ringp = &ap->skb->rx_std_skbuff[i];
+			mapping = dma_unmap_addr(ringp, mapping);
+			pci_unmap_page(ap->pdev, mapping,
+				       ACE_STD_BUFSIZE,
+				       PCI_DMA_FROMDEVICE);
 
-				ap->rx_std_ring[i].size = 0;
-				ap->skb->rx_std_skbuff[i].skb = NULL;
-				dev_kfree_skb(skb);
-			}
+			ap->rx_std_ring[i].size = 0;
+			ap->skb->rx_std_skbuff[i].skb = NULL;
+			dev_kfree_skb(skb);
 		}
-		if (ap->version >= 2) {
-			for (i = 0; i < RX_MINI_RING_ENTRIES; i++) {
-				struct sk_buff *skb = ap->skb->rx_mini_skbuff[i].skb;
-
-				if (skb) {
-					struct ring_info *ringp;
-					dma_addr_t mapping;
-
-					ringp = &ap->skb->rx_mini_skbuff[i];
-					mapping = pci_unmap_addr(ringp,mapping);
-					pci_unmap_page(ap->pdev, mapping,
-						       ACE_MINI_BUFSIZE - (2 + 16),
-						       PCI_DMA_FROMDEVICE);
-
-					ap->rx_mini_ring[i].size = 0;
-					ap->skb->rx_mini_skbuff[i].skb = NULL;
-					dev_kfree_skb(skb);
-				}
-			}
-		}
-		for (i = 0; i < RX_JUMBO_RING_ENTRIES; i++) {
-			struct sk_buff *skb = ap->skb->rx_jumbo_skbuff[i].skb;
-			if (skb) {
-				struct ring_info *ringp;
-				dma_addr_t mapping;
-
-				ringp = &ap->skb->rx_jumbo_skbuff[i];
-				mapping = pci_unmap_addr(ringp, mapping);
-				pci_unmap_page(ap->pdev, mapping,
-					       ACE_JUMBO_BUFSIZE - (2 + 16),
-					       PCI_DMA_FROMDEVICE);
-
-				ap->rx_jumbo_ring[i].size = 0;
-				ap->skb->rx_jumbo_skbuff[i].skb = NULL;
-				dev_kfree_skb(skb);
-			}
-		}
-
-		ace_init_cleanup(root_dev);
-		free_netdev(root_dev);
-		root_dev = next;
 	}
+
+	if (ap->version >= 2) {
+		for (i = 0; i < RX_MINI_RING_ENTRIES; i++) {
+			struct sk_buff *skb = ap->skb->rx_mini_skbuff[i].skb;
+
+			if (skb) {
+				struct ring_info *ringp;
+				dma_addr_t mapping;
+
+				ringp = &ap->skb->rx_mini_skbuff[i];
+				mapping = dma_unmap_addr(ringp,mapping);
+				pci_unmap_page(ap->pdev, mapping,
+					       ACE_MINI_BUFSIZE,
+					       PCI_DMA_FROMDEVICE);
+
+				ap->rx_mini_ring[i].size = 0;
+				ap->skb->rx_mini_skbuff[i].skb = NULL;
+				dev_kfree_skb(skb);
+			}
+		}
+	}
+
+	for (i = 0; i < RX_JUMBO_RING_ENTRIES; i++) {
+		struct sk_buff *skb = ap->skb->rx_jumbo_skbuff[i].skb;
+		if (skb) {
+			struct ring_info *ringp;
+			dma_addr_t mapping;
+
+			ringp = &ap->skb->rx_jumbo_skbuff[i];
+			mapping = dma_unmap_addr(ringp, mapping);
+			pci_unmap_page(ap->pdev, mapping,
+				       ACE_JUMBO_BUFSIZE,
+				       PCI_DMA_FROMDEVICE);
+
+			ap->rx_jumbo_ring[i].size = 0;
+			ap->skb->rx_jumbo_skbuff[i].skb = NULL;
+			dev_kfree_skb(skb);
+		}
+	}
+
+	ace_init_cleanup(dev);
+	free_netdev(dev);
 }
 
+static struct pci_driver acenic_pci_driver = {
+	.name		= "acenic",
+	.id_table	= acenic_pci_tbl,
+	.probe		= acenic_probe_one,
+	.remove		= __devexit_p(acenic_remove_one),
+};
 
-int __init ace_module_init(void)
+static int __init acenic_init(void)
 {
-	int status;
-
-	root_dev = NULL;
-
-#ifdef NEW_NETINIT
-	status = acenic_probe();
-#else
-	status = acenic_probe(NULL);
-#endif
-	return status;
+	return pci_register_driver(&acenic_pci_driver);
 }
 
-
-#if (LINUX_VERSION_CODE < 0x02032a)
-#ifdef MODULE
-int init_module(void)
+static void __exit acenic_exit(void)
 {
-	return ace_module_init();
+	pci_unregister_driver(&acenic_pci_driver);
 }
 
-
-void cleanup_module(void)
-{
-	ace_module_cleanup();
-}
-#endif
-#else
-module_init(ace_module_init);
-module_exit(ace_module_cleanup);
-#endif
-
+module_init(acenic_init);
+module_exit(acenic_exit);
 
 static void ace_free_descriptors(struct net_device *dev)
 {
-	struct ace_private *ap = dev->priv;
+	struct ace_private *ap = netdev_priv(dev);
 	int size;
 
 	if (ap->rx_std_ring != NULL) {
@@ -1047,7 +787,7 @@ static void ace_free_descriptors(struct net_device *dev)
 
 static int ace_allocate_descriptors(struct net_device *dev)
 {
-	struct ace_private *ap = dev->priv;
+	struct ace_private *ap = netdev_priv(dev);
 	int size;
 
 	size = (sizeof(struct rx_desc) *
@@ -1118,22 +858,19 @@ static void ace_init_cleanup(struct net_device *dev)
 {
 	struct ace_private *ap;
 
-	ap = dev->priv;
+	ap = netdev_priv(dev);
 
 	ace_free_descriptors(dev);
 
 	if (ap->info)
 		pci_free_consistent(ap->pdev, sizeof(struct ace_info),
 				    ap->info, ap->info_dma);
-	if (ap->skb)
-		kfree(ap->skb);
-	if (ap->trace_buf)
-		kfree(ap->trace_buf);
+	kfree(ap->skb);
+	kfree(ap->trace_buf);
 
 	if (dev->irq)
 		free_irq(dev->irq, dev);
 
-	unregister_netdev(dev);
 	iounmap(ap->regs);
 }
 
@@ -1141,7 +878,7 @@ static void ace_init_cleanup(struct net_device *dev)
 /*
  * Commands are considered to be slow.
  */
-static inline void ace_issue_cmd(struct ace_regs *regs, struct cmd *cmd)
+static inline void ace_issue_cmd(struct ace_regs __iomem *regs, struct cmd *cmd)
 {
 	u32 idx;
 
@@ -1154,10 +891,10 @@ static inline void ace_issue_cmd(struct ace_regs *regs, struct cmd *cmd)
 }
 
 
-static int __init ace_init(struct net_device *dev)
+static int __devinit ace_init(struct net_device *dev)
 {
 	struct ace_private *ap;
-	struct ace_regs *regs;
+	struct ace_regs __iomem *regs;
 	struct ace_info *info = NULL;
 	struct pci_dev *pdev;
 	unsigned long myjif;
@@ -1167,7 +904,7 @@ static int __init ace_init(struct net_device *dev)
 	short i;
 	unsigned char cache_size;
 
-	ap = dev->priv;
+	ap = netdev_priv(dev);
 	regs = ap->regs;
 
 	board_idx = ap->board_idx;
@@ -1209,9 +946,10 @@ static int __init ace_init(struct net_device *dev)
 	switch(tig_ver){
 #ifndef CONFIG_ACENIC_OMIT_TIGON_I
 	case 4:
-		printk(KERN_INFO "  Tigon I  (Rev. 4), Firmware: %i.%i.%i, ",
-		       tigonFwReleaseMajor, tigonFwReleaseMinor,
-		       tigonFwReleaseFix);
+	case 5:
+		printk(KERN_INFO "  Tigon I  (Rev. %i), Firmware: %i.%i.%i, ",
+		       tig_ver, ap->firmware_major, ap->firmware_minor,
+		       ap->firmware_fix);
 		writel(0, &regs->LocalCtrl);
 		ap->version = 1;
 		ap->tx_ring_entries = TIGON_I_TX_RING_ENTRIES;
@@ -1219,8 +957,8 @@ static int __init ace_init(struct net_device *dev)
 #endif
 	case 6:
 		printk(KERN_INFO "  Tigon II (Rev. %i), Firmware: %i.%i.%i, ",
-		       tig_ver, tigon2FwReleaseMajor, tigon2FwReleaseMinor,
-		       tigon2FwReleaseFix);
+		       tig_ver, ap->firmware_major, ap->firmware_minor,
+		       ap->firmware_fix);
 		writel(readl(&regs->CpuBCtrl) | CPU_HALT, &regs->CpuBCtrl);
 		readl(&regs->CpuBCtrl);		/* PCI write posting */
 		/*
@@ -1235,7 +973,7 @@ static int __init ace_init(struct net_device *dev)
 		break;
 	default:
 		printk(KERN_WARNING "  Unsupported Tigon version detected "
-		       "(%i), ", tig_ver);
+		       "(%i)\n", tig_ver);
 		ecode = -ENODEV;
 		goto init_error;
 	}
@@ -1258,31 +996,31 @@ static int __init ace_init(struct net_device *dev)
 
 	mac1 = 0;
 	for(i = 0; i < 4; i++) {
+		int t;
+
 		mac1 = mac1 << 8;
-		tmp = read_eeprom_byte(dev, 0x8c+i);
-		if (tmp < 0) {
+		t = read_eeprom_byte(dev, 0x8c+i);
+		if (t < 0) {
 			ecode = -EIO;
 			goto init_error;
 		} else
-			mac1 |= (tmp & 0xff);
+			mac1 |= (t & 0xff);
 	}
 	mac2 = 0;
 	for(i = 4; i < 8; i++) {
+		int t;
+
 		mac2 = mac2 << 8;
-		tmp = read_eeprom_byte(dev, 0x8c+i);
-		if (tmp < 0) {
+		t = read_eeprom_byte(dev, 0x8c+i);
+		if (t < 0) {
 			ecode = -EIO;
 			goto init_error;
 		} else
-			mac2 |= (tmp & 0xff);
+			mac2 |= (t & 0xff);
 	}
 
 	writel(mac1, &regs->MacAddrHi);
 	writel(mac2, &regs->MacAddrLo);
-
-	printk("MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-	       (mac1 >> 8) & 0xff, mac1 & 0xff, (mac2 >> 24) &0xff,
-	       (mac2 >> 16) & 0xff, (mac2 >> 8) & 0xff, mac2 & 0xff);
 
 	dev->dev_addr[0] = (mac1 >> 8) & 0xff;
 	dev->dev_addr[1] = mac1 & 0xff;
@@ -1290,6 +1028,8 @@ static int __init ace_init(struct net_device *dev)
 	dev->dev_addr[3] = (mac2 >> 16) & 0xff;
 	dev->dev_addr[4] = (mac2 >> 8) & 0xff;
 	dev->dev_addr[5] = mac2 & 0xff;
+
+	printk("MAC: %pM\n", dev->dev_addr);
 
 	/*
 	 * Looks like this is necessary to deal with on all architectures,
@@ -1316,7 +1056,7 @@ static int __init ace_init(struct net_device *dev)
 	printk(KERN_INFO "  PCI bus width: %i bits, speed: %iMHz, "
 	       "latency: %i clks\n",
 	       	(pci_state & PCI_32BIT) ? 32 : 64,
-		(pci_state & PCI_66MHZ) ? 66 : 33, 
+		(pci_state & PCI_66MHZ) ? 66 : 33,
 		ap->pci_latency);
 
 	/*
@@ -1418,13 +1158,13 @@ static int __init ace_init(struct net_device *dev)
 		pci_write_config_word(pdev, PCI_COMMAND, ap->pci_command);
 	}
 #endif
-		
+
 	/*
 	 * Configure DMA attributes.
 	 */
-	if (!pci_set_dma_mask(pdev, 0xffffffffffffffffULL)) {
+	if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
 		ap->pci_using_dac = 1;
-	} else if (!pci_set_dma_mask(pdev, 0xffffffffULL)) {
+	} else if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
 		ap->pci_using_dac = 0;
 	} else {
 		ecode = -ENODEV;
@@ -1451,21 +1191,14 @@ static int __init ace_init(struct net_device *dev)
 		goto init_error;
 	}
 
-	ecode = request_irq(pdev->irq, ace_interrupt, SA_SHIRQ,
-			    dev->name, dev);
+	ecode = request_irq(pdev->irq, ace_interrupt, IRQF_SHARED,
+			    DRV_NAME, dev);
 	if (ecode) {
 		printk(KERN_WARNING "%s: Requested IRQ %d is busy\n",
-		       dev->name, pdev->irq);
+		       DRV_NAME, pdev->irq);
 		goto init_error;
 	} else
 		dev->irq = pdev->irq;
-
-	/*
-	 * Register the device here to be able to catch allocated
-	 * interrupt handlers in case the firmware doesn't come up.
-	 */
-	ap->next = root_dev;
-	root_dev = dev;
 
 #ifdef INDEX_DEBUG
 	spin_lock_init(&ap->debug_lock);
@@ -1477,7 +1210,10 @@ static int __init ace_init(struct net_device *dev)
 	memset(ap->info, 0, sizeof(struct ace_info));
 	memset(ap->skb, 0, sizeof(struct ace_skb));
 
-	ace_load_firmware(dev);
+	ecode = ace_load_firmware(dev);
+	if (ecode)
+		goto init_error;
+
 	ap->fw_running = 0;
 
 	tmp_ptr = ap->info_dma;
@@ -1509,7 +1245,7 @@ static int __init ace_init(struct net_device *dev)
 	set_aceaddr(&info->stats2_ptr, (dma_addr_t) tmp_ptr);
 
 	set_aceaddr(&info->rx_std_ctrl.rngptr, ap->rx_ring_base_dma);
-	info->rx_std_ctrl.max_len = ACE_STD_MTU + ETH_HLEN + 4;
+	info->rx_std_ctrl.max_len = ACE_STD_BUFSIZE;
 	info->rx_std_ctrl.flags =
 	  RCB_FLG_TCP_UDP_SUM | RCB_FLG_NO_PSEUDO_HDR | ACE_RCB_VLAN_FLAG;
 
@@ -1548,7 +1284,7 @@ static int __init ace_init(struct net_device *dev)
 			      (RX_STD_RING_ENTRIES +
 			       RX_JUMBO_RING_ENTRIES))));
 		info->rx_mini_ctrl.max_len = ACE_MINI_SIZE;
-		info->rx_mini_ctrl.flags = 
+		info->rx_mini_ctrl.flags =
 		  RCB_FLG_TCP_UDP_SUM|RCB_FLG_NO_PSEUDO_HDR|ACE_RCB_VLAN_FLAG;
 
 		for (i = 0; i < RX_MINI_RING_ENTRIES; i++)
@@ -1581,11 +1317,10 @@ static int __init ace_init(struct net_device *dev)
 	writel(TX_RING_BASE, &regs->WinBase);
 
 	if (ACE_IS_TIGON_I(ap)) {
-		ap->tx_ring = (struct tx_desc *)regs->Window;
-		for (i = 0; i < (TIGON_I_TX_RING_ENTRIES * 
-				 sizeof(struct tx_desc) / 4); i++) {
-			writel(0, (unsigned long)ap->tx_ring + i * 4);
-		}
+		ap->tx_ring = (__force struct tx_desc *) regs->Window;
+		for (i = 0; i < (TIGON_I_TX_RING_ENTRIES
+				 * sizeof(struct tx_desc)) / sizeof(u32); i++)
+			writel(0, (__force void __iomem *)ap->tx_ring  + i * 4);
 
 		set_aceaddr(&info->tx_ctrl.rngptr, TX_RING_BASE);
 	} else {
@@ -1639,7 +1374,7 @@ static int __init ace_init(struct net_device *dev)
 	if (board_idx == BOARD_IDX_OVERFLOW) {
 		printk(KERN_WARNING "%s: more than %i NICs detected, "
 		       "ignoring module parameters!\n",
-		       dev->name, ACE_MAX_MOD_PARMS);
+		       ap->name, ACE_MAX_MOD_PARMS);
 	} else if (board_idx >= 0) {
 		if (tx_coal_tick[board_idx])
 			writel(tx_coal_tick[board_idx],
@@ -1671,14 +1406,14 @@ static int __init ace_init(struct net_device *dev)
 	/*
 	 * Override link default parameters
 	 */
-	if ((board_idx >= 0) && link[board_idx]) {
-		int option = link[board_idx];
+	if ((board_idx >= 0) && link_state[board_idx]) {
+		int option = link_state[board_idx];
 
 		tmp = LNK_ENABLE;
 
 		if (option & 0x01) {
 			printk(KERN_INFO "%s: Setting half duplex link\n",
-			       dev->name);
+			       ap->name);
 			tmp &= ~LNK_FULL_DUPLEX;
 		}
 		if (option & 0x02)
@@ -1691,7 +1426,7 @@ static int __init ace_init(struct net_device *dev)
 			tmp |= LNK_1000MB;
 		if ((option & 0x70) == 0) {
 			printk(KERN_WARNING "%s: No media speed specified, "
-			       "forcing auto negotiation\n", dev->name);
+			       "forcing auto negotiation\n", ap->name);
 			tmp |= LNK_NEGOTIATE | LNK_1000MB |
 				LNK_100MB | LNK_10MB;
 		}
@@ -1699,12 +1434,12 @@ static int __init ace_init(struct net_device *dev)
 			tmp |= LNK_NEG_FCTL;
 		else
 			printk(KERN_INFO "%s: Disabling flow control "
-			       "negotiation\n", dev->name);
+			       "negotiation\n", ap->name);
 		if (option & 0x200)
 			tmp |= LNK_RX_FLOW_CTL_Y;
 		if ((option & 0x400) && (ap->version >= 2)) {
 			printk(KERN_INFO "%s: Enabling TX flow control\n",
-			       dev->name);
+			       ap->name);
 			tmp |= LNK_TX_FLOW_CTL_Y;
 		}
 	}
@@ -1714,10 +1449,7 @@ static int __init ace_init(struct net_device *dev)
 	if (ap->version >= 2)
 		writel(tmp, &regs->TuneFastLink);
 
-	if (ACE_IS_TIGON_I(ap))
-		writel(tigonFwStartAddr, &regs->Pc);
-	if (ap->version == 2)
-		writel(tigon2FwStartAddr, &regs->Pc);
+	writel(ap->firmware_start, &regs->Pc);
 
 	writel(0, &regs->Mb0Lo);
 
@@ -1733,11 +1465,6 @@ static int __init ace_init(struct net_device *dev)
 	wmb();
 	ace_set_txprd(regs, ap, 0);
 	writel(0, &regs->RxRetCsm);
-
-	/*
-	 * Zero the stats before starting the interface
-	 */
-	memset(&ap->stats, 0, sizeof(ap->stats));
 
        /*
 	* Enable DMA engine now.
@@ -1761,7 +1488,7 @@ static int __init ace_init(struct net_device *dev)
 		cpu_relax();
 
 	if (!ap->fw_running) {
-		printk(KERN_ERR "%s: Firmware NOT running!\n", dev->name);
+		printk(KERN_ERR "%s: Firmware NOT running!\n", ap->name);
 
 		ace_dump_trace(ap);
 		writel(readl(&regs->CpuCtrl) | CPU_HALT, &regs->CpuCtrl);
@@ -1794,13 +1521,13 @@ static int __init ace_init(struct net_device *dev)
 		ace_load_std_rx_ring(ap, RX_RING_SIZE);
 	else
 		printk(KERN_ERR "%s: Someone is busy refilling the RX ring\n",
-		       dev->name);
+		       ap->name);
 	if (ap->version >= 2) {
 		if (!test_and_set_bit(0, &ap->mini_refill_busy))
 			ace_load_mini_rx_ring(ap, RX_MINI_SIZE);
 		else
 			printk(KERN_ERR "%s: Someone is busy refilling "
-			       "the RX mini ring\n", dev->name);
+			       "the RX mini ring\n", ap->name);
 	}
 	return 0;
 
@@ -1812,14 +1539,9 @@ static int __init ace_init(struct net_device *dev)
 
 static void ace_set_rxtx_parms(struct net_device *dev, int jumbo)
 {
-	struct ace_private *ap;
-	struct ace_regs *regs;
-	int board_idx;
-
-	ap = dev->priv;
-	regs = ap->regs;
-
-	board_idx = ap->board_idx;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
+	int board_idx = ap->board_idx;
 
 	if (board_idx >= 0) {
 		if (!jumbo) {
@@ -1856,13 +1578,13 @@ static void ace_set_rxtx_parms(struct net_device *dev, int jumbo)
 static void ace_watchdog(struct net_device *data)
 {
 	struct net_device *dev = data;
-	struct ace_private *ap = dev->priv;
-	struct ace_regs *regs = ap->regs;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 
 	/*
 	 * We haven't received a stats update event for more than 2.5
 	 * seconds and there is data in the transmit queue, thus we
-	 * asume the card is stuck.
+	 * assume the card is stuck.
 	 */
 	if (*ap->tx_csm != ap->tx_ret_csm) {
 		printk(KERN_WARNING "%s: Transmitter is stuck, %08x\n",
@@ -1880,13 +1602,13 @@ static void ace_watchdog(struct net_device *data)
 
 static void ace_tasklet(unsigned long dev)
 {
-	struct ace_private *ap = ((struct net_device *)dev)->priv;
+	struct ace_private *ap = netdev_priv((struct net_device *)dev);
 	int cur_size;
 
 	cur_size = atomic_read(&ap->cur_rx_bufs);
 	if ((cur_size < RX_LOW_STD_THRES) &&
 	    !test_and_set_bit(0, &ap->std_refill_busy)) {
-#if DEBUG
+#ifdef DEBUG
 		printk("refilling buffers (current %i)\n", cur_size);
 #endif
 		ace_load_std_rx_ring(ap, RX_RING_SIZE - cur_size);
@@ -1896,7 +1618,7 @@ static void ace_tasklet(unsigned long dev)
 		cur_size = atomic_read(&ap->cur_mini_bufs);
 		if ((cur_size < RX_LOW_MINI_THRES) &&
 		    !test_and_set_bit(0, &ap->mini_refill_busy)) {
-#if DEBUG
+#ifdef DEBUG
 			printk("refilling mini buffers (current %i)\n",
 			       cur_size);
 #endif
@@ -1907,7 +1629,7 @@ static void ace_tasklet(unsigned long dev)
 	cur_size = atomic_read(&ap->cur_jumbo_bufs);
 	if (ap->jumbo && (cur_size < RX_LOW_JUMBO_THRES) &&
 	    !test_and_set_bit(0, &ap->jumbo_refill_busy)) {
-#if DEBUG
+#ifdef DEBUG
 		printk("refilling jumbo buffers (current %i)\n", cur_size);
 #endif
 		ace_load_jumbo_rx_ring(ap, RX_JUMBO_SIZE - cur_size);
@@ -1938,10 +1660,9 @@ static void ace_dump_trace(struct ace_private *ap)
  */
 static void ace_load_std_rx_ring(struct ace_private *ap, int nr_bufs)
 {
-	struct ace_regs *regs;
+	struct ace_regs __iomem *regs = ap->regs;
 	short i, idx;
 
-	regs = ap->regs;
 
 	prefetchw(&ap->cur_rx_bufs);
 
@@ -1952,25 +1673,22 @@ static void ace_load_std_rx_ring(struct ace_private *ap, int nr_bufs)
 		struct rx_desc *rd;
 		dma_addr_t mapping;
 
-		skb = alloc_skb(ACE_STD_BUFSIZE, GFP_ATOMIC);
+		skb = alloc_skb(ACE_STD_BUFSIZE + NET_IP_ALIGN, GFP_ATOMIC);
 		if (!skb)
 			break;
 
-		/*
-		 * Make sure IP header starts on a fresh cache line.
-		 */
-		skb_reserve(skb, 2 + 16);
+		skb_reserve(skb, NET_IP_ALIGN);
 		mapping = pci_map_page(ap->pdev, virt_to_page(skb->data),
 				       offset_in_page(skb->data),
-				       ACE_STD_BUFSIZE - (2 + 16),
+				       ACE_STD_BUFSIZE,
 				       PCI_DMA_FROMDEVICE);
 		ap->skb->rx_std_skbuff[idx].skb = skb;
-		pci_unmap_addr_set(&ap->skb->rx_std_skbuff[idx],
+		dma_unmap_addr_set(&ap->skb->rx_std_skbuff[idx],
 				   mapping, mapping);
 
 		rd = &ap->rx_std_ring[idx];
 		set_aceaddr(&rd->addr, mapping);
-		rd->size = ACE_STD_MTU + ETH_HLEN + 4;
+		rd->size = ACE_STD_BUFSIZE;
 		rd->idx = idx;
 		idx = (idx + 1) % RX_STD_RING_ENTRIES;
 	}
@@ -2005,10 +1723,8 @@ static void ace_load_std_rx_ring(struct ace_private *ap, int nr_bufs)
 
 static void ace_load_mini_rx_ring(struct ace_private *ap, int nr_bufs)
 {
-	struct ace_regs *regs;
+	struct ace_regs __iomem *regs = ap->regs;
 	short i, idx;
-
-	regs = ap->regs;
 
 	prefetchw(&ap->cur_mini_bufs);
 
@@ -2018,25 +1734,22 @@ static void ace_load_mini_rx_ring(struct ace_private *ap, int nr_bufs)
 		struct rx_desc *rd;
 		dma_addr_t mapping;
 
-		skb = alloc_skb(ACE_MINI_BUFSIZE, GFP_ATOMIC);
+		skb = alloc_skb(ACE_MINI_BUFSIZE + NET_IP_ALIGN, GFP_ATOMIC);
 		if (!skb)
 			break;
 
-		/*
-		 * Make sure the IP header ends up on a fresh cache line
-		 */
-		skb_reserve(skb, 2 + 16);
+		skb_reserve(skb, NET_IP_ALIGN);
 		mapping = pci_map_page(ap->pdev, virt_to_page(skb->data),
 				       offset_in_page(skb->data),
-				       ACE_MINI_BUFSIZE - (2 + 16),
+				       ACE_MINI_BUFSIZE,
 				       PCI_DMA_FROMDEVICE);
 		ap->skb->rx_mini_skbuff[idx].skb = skb;
-		pci_unmap_addr_set(&ap->skb->rx_mini_skbuff[idx],
+		dma_unmap_addr_set(&ap->skb->rx_mini_skbuff[idx],
 				   mapping, mapping);
 
 		rd = &ap->rx_mini_ring[idx];
 		set_aceaddr(&rd->addr, mapping);
-		rd->size = ACE_MINI_SIZE;
+		rd->size = ACE_MINI_BUFSIZE;
 		rd->idx = idx;
 		idx = (idx + 1) % RX_MINI_RING_ENTRIES;
 	}
@@ -2067,10 +1780,8 @@ static void ace_load_mini_rx_ring(struct ace_private *ap, int nr_bufs)
  */
 static void ace_load_jumbo_rx_ring(struct ace_private *ap, int nr_bufs)
 {
-	struct ace_regs *regs;
+	struct ace_regs __iomem *regs = ap->regs;
 	short i, idx;
-
-	regs = ap->regs;
 
 	idx = ap->rx_jumbo_skbprd;
 
@@ -2079,25 +1790,22 @@ static void ace_load_jumbo_rx_ring(struct ace_private *ap, int nr_bufs)
 		struct rx_desc *rd;
 		dma_addr_t mapping;
 
-		skb = alloc_skb(ACE_JUMBO_BUFSIZE, GFP_ATOMIC);
+		skb = alloc_skb(ACE_JUMBO_BUFSIZE + NET_IP_ALIGN, GFP_ATOMIC);
 		if (!skb)
 			break;
 
-		/*
-		 * Make sure the IP header ends up on a fresh cache line
-		 */
-		skb_reserve(skb, 2 + 16);
+		skb_reserve(skb, NET_IP_ALIGN);
 		mapping = pci_map_page(ap->pdev, virt_to_page(skb->data),
 				       offset_in_page(skb->data),
-				       ACE_JUMBO_BUFSIZE - (2 + 16),
+				       ACE_JUMBO_BUFSIZE,
 				       PCI_DMA_FROMDEVICE);
 		ap->skb->rx_jumbo_skbuff[idx].skb = skb;
-		pci_unmap_addr_set(&ap->skb->rx_jumbo_skbuff[idx],
+		dma_unmap_addr_set(&ap->skb->rx_jumbo_skbuff[idx],
 				   mapping, mapping);
 
 		rd = &ap->rx_jumbo_ring[idx];
 		set_aceaddr(&rd->addr, mapping);
-		rd->size = ACE_JUMBO_MTU + ETH_HLEN + 4;
+		rd->size = ACE_JUMBO_BUFSIZE;
 		rd->idx = idx;
 		idx = (idx + 1) % RX_JUMBO_RING_ENTRIES;
 	}
@@ -2139,13 +1847,13 @@ static u32 ace_handle_event(struct net_device *dev, u32 evtcsm, u32 evtprd)
 {
 	struct ace_private *ap;
 
-	ap = dev->priv;
+	ap = netdev_priv(dev);
 
 	while (evtcsm != evtprd) {
 		switch (ap->evt_ring[evtcsm].evt) {
 		case E_FW_RUNNING:
 			printk(KERN_INFO "%s: Firmware up and running\n",
-			       dev->name);
+			       ap->name);
 			ap->fw_running = 1;
 			wmb();
 			break;
@@ -2160,7 +1868,7 @@ static u32 ace_handle_event(struct net_device *dev, u32 evtcsm, u32 evtprd)
 				u32 state = readl(&ap->regs->GigLnkState);
 				printk(KERN_WARNING "%s: Optical link UP "
 				       "(%s Duplex, Flow Control: %s%s)\n",
-				       dev->name,
+				       ap->name,
 				       state & LNK_FULL_DUPLEX ? "Full":"Half",
 				       state & LNK_TX_FLOW_CTL_Y ? "TX " : "",
 				       state & LNK_RX_FLOW_CTL_Y ? "RX" : "");
@@ -2168,15 +1876,15 @@ static u32 ace_handle_event(struct net_device *dev, u32 evtcsm, u32 evtprd)
 			}
 			case E_C_LINK_DOWN:
 				printk(KERN_WARNING "%s: Optical link DOWN\n",
-				       dev->name);
+				       ap->name);
 				break;
 			case E_C_LINK_10_100:
 				printk(KERN_WARNING "%s: 10/100BaseT link "
-				       "UP\n", dev->name);
+				       "UP\n", ap->name);
 				break;
 			default:
 				printk(KERN_ERR "%s: Unknown optical link "
-				       "state %02x\n", dev->name, code);
+				       "state %02x\n", ap->name, code);
 			}
 			break;
 		}
@@ -2184,19 +1892,19 @@ static u32 ace_handle_event(struct net_device *dev, u32 evtcsm, u32 evtprd)
 			switch(ap->evt_ring[evtcsm].code) {
 			case E_C_ERR_INVAL_CMD:
 				printk(KERN_ERR "%s: invalid command error\n",
-				       dev->name);
+				       ap->name);
 				break;
 			case E_C_ERR_UNIMP_CMD:
 				printk(KERN_ERR "%s: unimplemented command "
-				       "error\n", dev->name);
+				       "error\n", ap->name);
 				break;
 			case E_C_ERR_BAD_CFG:
 				printk(KERN_ERR "%s: bad config error\n",
-				       dev->name);
+				       ap->name);
 				break;
 			default:
 				printk(KERN_ERR "%s: unknown error %02x\n",
-				       dev->name, ap->evt_ring[evtcsm].code);
+				       ap->name, ap->evt_ring[evtcsm].code);
 			}
 			break;
 		case E_RESET_JUMBO_RNG:
@@ -2225,13 +1933,13 @@ static u32 ace_handle_event(struct net_device *dev, u32 evtcsm, u32 evtprd)
 			ap->jumbo = 0;
 			ap->rx_jumbo_skbprd = 0;
 			printk(KERN_INFO "%s: Jumbo ring flushed\n",
-			       dev->name);
+			       ap->name);
 			clear_bit(0, &ap->jumbo_refill_busy);
 			break;
 		}
 		default:
 			printk(KERN_ERR "%s: Unhandled event 0x%02x\n",
-			       dev->name, ap->evt_ring[evtcsm].evt);
+			       ap->name, ap->evt_ring[evtcsm].evt);
 		}
 		evtcsm = (evtcsm + 1) % EVT_RING_ENTRIES;
 	}
@@ -2242,7 +1950,7 @@ static u32 ace_handle_event(struct net_device *dev, u32 evtcsm, u32 evtprd)
 
 static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 {
-	struct ace_private *ap = dev->priv;
+	struct ace_private *ap = netdev_priv(dev);
 	u32 idx;
 	int mini_count = 0, std_count = 0;
 
@@ -2250,7 +1958,7 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 
 	prefetchw(&ap->cur_rx_bufs);
 	prefetchw(&ap->cur_mini_bufs);
-	
+
 	while (idx != rxretprd) {
 		struct ring_info *rip;
 		struct sk_buff *skb;
@@ -2258,6 +1966,11 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 		u32 skbidx;
 		int bd_flags, desc_type, mapsize;
 		u16 csum;
+
+
+		/* make sure the rx descriptor isn't read before rxretprd */
+		if (idx == rxretcsm)
+			rmb();
 
 		retdesc = &ap->rx_return_ring[idx];
 		skbidx = retdesc->idx;
@@ -2274,21 +1987,21 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 			 */
 		case 0:
 			rip = &ap->skb->rx_std_skbuff[skbidx];
-			mapsize = ACE_STD_BUFSIZE - (2 + 16);
+			mapsize = ACE_STD_BUFSIZE;
 			rxdesc = &ap->rx_std_ring[skbidx];
 			std_count++;
 			break;
 		case BD_FLG_JUMBO:
 			rip = &ap->skb->rx_jumbo_skbuff[skbidx];
-			mapsize = ACE_JUMBO_BUFSIZE - (2 + 16);
+			mapsize = ACE_JUMBO_BUFSIZE;
 			rxdesc = &ap->rx_jumbo_ring[skbidx];
 			atomic_dec(&ap->cur_jumbo_bufs);
 			break;
 		case BD_FLG_MINI:
 			rip = &ap->skb->rx_mini_skbuff[skbidx];
-			mapsize = ACE_MINI_BUFSIZE - (2 + 16);
+			mapsize = ACE_MINI_BUFSIZE;
 			rxdesc = &ap->rx_mini_ring[skbidx];
-			mini_count++; 
+			mini_count++;
 			break;
 		default:
 			printk(KERN_INFO "%s: unknown frame type (0x%02x) "
@@ -2300,7 +2013,7 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 		skb = rip->skb;
 		rip->skb = NULL;
 		pci_unmap_page(ap->pdev,
-			       pci_unmap_addr(rip, mapping),
+			       dma_unmap_addr(rip, mapping),
 			       mapsize,
 			       PCI_DMA_FROMDEVICE);
 		skb_put(skb, retdesc->size);
@@ -2310,7 +2023,6 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 		 */
 		csum = retdesc->tcp_udp_csum;
 
-		skb->dev = dev;
 		skb->protocol = eth_type_trans(skb, dev);
 
 		/*
@@ -2319,9 +2031,9 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 		 */
 		if (bd_flags & BD_FLG_TCP_UDP_SUM) {
 			skb->csum = htons(csum);
-			skb->ip_summed = CHECKSUM_HW;
+			skb->ip_summed = CHECKSUM_COMPLETE;
 		} else {
-			skb->ip_summed = CHECKSUM_NONE;
+			skb_checksum_none_assert(skb);
 		}
 
 		/* send it up */
@@ -2332,9 +2044,8 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 #endif
 			netif_rx(skb);
 
-		dev->last_rx = jiffies;
-		ap->stats.rx_packets++;
-		ap->stats.rx_bytes += retdesc->size;
+		dev->stats.rx_packets++;
+		dev->stats.rx_bytes += retdesc->size;
 
 		idx = (idx + 1) % RX_RETURN_RING_ENTRIES;
 	}
@@ -2349,8 +2060,7 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 	 * the 12.3.x Firmware - my Tigon I NICs seem to disagree!
 	 */
 	if (ACE_IS_TIGON_I(ap)) {
-		struct ace_regs *regs = ap->regs;
-		writel(idx, &regs->RxRetCsm);
+		writel(idx, &ap->regs->RxRetCsm);
 	}
 	ap->cur_rx = idx;
 
@@ -2364,27 +2074,25 @@ static void ace_rx_int(struct net_device *dev, u32 rxretprd, u32 rxretcsm)
 static inline void ace_tx_int(struct net_device *dev,
 			      u32 txcsm, u32 idx)
 {
-	struct ace_private *ap = dev->priv;
+	struct ace_private *ap = netdev_priv(dev);
 
 	do {
 		struct sk_buff *skb;
-		dma_addr_t mapping;
 		struct tx_ring_info *info;
 
 		info = ap->skb->tx_skbuff + idx;
 		skb = info->skb;
-		mapping = pci_unmap_addr(info, mapping);
 
-		if (mapping) {
-			pci_unmap_page(ap->pdev, mapping,
-				       pci_unmap_len(info, maplen),
+		if (dma_unmap_len(info, maplen)) {
+			pci_unmap_page(ap->pdev, dma_unmap_addr(info, mapping),
+				       dma_unmap_len(info, maplen),
 				       PCI_DMA_TODEVICE);
-			pci_unmap_addr_set(info, mapping, 0);
+			dma_unmap_len_set(info, maplen, 0);
 		}
 
 		if (skb) {
-			ap->stats.tx_packets++;
-			ap->stats.tx_bytes += skb->len;
+			dev->stats.tx_packets++;
+			dev->stats.tx_bytes += skb->len;
 			dev_kfree_skb_irq(skb);
 			info->skb = NULL;
 		}
@@ -2428,17 +2136,14 @@ static inline void ace_tx_int(struct net_device *dev,
 }
 
 
-static irqreturn_t ace_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
+static irqreturn_t ace_interrupt(int irq, void *dev_id)
 {
-	struct ace_private *ap;
-	struct ace_regs *regs;
 	struct net_device *dev = (struct net_device *)dev_id;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 	u32 idx;
 	u32 txcsm, rxretcsm, rxretprd;
 	u32 evtcsm, evtprd;
-
-	ap = dev->priv;
-	regs = ap->regs;
 
 	/*
 	 * In case of PCI shared interrupts or spurious interrupts,
@@ -2507,7 +2212,7 @@ static irqreturn_t ace_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 		if (cur_size < RX_LOW_STD_THRES) {
 			if ((cur_size < RX_PANIC_STD_THRES) &&
 			    !test_and_set_bit(0, &ap->std_refill_busy)) {
-#if DEBUG
+#ifdef DEBUG
 				printk("low on std buffers %i\n", cur_size);
 #endif
 				ace_load_std_rx_ring(ap,
@@ -2522,7 +2227,7 @@ static irqreturn_t ace_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 				if ((cur_size < RX_PANIC_MINI_THRES) &&
 				    !test_and_set_bit(0,
 						      &ap->mini_refill_busy)) {
-#if DEBUG
+#ifdef DEBUG
 					printk("low on mini buffers %i\n",
 					       cur_size);
 #endif
@@ -2538,7 +2243,7 @@ static irqreturn_t ace_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 				if ((cur_size < RX_PANIC_JUMBO_THRES) &&
 				    !test_and_set_bit(0,
 						      &ap->jumbo_refill_busy)){
-#if DEBUG
+#ifdef DEBUG
 					printk("low on jumbo buffers %i\n",
 					       cur_size);
 #endif
@@ -2560,7 +2265,7 @@ static irqreturn_t ace_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 #if ACENIC_DO_VLAN
 static void ace_vlan_rx_register(struct net_device *dev, struct vlan_group *grp)
 {
-	struct ace_private *ap = dev->priv;
+	struct ace_private *ap = netdev_priv(dev);
 	unsigned long flags;
 
 	local_irq_save(flags);
@@ -2571,33 +2276,14 @@ static void ace_vlan_rx_register(struct net_device *dev, struct vlan_group *grp)
 	ace_unmask_irq(dev);
 	local_irq_restore(flags);
 }
-
-
-static void ace_vlan_rx_kill_vid(struct net_device *dev, unsigned short vid)
-{
-	struct ace_private *ap = dev->priv;
-	unsigned long flags;
-
-	local_irq_save(flags);
-	ace_mask_irq(dev);
-
-	if (ap->vlgrp)
-		ap->vlgrp->vlan_devices[vid] = NULL;
-
-	ace_unmask_irq(dev);
-	local_irq_restore(flags);
-}
 #endif /* ACENIC_DO_VLAN */
 
 
 static int ace_open(struct net_device *dev)
 {
-	struct ace_private *ap;
-	struct ace_regs *regs;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 	struct cmd cmd;
-
-	ap = dev->priv;
-	regs = ap->regs;
 
 	if (!(ap->fw_running)) {
 		printk(KERN_WARNING "%s: Firmware not running!\n", dev->name);
@@ -2640,8 +2326,6 @@ static int ace_open(struct net_device *dev)
 
 	netif_start_queue(dev);
 
-	ACE_MOD_INC_USE_COUNT;
-
 	/*
 	 * Setup the bottom half rx ring refill handler
 	 */
@@ -2652,13 +2336,11 @@ static int ace_open(struct net_device *dev)
 
 static int ace_close(struct net_device *dev)
 {
-	struct ace_private *ap;
-	struct ace_regs *regs;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 	struct cmd cmd;
 	unsigned long flags;
 	short i;
-
-	ace_if_down(dev);
 
 	/*
 	 * Without (or before) releasing irq and stopping hardware, this
@@ -2667,8 +2349,6 @@ static int ace_close(struct net_device *dev)
 	 */
 	netif_stop_queue(dev);
 
-	ap = dev->priv;
-	regs = ap->regs;
 
 	if (ap->promisc) {
 		cmd.evt = C_SET_PROMISC_MODE;
@@ -2695,25 +2375,26 @@ static int ace_close(struct net_device *dev)
 
 	for (i = 0; i < ACE_TX_RING_ENTRIES(ap); i++) {
 		struct sk_buff *skb;
-		dma_addr_t mapping;
 		struct tx_ring_info *info;
 
 		info = ap->skb->tx_skbuff + i;
 		skb = info->skb;
-		mapping = pci_unmap_addr(info, mapping);
 
-		if (mapping) {
+		if (dma_unmap_len(info, maplen)) {
 			if (ACE_IS_TIGON_I(ap)) {
-				writel(0, &ap->tx_ring[i].addr.addrhi);
-				writel(0, &ap->tx_ring[i].addr.addrlo);
-				writel(0, &ap->tx_ring[i].flagsize);
+				/* NB: TIGON_1 is special, tx_ring is in io space */
+				struct tx_desc __iomem *tx;
+				tx = (__force struct tx_desc __iomem *) &ap->tx_ring[i];
+				writel(0, &tx->addr.addrhi);
+				writel(0, &tx->addr.addrlo);
+				writel(0, &tx->flagsize);
 			} else
 				memset(ap->tx_ring + i, 0,
 				       sizeof(struct tx_desc));
-			pci_unmap_page(ap->pdev, mapping,
-				       pci_unmap_len(info, maplen),
+			pci_unmap_page(ap->pdev, dma_unmap_addr(info, mapping),
+				       dma_unmap_len(info, maplen),
 				       PCI_DMA_TODEVICE);
-			pci_unmap_addr_set(info, mapping, 0);
+			dma_unmap_len_set(info, maplen, 0);
 		}
 		if (skb) {
 			dev_kfree_skb(skb);
@@ -2731,7 +2412,6 @@ static int ace_close(struct net_device *dev)
 	ace_unmask_irq(dev);
 	local_irq_restore(flags);
 
-	ACE_MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -2749,8 +2429,8 @@ ace_map_tx_skb(struct ace_private *ap, struct sk_buff *skb,
 
 	info = ap->skb->tx_skbuff + idx;
 	info->skb = tail;
-	pci_unmap_addr_set(info, mapping, mapping);
-	pci_unmap_len_set(info, maplen, skb->len);
+	dma_unmap_addr_set(info, mapping, mapping);
+	dma_unmap_len_set(info, maplen, skb->len);
 	return mapping;
 }
 
@@ -2764,11 +2444,12 @@ ace_load_tx_bd(struct ace_private *ap, struct tx_desc *desc, u64 addr,
 #endif
 
 	if (ACE_IS_TIGON_I(ap)) {
-		writel(addr >> 32, &desc->addr.addrhi);
-		writel(addr & 0xffffffff, &desc->addr.addrlo);
-		writel(flagsize, &desc->flagsize);
+		struct tx_desc __iomem *io = (__force struct tx_desc __iomem *) desc;
+		writel(addr >> 32, &io->addr.addrhi);
+		writel(addr & 0xffffffff, &io->addr.addrlo);
+		writel(flagsize, &io->flagsize);
 #if ACENIC_DO_VLAN
-		writel(vlan_tag, &desc->vlanres);
+		writel(vlan_tag, &io->vlanres);
 #endif
 	} else {
 		desc->addr.addrhi = addr >> 32;
@@ -2781,18 +2462,14 @@ ace_load_tx_bd(struct ace_private *ap, struct tx_desc *desc, u64 addr,
 }
 
 
-static int ace_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ace_start_xmit(struct sk_buff *skb,
+				  struct net_device *dev)
 {
-	struct ace_private *ap = dev->priv;
-	struct ace_regs *regs = ap->regs;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 	struct tx_desc *desc;
 	u32 idx, flagsize;
-
- 	/*
-	 * This only happens with pre-softnet, ie. 2.2.x kernels.
- 	 */
-	if (early_stop_netif_stop_queue(dev))
- 		return 1;
+	unsigned long maxjiff = jiffies + 3*HZ;
 
 restart:
 	idx = ap->tx_prd;
@@ -2800,16 +2477,13 @@ restart:
 	if (tx_ring_full(ap, ap->tx_ret_csm, idx))
 		goto overflow;
 
-#if MAX_SKB_FRAGS
-	if (!skb_shinfo(skb)->nr_frags)
-#endif
-	{
+	if (!skb_shinfo(skb)->nr_frags)	{
 		dma_addr_t mapping;
 		u32 vlan_tag = 0;
 
 		mapping = ace_map_tx_skb(ap, skb, skb, idx);
 		flagsize = (skb->len << 16) | (BD_FLG_END);
-		if (skb->ip_summed == CHECKSUM_HW)
+		if (skb->ip_summed == CHECKSUM_PARTIAL)
 			flagsize |= BD_FLG_TCP_UDP_SUM;
 #if ACENIC_DO_VLAN
 		if (vlan_tx_tag_present(skb)) {
@@ -2825,16 +2499,14 @@ restart:
 			flagsize |= BD_FLG_COAL_NOW;
 
 		ace_load_tx_bd(ap, desc, mapping, flagsize, vlan_tag);
-	}
-#if MAX_SKB_FRAGS
-	else {
+	} else {
 		dma_addr_t mapping;
 		u32 vlan_tag = 0;
 		int i, len = 0;
 
 		mapping = ace_map_tx_skb(ap, skb, NULL, idx);
 		flagsize = (skb_headlen(skb) << 16);
-		if (skb->ip_summed == CHECKSUM_HW)
+		if (skb->ip_summed == CHECKSUM_PARTIAL)
 			flagsize |= BD_FLG_TCP_UDP_SUM;
 #if ACENIC_DO_VLAN
 		if (vlan_tx_tag_present(skb)) {
@@ -2860,7 +2532,7 @@ restart:
 					       PCI_DMA_TODEVICE);
 
 			flagsize = (frag->size << 16);
-			if (skb->ip_summed == CHECKSUM_HW)
+			if (skb->ip_summed == CHECKSUM_PARTIAL)
 				flagsize |= BD_FLG_TCP_UDP_SUM;
 			idx = (idx + 1) % ACE_TX_RING_ENTRIES(ap);
 
@@ -2877,12 +2549,11 @@ restart:
 			} else {
 				info->skb = NULL;
 			}
-			pci_unmap_addr_set(info, mapping, mapping);
-			pci_unmap_len_set(info, maplen, frag->size);
+			dma_unmap_addr_set(info, mapping, mapping);
+			dma_unmap_len_set(info, maplen, frag->size);
 			ace_load_tx_bd(ap, desc, mapping, flagsize, vlan_tag);
 		}
 	}
-#endif
 
  	wmb();
  	ap->tx_prd = idx;
@@ -2893,7 +2564,7 @@ restart:
 
 		/*
 		 * A TX-descriptor producer (an IRQ) might have gotten
-		 * inbetween, making the ring free again. Since xmit is
+		 * between, making the ring free again. Since xmit is
 		 * serialized, this is the only situation we have to
 		 * re-test.
 		 */
@@ -2901,8 +2572,7 @@ restart:
 			netif_wake_queue(dev);
 	}
 
-	dev->trans_start = jiffies;
-	return 0;
+	return NETDEV_TX_OK;
 
 overflow:
 	/*
@@ -2921,15 +2591,22 @@ overflow:
 	 * Alternative is to return with 1 not throttling queue. In this
 	 * case loop becomes longer, no more useful effects.
 	 */
-	barrier();
-	goto restart;
+	if (time_before(jiffies, maxjiff)) {
+		barrier();
+		cpu_relax();
+		goto restart;
+	}
+
+	/* The ring is stuck full. */
+	printk(KERN_WARNING "%s: Transmit ring stuck full\n", dev->name);
+	return NETDEV_TX_BUSY;
 }
 
 
 static int ace_change_mtu(struct net_device *dev, int new_mtu)
 {
-	struct ace_private *ap = dev->priv;
-	struct ace_regs *regs = ap->regs;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 
 	if (new_mtu > ACE_JUMBO_MTU)
 		return -EINVAL;
@@ -2963,154 +2640,145 @@ static int ace_change_mtu(struct net_device *dev, int new_mtu)
 	return 0;
 }
 
-
-static int ace_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+static int ace_get_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
-	struct ace_private *ap = dev->priv;
-	struct ace_regs *regs = ap->regs;
-#ifdef SIOCETHTOOL
-	struct ethtool_cmd ecmd;
-	u32 link, speed;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
+	u32 link;
 
-	if (cmd != SIOCETHTOOL)
-		return -EOPNOTSUPP;
-	if (copy_from_user(&ecmd, ifr->ifr_data, sizeof(ecmd)))
-		return -EFAULT;
-	switch (ecmd.cmd) {
-	case ETHTOOL_GSET:
-		ecmd.supported =
-			(SUPPORTED_10baseT_Half | SUPPORTED_10baseT_Full |
-			 SUPPORTED_100baseT_Half | SUPPORTED_100baseT_Full |
-			 SUPPORTED_1000baseT_Half | SUPPORTED_1000baseT_Full |
-			 SUPPORTED_Autoneg | SUPPORTED_FIBRE);
+	memset(ecmd, 0, sizeof(struct ethtool_cmd));
+	ecmd->supported =
+		(SUPPORTED_10baseT_Half | SUPPORTED_10baseT_Full |
+		 SUPPORTED_100baseT_Half | SUPPORTED_100baseT_Full |
+		 SUPPORTED_1000baseT_Half | SUPPORTED_1000baseT_Full |
+		 SUPPORTED_Autoneg | SUPPORTED_FIBRE);
 
-		ecmd.port = PORT_FIBRE;
-		ecmd.transceiver = XCVR_INTERNAL;
-		ecmd.phy_address = 0;
+	ecmd->port = PORT_FIBRE;
+	ecmd->transceiver = XCVR_INTERNAL;
 
-		link = readl(&regs->GigLnkState);
-		if (link & LNK_1000MB)
-			ecmd.speed = SPEED_1000;
-		else {
-			link = readl(&regs->FastLnkState);
-			if (link & LNK_100MB)
-				ecmd.speed = SPEED_100;
-			else if (link & LNK_100MB)
-				ecmd.speed = SPEED_10;
-			else
-				ecmd.speed = 0;
-		}
-		if (link & LNK_FULL_DUPLEX)
-			ecmd.duplex = DUPLEX_FULL;
+	link = readl(&regs->GigLnkState);
+	if (link & LNK_1000MB)
+		ecmd->speed = SPEED_1000;
+	else {
+		link = readl(&regs->FastLnkState);
+		if (link & LNK_100MB)
+			ecmd->speed = SPEED_100;
+		else if (link & LNK_10MB)
+			ecmd->speed = SPEED_10;
 		else
-			ecmd.duplex = DUPLEX_HALF;
+			ecmd->speed = 0;
+	}
+	if (link & LNK_FULL_DUPLEX)
+		ecmd->duplex = DUPLEX_FULL;
+	else
+		ecmd->duplex = DUPLEX_HALF;
 
-		if (link & LNK_NEGOTIATE)
-			ecmd.autoneg = AUTONEG_ENABLE;
-		else
-			ecmd.autoneg = AUTONEG_DISABLE;
+	if (link & LNK_NEGOTIATE)
+		ecmd->autoneg = AUTONEG_ENABLE;
+	else
+		ecmd->autoneg = AUTONEG_DISABLE;
 
 #if 0
-		/*
-		 * Current struct ethtool_cmd is insufficient
-		 */
-		ecmd.trace = readl(&regs->TuneTrace);
+	/*
+	 * Current struct ethtool_cmd is insufficient
+	 */
+	ecmd->trace = readl(&regs->TuneTrace);
 
-		ecmd.txcoal = readl(&regs->TuneTxCoalTicks);
-		ecmd.rxcoal = readl(&regs->TuneRxCoalTicks);
+	ecmd->txcoal = readl(&regs->TuneTxCoalTicks);
+	ecmd->rxcoal = readl(&regs->TuneRxCoalTicks);
 #endif
-		ecmd.maxtxpkt = readl(&regs->TuneMaxTxDesc);
-		ecmd.maxrxpkt = readl(&regs->TuneMaxRxDesc);
+	ecmd->maxtxpkt = readl(&regs->TuneMaxTxDesc);
+	ecmd->maxrxpkt = readl(&regs->TuneMaxRxDesc);
 
-		if(copy_to_user(ifr->ifr_data, &ecmd, sizeof(ecmd)))
-			return -EFAULT;
-		return 0;
-
-	case ETHTOOL_SSET:
-		link = readl(&regs->GigLnkState);
-		if (link & LNK_1000MB)
-			speed = SPEED_1000;
-		else {
-			link = readl(&regs->FastLnkState);
-			if (link & LNK_100MB)
-				speed = SPEED_100;
-			else if (link & LNK_100MB)
-				speed = SPEED_10;
-			else
-				speed = SPEED_100;
-		}
-
-		link = LNK_ENABLE | LNK_1000MB | LNK_100MB | LNK_10MB |
-			LNK_RX_FLOW_CTL_Y | LNK_NEG_FCTL;
-		if (!ACE_IS_TIGON_I(ap))
-			link |= LNK_TX_FLOW_CTL_Y;
-		if (ecmd.autoneg == AUTONEG_ENABLE)
-			link |= LNK_NEGOTIATE;
-		if (ecmd.speed != speed) {
-			link &= ~(LNK_1000MB | LNK_100MB | LNK_10MB);
-			switch (speed) {
-			case SPEED_1000:
-				link |= LNK_1000MB;
-				break;
-			case SPEED_100:
-				link |= LNK_100MB;
-				break;
-			case SPEED_10:
-				link |= LNK_10MB;
-				break;
-			}
-		}
-		if (ecmd.duplex == DUPLEX_FULL)
-			link |= LNK_FULL_DUPLEX;
-
-		if (link != ap->link) {
-			struct cmd cmd;
-			printk(KERN_INFO "%s: Renegotiating link state\n",
-			       dev->name);
-
-			ap->link = link;
-			writel(link, &regs->TuneLink);
-			if (!ACE_IS_TIGON_I(ap))
-				writel(link, &regs->TuneFastLink);
-			wmb();
-
-			cmd.evt = C_LNK_NEGOTIATION;
-			cmd.code = 0;
-			cmd.idx = 0;
-			ace_issue_cmd(regs, &cmd);
-		}
-		return 0;
-
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
-		strncpy(info.driver, "acenic", sizeof(info.driver) - 1);
-		sprintf(info.fw_version, "%i.%i.%i", 
-			 tigonFwReleaseMajor, tigonFwReleaseMinor,
-			 tigonFwReleaseFix);
-		strncpy(info.version, version, sizeof(info.version) - 1);
-		if (ap && ap->pdev)
-			strcpy(info.bus_info, pci_name(ap->pdev));
-		if (copy_to_user(ifr->ifr_data, &info, sizeof(info)))
-			return -EFAULT;
-		return 0;
-	}
-	default:
-		break;
-	}
-	
-#endif
-
-	return -EOPNOTSUPP;
+	return 0;
 }
 
+static int ace_set_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
+{
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
+	u32 link, speed;
+
+	link = readl(&regs->GigLnkState);
+	if (link & LNK_1000MB)
+		speed = SPEED_1000;
+	else {
+		link = readl(&regs->FastLnkState);
+		if (link & LNK_100MB)
+			speed = SPEED_100;
+		else if (link & LNK_10MB)
+			speed = SPEED_10;
+		else
+			speed = SPEED_100;
+	}
+
+	link = LNK_ENABLE | LNK_1000MB | LNK_100MB | LNK_10MB |
+		LNK_RX_FLOW_CTL_Y | LNK_NEG_FCTL;
+	if (!ACE_IS_TIGON_I(ap))
+		link |= LNK_TX_FLOW_CTL_Y;
+	if (ecmd->autoneg == AUTONEG_ENABLE)
+		link |= LNK_NEGOTIATE;
+	if (ecmd->speed != speed) {
+		link &= ~(LNK_1000MB | LNK_100MB | LNK_10MB);
+		switch (speed) {
+		case SPEED_1000:
+			link |= LNK_1000MB;
+			break;
+		case SPEED_100:
+			link |= LNK_100MB;
+			break;
+		case SPEED_10:
+			link |= LNK_10MB;
+			break;
+		}
+	}
+
+	if (ecmd->duplex == DUPLEX_FULL)
+		link |= LNK_FULL_DUPLEX;
+
+	if (link != ap->link) {
+		struct cmd cmd;
+		printk(KERN_INFO "%s: Renegotiating link state\n",
+		       dev->name);
+
+		ap->link = link;
+		writel(link, &regs->TuneLink);
+		if (!ACE_IS_TIGON_I(ap))
+			writel(link, &regs->TuneFastLink);
+		wmb();
+
+		cmd.evt = C_LNK_NEGOTIATION;
+		cmd.code = 0;
+		cmd.idx = 0;
+		ace_issue_cmd(regs, &cmd);
+	}
+	return 0;
+}
+
+static void ace_get_drvinfo(struct net_device *dev,
+			    struct ethtool_drvinfo *info)
+{
+	struct ace_private *ap = netdev_priv(dev);
+
+	strlcpy(info->driver, "acenic", sizeof(info->driver));
+	snprintf(info->version, sizeof(info->version), "%i.%i.%i",
+		 ap->firmware_major, ap->firmware_minor,
+		 ap->firmware_fix);
+
+	if (ap->pdev)
+		strlcpy(info->bus_info, pci_name(ap->pdev),
+			sizeof(info->bus_info));
+
+}
 
 /*
  * Set the hardware MAC address.
  */
 static int ace_set_mac_addr(struct net_device *dev, void *p)
 {
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 	struct sockaddr *addr=p;
-	struct ace_regs *regs;
 	u8 *da;
 	struct cmd cmd;
 
@@ -3121,7 +2789,6 @@ static int ace_set_mac_addr(struct net_device *dev, void *p)
 
 	da = (u8 *)dev->dev_addr;
 
-	regs = ((struct ace_private *)dev->priv)->regs;
 	writel(da[0] << 8 | da[1], &regs->MacAddrHi);
 	writel((da[2] << 24) | (da[3] << 16) | (da[4] << 8) | da[5],
 	       &regs->MacAddrLo);
@@ -3137,8 +2804,8 @@ static int ace_set_mac_addr(struct net_device *dev, void *p)
 
 static void ace_set_multicast_list(struct net_device *dev)
 {
-	struct ace_private *ap = dev->priv;
-	struct ace_regs *regs = ap->regs;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 	struct cmd cmd;
 
 	if ((dev->flags & IFF_ALLMULTI) && !(ap->mcast_all)) {
@@ -3175,7 +2842,7 @@ static void ace_set_multicast_list(struct net_device *dev)
 	 * set the entire multicast list at a time and keeping track of
 	 * it here is going to be messy.
 	 */
-	if ((dev->mc_count) && !(ap->mcast_all)) {
+	if (!netdev_mc_empty(dev) && !ap->mcast_all) {
 		cmd.evt = C_SET_MULTICAST_MODE;
 		cmd.code = C_C_MCAST_ENABLE;
 		cmd.idx = 0;
@@ -3191,23 +2858,22 @@ static void ace_set_multicast_list(struct net_device *dev)
 
 static struct net_device_stats *ace_get_stats(struct net_device *dev)
 {
-	struct ace_private *ap = dev->priv;
-	struct ace_mac_stats *mac_stats =
-		(struct ace_mac_stats *)ap->regs->Stats;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_mac_stats __iomem *mac_stats =
+		(struct ace_mac_stats __iomem *)ap->regs->Stats;
 
-	ap->stats.rx_missed_errors = readl(&mac_stats->drop_space);
-	ap->stats.multicast = readl(&mac_stats->kept_mc);
-	ap->stats.collisions = readl(&mac_stats->coll);
+	dev->stats.rx_missed_errors = readl(&mac_stats->drop_space);
+	dev->stats.multicast = readl(&mac_stats->kept_mc);
+	dev->stats.collisions = readl(&mac_stats->coll);
 
-	return &ap->stats;
+	return &dev->stats;
 }
 
 
-static void __init ace_copy(struct ace_regs *regs, void *src,
-			    u32 dest, int size)
+static void __devinit ace_copy(struct ace_regs __iomem *regs, const __be32 *src,
+			       u32 dest, int size)
 {
-	unsigned long tdest;
-	u32 *wsrc;
+	void __iomem *tdest;
 	short tsize, i;
 
 	if (size <= 0)
@@ -3216,29 +2882,24 @@ static void __init ace_copy(struct ace_regs *regs, void *src,
 	while (size > 0) {
 		tsize = min_t(u32, ((~dest & (ACE_WINDOW_SIZE - 1)) + 1),
 			    min_t(u32, size, ACE_WINDOW_SIZE));
-		tdest = (unsigned long)&regs->Window +
+		tdest = (void __iomem *) &regs->Window +
 			(dest & (ACE_WINDOW_SIZE - 1));
 		writel(dest & ~(ACE_WINDOW_SIZE - 1), &regs->WinBase);
-		/*
-		 * This requires byte swapping on big endian, however
-		 * writel does that for us
-		 */
-		wsrc = src;
 		for (i = 0; i < (tsize / 4); i++) {
-			writel(wsrc[i], tdest + i*4);
+			/* Firmware is big-endian */
+			writel(be32_to_cpup(src), tdest);
+			src++;
+			tdest += 4;
+			dest += 4;
+			size -= 4;
 		}
-		dest += tsize;
-		src += tsize;
-		size -= tsize;
 	}
-
-	return;
 }
 
 
-static void __init ace_clear(struct ace_regs *regs, u32 dest, int size)
+static void __devinit ace_clear(struct ace_regs __iomem *regs, u32 dest, int size)
 {
-	unsigned long tdest;
+	void __iomem *tdest;
 	short tsize = 0, i;
 
 	if (size <= 0)
@@ -3247,7 +2908,7 @@ static void __init ace_clear(struct ace_regs *regs, u32 dest, int size)
 	while (size > 0) {
 		tsize = min_t(u32, ((~dest & (ACE_WINDOW_SIZE - 1)) + 1),
 				min_t(u32, size, ACE_WINDOW_SIZE));
-		tdest = (unsigned long)&regs->Window +
+		tdest = (void __iomem *) &regs->Window +
 			(dest & (ACE_WINDOW_SIZE - 1));
 		writel(dest & ~(ACE_WINDOW_SIZE - 1), &regs->WinBase);
 
@@ -3258,8 +2919,6 @@ static void __init ace_clear(struct ace_regs *regs, u32 dest, int size)
 		dest += tsize;
 		size -= tsize;
 	}
-
-	return;
 }
 
 
@@ -3269,42 +2928,68 @@ static void __init ace_clear(struct ace_regs *regs, u32 dest, int size)
  * This operation requires the NIC to be halted and is performed with
  * interrupts disabled and with the spinlock hold.
  */
-int __init ace_load_firmware(struct net_device *dev)
+static int __devinit ace_load_firmware(struct net_device *dev)
 {
-	struct ace_private *ap;
-	struct ace_regs *regs;
-
-	ap = dev->priv;
-	regs = ap->regs;
+	const struct firmware *fw;
+	const char *fw_name = "acenic/tg2.bin";
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
+	const __be32 *fw_data;
+	u32 load_addr;
+	int ret;
 
 	if (!(readl(&regs->CpuCtrl) & CPU_HALTED)) {
 		printk(KERN_ERR "%s: trying to download firmware while the "
-		       "CPU is running!\n", dev->name);
+		       "CPU is running!\n", ap->name);
 		return -EFAULT;
 	}
 
-	/*
-	 * Do not try to clear more than 512KB or we end up seeing
-	 * funny things on NICs with only 512KB SRAM
-	 */
-	ace_clear(regs, 0x2000, 0x80000-0x2000);
-	if (ACE_IS_TIGON_I(ap)) {
-		ace_copy(regs, tigonFwText, tigonFwTextAddr, tigonFwTextLen);
-		ace_copy(regs, tigonFwData, tigonFwDataAddr, tigonFwDataLen);
-		ace_copy(regs, tigonFwRodata, tigonFwRodataAddr,
-			 tigonFwRodataLen);
-		ace_clear(regs, tigonFwBssAddr, tigonFwBssLen);
-		ace_clear(regs, tigonFwSbssAddr, tigonFwSbssLen);
-	}else if (ap->version == 2) {
-		ace_clear(regs, tigon2FwBssAddr, tigon2FwBssLen);
-		ace_clear(regs, tigon2FwSbssAddr, tigon2FwSbssLen);
-		ace_copy(regs, tigon2FwText, tigon2FwTextAddr,tigon2FwTextLen);
-		ace_copy(regs, tigon2FwRodata, tigon2FwRodataAddr,
-			 tigon2FwRodataLen);
-		ace_copy(regs, tigon2FwData, tigon2FwDataAddr,tigon2FwDataLen);
+	if (ACE_IS_TIGON_I(ap))
+		fw_name = "acenic/tg1.bin";
+
+	ret = request_firmware(&fw, fw_name, &ap->pdev->dev);
+	if (ret) {
+		printk(KERN_ERR "%s: Failed to load firmware \"%s\"\n",
+		       ap->name, fw_name);
+		return ret;
 	}
 
-	return 0;
+	fw_data = (void *)fw->data;
+
+	/* Firmware blob starts with version numbers, followed by
+	   load and start address. Remainder is the blob to be loaded
+	   contiguously from load address. We don't bother to represent
+	   the BSS/SBSS sections any more, since we were clearing the
+	   whole thing anyway. */
+	ap->firmware_major = fw->data[0];
+	ap->firmware_minor = fw->data[1];
+	ap->firmware_fix = fw->data[2];
+
+	ap->firmware_start = be32_to_cpu(fw_data[1]);
+	if (ap->firmware_start < 0x4000 || ap->firmware_start >= 0x80000) {
+		printk(KERN_ERR "%s: bogus load address %08x in \"%s\"\n",
+		       ap->name, ap->firmware_start, fw_name);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	load_addr = be32_to_cpu(fw_data[2]);
+	if (load_addr < 0x4000 || load_addr >= 0x80000) {
+		printk(KERN_ERR "%s: bogus load address %08x in \"%s\"\n",
+		       ap->name, load_addr, fw_name);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/*
+	 * Do not try to clear more than 512KiB or we end up seeing
+	 * funny things on NICs with only 512KiB SRAM
+	 */
+	ace_clear(regs, 0x2000, 0x80000-0x2000);
+	ace_copy(regs, &fw_data[3], load_addr, fw->size-12);
+ out:
+	release_firmware(fw);
+	return ret;
 }
 
 
@@ -3323,7 +3008,7 @@ int __init ace_load_firmware(struct net_device *dev)
  * Thanks to Stevarino Webinski for helping tracking down the bugs in the
  * code i2c readout code by beta testing all my hacks.
  */
-static void __init eeprom_start(struct ace_regs *regs)
+static void __devinit eeprom_start(struct ace_regs __iomem *regs)
 {
 	u32 local;
 
@@ -3352,7 +3037,7 @@ static void __init eeprom_start(struct ace_regs *regs)
 }
 
 
-static void __init eeprom_prep(struct ace_regs *regs, u8 magic)
+static void __devinit eeprom_prep(struct ace_regs __iomem *regs, u8 magic)
 {
 	short i;
 	u32 local;
@@ -3367,7 +3052,7 @@ static void __init eeprom_prep(struct ace_regs *regs, u8 magic)
 
 	for (i = 0; i < 8; i++, magic <<= 1) {
 		udelay(ACE_SHORT_DELAY);
-		if (magic & 0x80) 
+		if (magic & 0x80)
 			local |= EEPROM_DATA_OUT;
 		else
 			local &= ~EEPROM_DATA_OUT;
@@ -3389,7 +3074,7 @@ static void __init eeprom_prep(struct ace_regs *regs, u8 magic)
 }
 
 
-static int __init eeprom_check_ack(struct ace_regs *regs)
+static int __devinit eeprom_check_ack(struct ace_regs __iomem *regs)
 {
 	int state;
 	u32 local;
@@ -3417,7 +3102,7 @@ static int __init eeprom_check_ack(struct ace_regs *regs)
 }
 
 
-static void __init eeprom_stop(struct ace_regs *regs)
+static void __devinit eeprom_stop(struct ace_regs __iomem *regs)
 {
 	u32 local;
 
@@ -3452,22 +3137,15 @@ static void __init eeprom_stop(struct ace_regs *regs)
 /*
  * Read a whole byte from the EEPROM.
  */
-static int __init read_eeprom_byte(struct net_device *dev,
+static int __devinit read_eeprom_byte(struct net_device *dev,
 				   unsigned long offset)
 {
-	struct ace_regs *regs;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 	unsigned long flags;
 	u32 local;
 	int result = 0;
 	short i;
-
-	if (!dev) {
-		printk(KERN_ERR "No device!\n");
-		result = -ENODEV;
-		goto eeprom_read_error;
-	}
-
-	regs = ((struct ace_private *)dev->priv)->regs;
 
 	/*
 	 * Don't take interrupts on this CPU will bit banging
@@ -3480,7 +3158,7 @@ static int __init read_eeprom_byte(struct net_device *dev,
 	eeprom_prep(regs, EEPROM_WRITE_SELECT);
 	if (eeprom_check_ack(regs)) {
 		local_irq_restore(flags);
-		printk(KERN_ERR "%s: Unable to sync eeprom\n", dev->name);
+		printk(KERN_ERR "%s: Unable to sync eeprom\n", ap->name);
 		result = -EIO;
 		goto eeprom_read_error;
 	}
@@ -3489,7 +3167,7 @@ static int __init read_eeprom_byte(struct net_device *dev,
 	if (eeprom_check_ack(regs)) {
 		local_irq_restore(flags);
 		printk(KERN_ERR "%s: Unable to set address byte 0\n",
-		       dev->name);
+		       ap->name);
 		result = -EIO;
 		goto eeprom_read_error;
 	}
@@ -3498,7 +3176,7 @@ static int __init read_eeprom_byte(struct net_device *dev,
 	if (eeprom_check_ack(regs)) {
 		local_irq_restore(flags);
 		printk(KERN_ERR "%s: Unable to set address byte 1\n",
-		       dev->name);
+		       ap->name);
 		result = -EIO;
 		goto eeprom_read_error;
 	}
@@ -3508,7 +3186,7 @@ static int __init read_eeprom_byte(struct net_device *dev,
 	if (eeprom_check_ack(regs)) {
 		local_irq_restore(flags);
 		printk(KERN_ERR "%s: Unable to set READ_SELECT\n",
-		       dev->name);
+		       ap->name);
 		result = -EIO;
 		goto eeprom_read_error;
 	}
@@ -3565,13 +3243,6 @@ static int __init read_eeprom_byte(struct net_device *dev,
 
  eeprom_read_error:
 	printk(KERN_ERR "%s: Unable to read eeprom byte 0x%02lx\n",
-	       dev->name, offset);
+	       ap->name, offset);
 	goto out;
 }
-
-
-/*
- * Local variables:
- * compile-command: "gcc -D__SMP__ -D__KERNEL__ -DMODULE -I../../include -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -pipe -fno-strength-reduce -DMODVERSIONS -include ../../include/linux/modversions.h   -c -o acenic.o acenic.c"
- * End:
- */

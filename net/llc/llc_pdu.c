@@ -39,7 +39,7 @@ void llc_pdu_set_pf_bit(struct sk_buff *skb, u8 bit_value)
 
 	llc_pdu_decode_pdu_type(skb, &pdu_type);
 	pdu = llc_pdu_sn_hdr(skb);
-	
+
 	switch (pdu_type) {
 	case LLC_PDU_TYPE_I:
 	case LLC_PDU_TYPE_S:
@@ -77,19 +77,6 @@ void llc_pdu_decode_pf_bit(struct sk_buff *skb, u8 *pf_bit)
 		*pf_bit = (pdu->ctrl_1 & LLC_U_PF_BIT_MASK) >> 4;
 		break;
 	}
-}
-
-/**
- *	llc_pdu_decode_cr_bit - extracts command response bit from LLC header
- *	@skb: input skb that c/r bit must be extracted from it.
- *	@cr_bit: command/response bit (0 or 1).
- *
- *	This function extracts command/response bit from LLC header. this bit
- *	is right bit of source SAP.
- */
-void llc_pdu_decode_cr_bit(struct sk_buff *skb, u8 *cr_bit)
-{
-	*cr_bit = llc_pdu_un_hdr(skb)->ssap & LLC_PDU_CMD_RSP_MASK;
 }
 
 /**
@@ -254,7 +241,7 @@ void llc_pdu_init_as_frmr_rsp(struct sk_buff *skb, struct llc_pdu_sn *prev_pdu,
 	FRMR_INFO_SET_PDU_INFO_2LONG_IND(frmr_info, vzyxw);
 	FRMR_INFO_SET_PDU_INVALID_Nr_IND(frmr_info, vzyxw);
 	FRMR_INFO_SET_PDU_INVALID_Ns_IND(frmr_info, vzyxw);
-	skb_put(skb, 5);
+	skb_put(skb, sizeof(struct llc_frmr_info));
 }
 
 /**

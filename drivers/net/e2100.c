@@ -51,6 +51,8 @@ static const char version[] =
 
 #include "8390.h"
 
+#define DRV_NAME "e2100"
+
 static int e21_probe_list[] = {0x300, 0x280, 0x380, 0x220, 0};
 
 /* Offsets from the base_addr.
@@ -70,7 +72,7 @@ static int e21_probe_list[] = {0x300, 0x280, 0x380, 0x220, 0};
 #define E21_SAPROM		0x10	/* Offset to station address data. */
 #define E21_IO_EXTENT	 0x20
 
-static inline void mem_on(short port, volatile char *mem_base,
+static inline void mem_on(short port, volatile char __iomem *mem_base,
 						  unsigned char start_page )
 {
 	/* This is a little weird: set the shared memory window by doing a
@@ -95,7 +97,6 @@ static inline void mem_off(short port)
 #define E21_BIG_RX_STOP_PG	0xF0	/* Last page +1 of RX ring */
 #define E21_TX_START_PG		E21_RX_STOP_PG	/* First page of TX buffer */
 
-int e2100_probe(struct net_device *dev);
 static int e21_probe1(struct net_device *dev, int ioaddr);
 
 static int e21_open(struct net_device *dev);
@@ -106,10 +107,10 @@ static void e21_block_output(struct net_device *dev, int count,
 							 const unsigned char *buf, int start_page);
 static void e21_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 							int ring_page);
-
+static int e21_open(struct net_device *dev);
 static int e21_close(struct net_device *dev);
 
-
+
 /*  Probe for the E2100 series ethercards.  These cards have an 8390 at the
 	base address and the station address at both offset 0x10 and 0x18.  I read
 	the station address from offset 0x18 to avoid the dataport of NE2000
@@ -117,24 +118,63 @@ static int e21_close(struct net_device *dev);
 	station address).
  */
 
-int  __init e2100_probe(struct net_device *dev)
+static int  __init do_e2100_probe(struct net_device *dev)
 {
 	int *port;
 	int base_addr = dev->base_addr;
-
-	SET_MODULE_OWNER(dev);
+	int irq = dev->irq;
 
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return e21_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
 		return -ENXIO;
 
-	for (port = e21_probe_list; *port; port++)
+	for (port = e21_probe_list; *port; port++) {
+		dev->irq = irq;
 		if (e21_probe1(dev, *port) == 0)
 			return 0;
+	}
 
 	return -ENODEV;
 }
+
+#ifndef MODULE
+struct net_device * __init e2100_probe(int unit)
+{
+	struct net_device *dev = alloc_ei_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_e2100_probe(dev);
+	if (err)
+		goto out;
+	return dev;
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
+
+static const struct net_device_ops e21_netdev_ops = {
+	.ndo_open		= e21_open,
+	.ndo_stop		= e21_close,
+
+	.ndo_start_xmit		= ei_start_xmit,
+	.ndo_tx_timeout		= ei_tx_timeout,
+	.ndo_get_stats		= ei_get_stats,
+	.ndo_set_multicast_list = ei_set_multicast_list,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller 	= ei_poll,
+#endif
+};
 
 static int __init e21_probe1(struct net_device *dev, int ioaddr)
 {
@@ -142,13 +182,13 @@ static int __init e21_probe1(struct net_device *dev, int ioaddr)
 	unsigned char *station_addr = dev->dev_addr;
 	static unsigned version_printed;
 
-	if (!request_region(ioaddr, E21_IO_EXTENT, dev->name))
+	if (!request_region(ioaddr, E21_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
 
 	/* First check the station address for the Ctron prefix. */
-	if (inb(ioaddr + E21_SAPROM + 0) != 0x00
-		|| inb(ioaddr + E21_SAPROM + 1) != 0x00
-		|| inb(ioaddr + E21_SAPROM + 2) != 0x1d) {
+	if (inb(ioaddr + E21_SAPROM + 0) != 0x00 ||
+	    inb(ioaddr + E21_SAPROM + 1) != 0x00 ||
+	    inb(ioaddr + E21_SAPROM + 2) != 0x1d) {
 		retval = -ENODEV;
 		goto out;
 	}
@@ -175,24 +215,15 @@ static int __init e21_probe1(struct net_device *dev, int ioaddr)
 	for (i = 0; i < 6; i++)
 		printk(" %02X", station_addr[i]);
 
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk (" unable to get memory for dev->priv.\n");
-		retval = -ENOMEM;
-		goto out;
-	}
-
 	if (dev->irq < 2) {
-		int irqlist[] = {15,11,10,12,5,9,3,4}, i;
-		for (i = 0; i < 8; i++)
+		static const int irqlist[] = {15, 11, 10, 12, 5, 9, 3, 4};
+		for (i = 0; i < ARRAY_SIZE(irqlist); i++)
 			if (request_irq (irqlist[i], NULL, 0, "bogus", NULL) != -EBUSY) {
 				dev->irq = irqlist[i];
 				break;
 			}
-		if (i >= 8) {
+		if (i >= ARRAY_SIZE(irqlist)) {
 			printk(" unable to get IRQ %d.\n", dev->irq);
-			kfree(dev->priv);
-			dev->priv = NULL;
 			retval = -EAGAIN;
 			goto out;
 		}
@@ -229,6 +260,13 @@ static int __init e21_probe1(struct net_device *dev, int ioaddr)
 	if (dev->mem_start == 0)
 		dev->mem_start = 0xd0000;
 
+	ei_status.mem = ioremap(dev->mem_start, 2*1024);
+	if (!ei_status.mem) {
+		printk("unable to remap memory\n");
+		retval = -EAGAIN;
+		goto out;
+	}
+
 #ifdef notdef
 	/* These values are unused.  The E2100 has a 2K window into the packet
 	   buffer.  The window can be set to start on any page boundary. */
@@ -243,10 +281,13 @@ static int __init e21_probe1(struct net_device *dev, int ioaddr)
 	ei_status.block_input = &e21_block_input;
 	ei_status.block_output = &e21_block_output;
 	ei_status.get_8390_hdr = &e21_get_8390_hdr;
-	dev->open = &e21_open;
-	dev->stop = &e21_close;
+
+	dev->netdev_ops = &e21_netdev_ops;
 	NS8390_init(dev, 0);
 
+	retval = register_netdev(dev);
+	if (retval)
+		goto out;
 	return 0;
 out:
 	release_region(ioaddr, E21_IO_EXTENT);
@@ -287,7 +328,6 @@ e21_reset_8390(struct net_device *dev)
 	/* Set up the ASIC registers, just in case something changed them. */
 
 	if (ei_debug > 1) printk("reset done\n");
-	return;
 }
 
 /* Grab the 8390 specific header. We put the 2k window so the header page
@@ -298,7 +338,7 @@ e21_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_pag
 {
 
 	short ioaddr = dev->base_addr;
-	char *shared_mem = (char *)dev->mem_start;
+	char __iomem *shared_mem = ei_status.mem;
 
 	mem_on(ioaddr, shared_mem, ring_page);
 
@@ -321,12 +361,11 @@ static void
 e21_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	short ioaddr = dev->base_addr;
-	char *shared_mem = (char *)dev->mem_start;
+	char __iomem *shared_mem = ei_status.mem;
 
 	mem_on(ioaddr, shared_mem, (ring_offset>>8));
 
-	/* Packet is always in one chunk -- we can copy + cksum. */
-	eth_io_copy_and_sum(skb, dev->mem_start + (ring_offset & 0xff), count, 0);
+	memcpy_fromio(skb->data, ei_status.mem + (ring_offset & 0xff), count);
 
 	mem_off(ioaddr);
 }
@@ -336,7 +375,7 @@ e21_block_output(struct net_device *dev, int count, const unsigned char *buf,
 				 int start_page)
 {
 	short ioaddr = dev->base_addr;
-	volatile char *shared_mem = (char *)dev->mem_start;
+	volatile char __iomem *shared_mem = ei_status.mem;
 
 	/* Set the shared memory window start by doing a read, with the low address
 	   bits specifying the starting page. */
@@ -373,19 +412,19 @@ e21_close(struct net_device *dev)
 	return 0;
 }
 
-
+
 #ifdef MODULE
 #define MAX_E21_CARDS	4	/* Max number of E21 cards per module */
-static struct net_device dev_e21[MAX_E21_CARDS];
+static struct net_device *dev_e21[MAX_E21_CARDS];
 static int io[MAX_E21_CARDS];
 static int irq[MAX_E21_CARDS];
 static int mem[MAX_E21_CARDS];
 static int xcvr[MAX_E21_CARDS];		/* choose int. or ext. xcvr */
 
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
-MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
-MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(mem, int, NULL, 0);
+module_param_array(xcvr, int, NULL, 0);
 MODULE_PARM_DESC(io, "I/O base address(es)");
 MODULE_PARM_DESC(irq, "IRQ number(s)");
 MODULE_PARM_DESC(mem, " memory base address(es)");
@@ -395,47 +434,55 @@ MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
-int
-init_module(void)
+
+int __init init_module(void)
 {
+	struct net_device *dev;
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_E21_CARDS; this_dev++) {
-		struct net_device *dev = &dev_e21[this_dev];
-		dev->irq = irq[this_dev];
-		dev->base_addr = io[this_dev];
-		dev->mem_start = mem[this_dev];
-		dev->mem_end = xcvr[this_dev];	/* low 4bits = xcvr sel. */
-		dev->init = e2100_probe;
 		if (io[this_dev] == 0)  {
 			if (this_dev != 0) break; /* only autoprobe 1st one */
 			printk(KERN_NOTICE "e2100.c: Presently autoprobing (not recommended) for a single card.\n");
 		}
-		if (register_netdev(dev) != 0) {
-			printk(KERN_WARNING "e2100.c: No E2100 card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) {	/* Got at least one. */
-				return 0;
-			}
-			return -ENXIO;
+		dev = alloc_ei_netdev();
+		if (!dev)
+			break;
+		dev->irq = irq[this_dev];
+		dev->base_addr = io[this_dev];
+		dev->mem_start = mem[this_dev];
+		dev->mem_end = xcvr[this_dev];	/* low 4bits = xcvr sel. */
+		if (do_e2100_probe(dev) == 0) {
+			dev_e21[found++] = dev;
+			continue;
 		}
-		found++;
+		free_netdev(dev);
+		printk(KERN_WARNING "e2100.c: No E2100 card found (i/o = 0x%x).\n", io[this_dev]);
+		break;
 	}
-	return 0;
+	if (found)
+		return 0;
+	return -ENXIO;
 }
 
-void
+static void cleanup_card(struct net_device *dev)
+{
+	/* NB: e21_close() handles free_irq */
+	iounmap(ei_status.mem);
+	release_region(dev->base_addr, E21_IO_EXTENT);
+}
+
+void __exit
 cleanup_module(void)
 {
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_E21_CARDS; this_dev++) {
-		struct net_device *dev = &dev_e21[this_dev];
-		if (dev->priv != NULL) {
-			void *priv = dev->priv;
-			/* NB: e21_close() handles free_irq */
-			release_region(dev->base_addr, E21_IO_EXTENT);
+		struct net_device *dev = dev_e21[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
-			kfree(priv);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }

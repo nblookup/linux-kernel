@@ -16,6 +16,8 @@
 #include <linux/list.h>
 #include <linux/agp_backend.h>
 #include <linux/fb.h>
+#include <linux/i2c.h>
+#include <linux/i2c-algo-bit.h>
 #include <video/vga.h>
 
 /* Fence */
@@ -130,7 +132,7 @@
 /* Masks (AND ops) and OR's */
 #define FB_START_MASK               (0x3f << (32 - 6))
 #define MMIO_ADDR_MASK              (0x1FFF << (32 - 13))
-#define FREQ_MASK                   0x1EF
+#define FREQ_MASK                   (1 << 4)
 #define SCR_OFF                     0x20
 #define DRAM_ON                     0x08            
 #define DRAM_OFF                    0xE7
@@ -222,7 +224,7 @@ struct mode_registers {
 
 struct heap_data {
         unsigned long physical;
-	__u8 *virtual;
+	__u8 __iomem *virtual;
 	u32 offset;
 	u32 size;
 };	
@@ -240,6 +242,15 @@ struct state_registers {
 	u8 cr39, cr41, cr70, sr01, msr;
 };
 
+struct i810fb_par;
+
+struct i810fb_i2c_chan {
+	struct i810fb_par *par;
+	struct i2c_adapter adapter;
+	struct i2c_algo_bit_data algo;
+	unsigned long ddc_base;
+};
+
 struct i810fb_par {
 	struct mode_registers    regs;
 	struct state_registers   hw_state;
@@ -251,12 +262,13 @@ struct i810fb_par {
 	struct heap_data         iring;
 	struct heap_data         cursor_heap;
 	struct vgastate          state;
-	drm_agp_t                *drm_agp;
-	atomic_t                 use_count;
-	u32 pseudo_palette[17];
-	u32 pci_state[16];
+	struct i810fb_i2c_chan   chan[3];
+	struct mutex		 open_lock;
+	unsigned int		 use_count;
+	u32 pseudo_palette[16];
 	unsigned long mmio_start_phys;
-	u8 *mmio_start_virtual;
+	u8 __iomem *mmio_start_virtual;
+	u8 *edid;
 	u32 pitch;
 	u32 pixconf;
 	u32 watermark;
@@ -268,6 +280,7 @@ struct i810fb_par {
 	u32 blit_bpp;
 	u32 ovract;
 	u32 cur_state;
+	u32 ddc_num;
 	int mtrr_reg;
 	u16 bltcntl;
 	u8 interlace;

@@ -10,8 +10,10 @@ Table of contents
 - Features
 - Supported mount options
 - Known bugs and (mis-)features
-- Using Software RAID with NTFS
-- Limitiations when using the MD driver
+- Using NTFS volume and stripe sets
+  - The Device-Mapper driver
+  - The Software RAID / MD driver
+  - Limitations when using the MD driver
 - ChangeLog
 
 
@@ -19,7 +21,7 @@ Overview
 ========
 
 Linux-NTFS comes with a number of user-space programs known as ntfsprogs.
-These include mkntfs, a full-featured ntfs file system format utility,
+These include mkntfs, a full-featured ntfs filesystem format utility,
 ntfsundelete used for recovering files that were unintentionally deleted
 from an NTFS volume and ntfsresize which is used to resize an NTFS partition.
 See the web site for more information.
@@ -30,7 +32,7 @@ fault-tolerance, encryption or journalling) and very limited, but safe, write
 support.
 
 For fault tolerance and raid support (i.e. volume and stripe sets), you can
-use the kernel's Software RAID / MD driver. See section "Using Software RAID
+use the kernel's Software RAID / MD driver.  See section "Using Software RAID
 with NTFS" for details.
 
 
@@ -38,19 +40,24 @@ Web site
 ========
 
 There is plenty of additional information on the linux-ntfs web site
-at http://linux-ntfs.sourceforge.net/
+at http://www.linux-ntfs.org/
 
 The web site has a lot of additional information, such as a comprehensive
-FAQ, documentation on the NTFS on-disk format, informaiton on the Linux-NTFS
+FAQ, documentation on the NTFS on-disk format, information on the Linux-NTFS
 userspace utilities, etc.
 
 
 Features
 ========
 
-- This is a complete rewrite of the NTFS driver that used to be in the kernel.
-  This new driver implements NTFS read support and is functionally equivalent
-  to the old ntfs driver.
+- This is a complete rewrite of the NTFS driver that used to be in the 2.4 and
+  earlier kernels.  This new driver implements NTFS read support and is
+  functionally equivalent to the old ntfs driver and it also implements limited
+  write support.  The biggest limitation at present is that files/directories
+  cannot be created or deleted.  See below for the list of write features that
+  are so far supported.  Another limitation is that writing to compressed files
+  is not implemented at all.  Also, neither read nor write access to encrypted
+  files is so far implemented.
 - The new driver has full support for sparse files on NTFS 3.x volumes which
   the old driver isn't happy with.
 - The new driver supports execution of binaries due to mmap() now being
@@ -64,14 +71,32 @@ Features
 	time find . -type f -exec md5sum "{}" \;
   run three times in sequence with each driver (after a reboot) on a 1.4GiB
   NTFS partition, showed the new driver to be 20% faster in total time elapsed
-  (from 9:43 minutes on average down to 7:53). The time spent in user space
+  (from 9:43 minutes on average down to 7:53).  The time spent in user space
   was unchanged but the time spent in the kernel was decreased by a factor of
   2.5 (from 85 CPU seconds down to 33).
-- The driver does not support short file names in general. For backwards
+- The driver does not support short file names in general.  For backwards
   compatibility, we implement access to files using their short file names if
-  they exist. The driver will not create short file names however, and a rename
-  will discard any existing short file name.
-
+  they exist.  The driver will not create short file names however, and a
+  rename will discard any existing short file name.
+- The new driver supports exporting of mounted NTFS volumes via NFS.
+- The new driver supports async io (aio).
+- The new driver supports fsync(2), fdatasync(2), and msync(2).
+- The new driver supports readv(2) and writev(2).
+- The new driver supports access time updates (including mtime and ctime).
+- The new driver supports truncate(2) and open(2) with O_TRUNC.  But at present
+  only very limited support for highly fragmented files, i.e. ones which have
+  their data attribute split across multiple extents, is included.  Another
+  limitation is that at present truncate(2) will never create sparse files,
+  since to mark a file sparse we need to modify the directory entry for the
+  file and we do not implement directory modifications yet.
+- The new driver supports write(2) which can both overwrite existing data and
+  extend the file size so that you can write beyond the existing data.  Also,
+  writing into sparse regions is supported and the holes are filled in with
+  clusters.  But at present only limited support for highly fragmented files,
+  i.e. ones which have their data attribute split across multiple extents, is
+  included.  Another limitation is that write(2) will never create sparse
+  files, since to mark a file sparse we need to modify the directory entry for
+  the file and we do not implement directory modifications yet.
 
 Supported mount options
 =======================
@@ -142,7 +167,14 @@ case_sensitive=<BOOL>	If case_sensitive is specified, treat all file names as
 			name, if it exists.  If case_sensitive, you will need
 			to provide the correct case of the short file name.
 
-errors=opt		What to do when critical file system errors are found.
+disable_sparse=<BOOL>	If disable_sparse is specified, creation of sparse
+			regions, i.e. holes, inside files is disabled for the
+			volume (for the duration of this mount only).  By
+			default, creation of sparse regions is enabled, which
+			is consistent with the behaviour of traditional Unix
+			filesystems.
+
+errors=opt		What to do when critical filesystem errors are found.
 			Following values can be used for "opt":
 			  continue: DEFAULT, try to clean-up as much as
 				    possible, e.g. marking a corrupt inode as
@@ -194,21 +226,171 @@ Please send bug reports/comments/feedback/abuse to the Linux-NTFS development
 list at sourceforge: linux-ntfs-dev@lists.sourceforge.net
 
 
-Using Software RAID with NTFS
-=============================
+Using NTFS volume and stripe sets
+=================================
 
-For support of volume and stripe sets, use the kernel's Software RAID / MD
-driver and set up your /etc/raidtab appropriately (see man 5 raidtab).
+For support of volume and stripe sets, you can either use the kernel's
+Device-Mapper driver or the kernel's Software RAID / MD driver.  The former is
+the recommended one to use for linear raid.  But the latter is required for
+raid level 5.  For striping and mirroring, either driver should work fine.
+
+
+The Device-Mapper driver
+------------------------
+
+You will need to create a table of the components of the volume/stripe set and
+how they fit together and load this into the kernel using the dmsetup utility
+(see man 8 dmsetup).
+
+Linear volume sets, i.e. linear raid, has been tested and works fine.  Even
+though untested, there is no reason why stripe sets, i.e. raid level 0, and
+mirrors, i.e. raid level 1 should not work, too.  Stripes with parity, i.e.
+raid level 5, unfortunately cannot work yet because the current version of the
+Device-Mapper driver does not support raid level 5.  You may be able to use the
+Software RAID / MD driver for raid level 5, see the next section for details.
+
+To create the table describing your volume you will need to know each of its
+components and their sizes in sectors, i.e. multiples of 512-byte blocks.
+
+For NT4 fault tolerant volumes you can obtain the sizes using fdisk.  So for
+example if one of your partitions is /dev/hda2 you would do:
+
+$ fdisk -ul /dev/hda
+
+Disk /dev/hda: 81.9 GB, 81964302336 bytes
+255 heads, 63 sectors/track, 9964 cylinders, total 160086528 sectors
+Units = sectors of 1 * 512 = 512 bytes
+
+   Device Boot      Start         End      Blocks   Id  System
+   /dev/hda1   *          63     4209029     2104483+  83  Linux
+   /dev/hda2         4209030    37768814    16779892+  86  NTFS
+   /dev/hda3        37768815    46170809     4200997+  83  Linux
+
+And you would know that /dev/hda2 has a size of 37768814 - 4209030 + 1 =
+33559785 sectors.
+
+For Win2k and later dynamic disks, you can for example use the ldminfo utility
+which is part of the Linux LDM tools (the latest version at the time of
+writing is linux-ldm-0.0.8.tar.bz2).  You can download it from:
+	http://www.linux-ntfs.org/
+Simply extract the downloaded archive (tar xvjf linux-ldm-0.0.8.tar.bz2), go
+into it (cd linux-ldm-0.0.8) and change to the test directory (cd test).  You
+will find the precompiled (i386) ldminfo utility there.  NOTE: You will not be
+able to compile this yourself easily so use the binary version!
+
+Then you would use ldminfo in dump mode to obtain the necessary information:
+
+$ ./ldminfo --dump /dev/hda
+
+This would dump the LDM database found on /dev/hda which describes all of your
+dynamic disks and all the volumes on them.  At the bottom you will see the
+VOLUME DEFINITIONS section which is all you really need.  You may need to look
+further above to determine which of the disks in the volume definitions is
+which device in Linux.  Hint: Run ldminfo on each of your dynamic disks and
+look at the Disk Id close to the top of the output for each (the PRIVATE HEADER
+section).  You can then find these Disk Ids in the VBLK DATABASE section in the
+<Disk> components where you will get the LDM Name for the disk that is found in
+the VOLUME DEFINITIONS section.
+
+Note you will also need to enable the LDM driver in the Linux kernel.  If your
+distribution did not enable it, you will need to recompile the kernel with it
+enabled.  This will create the LDM partitions on each device at boot time.  You
+would then use those devices (for /dev/hda they would be /dev/hda1, 2, 3, etc)
+in the Device-Mapper table.
+
+You can also bypass using the LDM driver by using the main device (e.g.
+/dev/hda) and then using the offsets of the LDM partitions into this device as
+the "Start sector of device" when creating the table.  Once again ldminfo would
+give you the correct information to do this.
+
+Assuming you know all your devices and their sizes things are easy.
+
+For a linear raid the table would look like this (note all values are in
+512-byte sectors):
+
+--- cut here ---
+# Offset into	Size of this	Raid type	Device		Start sector
+# volume	device						of device
+0		1028161		linear		/dev/hda1	0
+1028161		3903762		linear		/dev/hdb2	0
+4931923		2103211		linear		/dev/hdc1	0
+--- cut here ---
+
+For a striped volume, i.e. raid level 0, you will need to know the chunk size
+you used when creating the volume.  Windows uses 64kiB as the default, so it
+will probably be this unless you changes the defaults when creating the array.
+
+For a raid level 0 the table would look like this (note all values are in
+512-byte sectors):
+
+--- cut here ---
+# Offset   Size	    Raid     Number   Chunk  1st        Start	2nd	  Start
+# into     of the   type     of	      size   Device	in	Device	  in
+# volume   volume	     stripes			device		  device
+0	   2056320  striped  2	      128    /dev/hda1	0	/dev/hdb1 0
+--- cut here ---
+
+If there are more than two devices, just add each of them to the end of the
+line.
+
+Finally, for a mirrored volume, i.e. raid level 1, the table would look like
+this (note all values are in 512-byte sectors):
+
+--- cut here ---
+# Ofs Size   Raid   Log  Number Region Should Number Source  Start Target Start
+# in  of the type   type of log size   sync?  of     Device  in    Device in
+# vol volume		 params		     mirrors	     Device	  Device
+0    2056320 mirror core 2	16     nosync 2	   /dev/hda1 0   /dev/hdb1 0
+--- cut here ---
+
+If you are mirroring to multiple devices you can specify further targets at the
+end of the line.
+
+Note the "Should sync?" parameter "nosync" means that the two mirrors are
+already in sync which will be the case on a clean shutdown of Windows.  If the
+mirrors are not clean, you can specify the "sync" option instead of "nosync"
+and the Device-Mapper driver will then copy the entirety of the "Source Device"
+to the "Target Device" or if you specified multiple target devices to all of
+them.
+
+Once you have your table, save it in a file somewhere (e.g. /etc/ntfsvolume1),
+and hand it over to dmsetup to work with, like so:
+
+$ dmsetup create myvolume1 /etc/ntfsvolume1
+
+You can obviously replace "myvolume1" with whatever name you like.
+
+If it all worked, you will now have the device /dev/device-mapper/myvolume1
+which you can then just use as an argument to the mount command as usual to
+mount the ntfs volume.  For example:
+
+$ mount -t ntfs -o ro /dev/device-mapper/myvolume1 /mnt/myvol1
+
+(You need to create the directory /mnt/myvol1 first and of course you can use
+anything you like instead of /mnt/myvol1 as long as it is an existing
+directory.)
+
+It is advisable to do the mount read-only to see if the volume has been setup
+correctly to avoid the possibility of causing damage to the data on the ntfs
+volume.
+
+
+The Software RAID / MD driver
+-----------------------------
+
+An alternative to using the Device-Mapper driver is to use the kernel's
+Software RAID / MD driver.  For which you need to set up your /etc/raidtab
+appropriately (see man 5 raidtab).
 
 Linear volume sets, i.e. linear raid, as well as stripe sets, i.e. raid level
-0, have been tested and work fine (though see section "Limitiations when using
+0, have been tested and work fine (though see section "Limitations when using
 the MD driver with NTFS volumes" especially if you want to use linear raid).
 Even though untested, there is no reason why mirrors, i.e. raid level 1, and
 stripes with parity, i.e. raid level 5, should not work, too.
 
 You have to use the "persistent-superblock 0" option for each raid-disk in the
 NTFS volume/stripe you are configuring in /etc/raidtab as the persistent
-superblock used by the MD driver would damange the NTFS volume.
+superblock used by the MD driver would damage the NTFS volume.
 
 Windows by default uses a stripe chunk size of 64k, so you probably want the
 "chunk-size 64k" option for each raid-disk, too.
@@ -225,7 +407,7 @@ raiddev /dev/md0
 	device		/dev/hda5
 	raid-disk	0
 	device		/dev/hdb1
-	raid-disl	1
+	raid-disk	1
 
 For linear raid, just change the raid-level above to "raid-level linear", for
 mirrors, change it to "raid-level 1", and for stripe sets with parity, change
@@ -253,8 +435,8 @@ setup correctly to avoid the possibility of causing damage to the data on the
 ntfs volume.
 
 
-Limitiations when using the MD driver
-=====================================
+Limitations when using the Software RAID / MD driver
+-----------------------------------------------------
 
 Using the md driver will not work properly if any of your NTFS partitions have
 an odd number of sectors.  This is especially important for linear raid as all
@@ -266,12 +448,155 @@ apparent when you try to use the volume again under Windows.
 So when using linear raid, make sure that all your partitions have an even
 number of sectors BEFORE attempting to use it.  You have been warned!
 
+Even better is to simply use the Device-Mapper for linear raid and then you do
+not have this problem with odd numbers of sectors.
+
 
 ChangeLog
 =========
 
 Note, a technical ChangeLog aimed at kernel hackers is in fs/ntfs/ChangeLog.
 
+2.1.30:
+	- Fix writev() (it kept writing the first segment over and over again
+	  instead of moving onto subsequent segments).
+	- Fix crash in ntfs_mft_record_alloc() when mapping the new extent mft
+	  record failed.
+2.1.29:
+	- Fix a deadlock when mounting read-write.
+2.1.28:
+	- Fix a deadlock.
+2.1.27:
+	- Implement page migration support so the kernel can move memory used
+	  by NTFS files and directories around for management purposes.
+	- Add support for writing to sparse files created with Windows XP SP2.
+	- Many minor improvements and bug fixes.
+2.1.26:
+	- Implement support for sector sizes above 512 bytes (up to the maximum
+	  supported by NTFS which is 4096 bytes).
+	- Enhance support for NTFS volumes which were supported by Windows but
+	  not by Linux due to invalid attribute list attribute flags.
+	- A few minor updates and bug fixes.
+2.1.25:
+	- Write support is now extended with write(2) being able to both
+	  overwrite existing file data and to extend files.  Also, if a write
+	  to a sparse region occurs, write(2) will fill in the hole.  Note,
+	  mmap(2) based writes still do not support writing into holes or
+	  writing beyond the initialized size.
+	- Write support has a new feature and that is that truncate(2) and
+	  open(2) with O_TRUNC are now implemented thus files can be both made
+	  smaller and larger.
+	- Note: Both write(2) and truncate(2)/open(2) with O_TRUNC still have
+	  limitations in that they
+	  - only provide limited support for highly fragmented files.
+	  - only work on regular, i.e. uncompressed and unencrypted files.
+	  - never create sparse files although this will change once directory
+	    operations are implemented.
+	- Lots of bug fixes and enhancements across the board.
+2.1.24:
+	- Support journals ($LogFile) which have been modified by chkdsk.  This
+	  means users can boot into Windows after we marked the volume dirty.
+	  The Windows boot will run chkdsk and then reboot.  The user can then
+	  immediately boot into Linux rather than having to do a full Windows
+	  boot first before rebooting into Linux and we will recognize such a
+	  journal and empty it as it is clean by definition.
+	- Support journals ($LogFile) with only one restart page as well as
+	  journals with two different restart pages.  We sanity check both and
+	  either use the only sane one or the more recent one of the two in the
+	  case that both are valid.
+	- Lots of bug fixes and enhancements across the board.
+2.1.23:
+	- Stamp the user space journal, aka transaction log, aka $UsnJrnl, if
+	  it is present and active thus telling Windows and applications using
+	  the transaction log that changes can have happened on the volume
+	  which are not recorded in $UsnJrnl.
+	- Detect the case when Windows has been hibernated (suspended to disk)
+	  and if this is the case do not allow (re)mounting read-write to
+	  prevent data corruption when you boot back into the suspended
+	  Windows session.
+	- Implement extension of resident files using the normal file write
+	  code paths, i.e. most very small files can be extended to be a little
+	  bit bigger but not by much.
+	- Add new mount option "disable_sparse".  (See list of mount options
+	  above for details.)
+	- Improve handling of ntfs volumes with errors and strange boot sectors
+	  in particular.
+	- Fix various bugs including a nasty deadlock that appeared in recent
+	  kernels (around 2.6.11-2.6.12 timeframe).
+2.1.22:
+	- Improve handling of ntfs volumes with errors.
+	- Fix various bugs and race conditions.
+2.1.21:
+	- Fix several race conditions and various other bugs.
+	- Many internal cleanups, code reorganization, optimizations, and mft
+	  and index record writing code rewritten to fit in with the changes.
+	- Update Documentation/filesystems/ntfs.txt with instructions on how to
+	  use the Device-Mapper driver with NTFS ftdisk/LDM raid.
+2.1.20:
+	- Fix two stupid bugs introduced in 2.1.18 release.
+2.1.19:
+	- Minor bugfix in handling of the default upcase table.
+	- Many internal cleanups and improvements.  Many thanks to Linus
+	  Torvalds and Al Viro for the help and advice with the sparse
+	  annotations and cleanups.
+2.1.18:
+	- Fix scheduling latencies at mount time.  (Ingo Molnar)
+	- Fix endianness bug in a little traversed portion of the attribute
+	  lookup code.
+2.1.17:
+	- Fix bugs in mount time error code paths.
+2.1.16:
+	- Implement access time updates (including mtime and ctime).
+	- Implement fsync(2), fdatasync(2), and msync(2) system calls.
+	- Enable the readv(2) and writev(2) system calls.
+	- Enable access via the asynchronous io (aio) API by adding support for
+	  the aio_read(3) and aio_write(3) functions.
+2.1.15:
+	- Invalidate quotas when (re)mounting read-write.
+	  NOTE:  This now only leave user space journalling on the side.  (See
+	  note for version 2.1.13, below.)
+2.1.14:
+	- Fix an NFSd caused deadlock reported by several users.
+2.1.13:
+	- Implement writing of inodes (access time updates are not implemented
+	  yet so mounting with -o noatime,nodiratime is enforced).
+	- Enable writing out of resident files so you can now overwrite any
+	  uncompressed, unencrypted, nonsparse file as long as you do not
+	  change the file size.
+	- Add housekeeping of ntfs system files so that ntfsfix no longer needs
+	  to be run after writing to an NTFS volume.
+	  NOTE:  This still leaves quota tracking and user space journalling on
+	  the side but they should not cause data corruption.  In the worst
+	  case the charged quotas will be out of date ($Quota) and some
+	  userspace applications might get confused due to the out of date
+	  userspace journal ($UsnJrnl).
+2.1.12:
+	- Fix the second fix to the decompression engine from the 2.1.9 release
+	  and some further internals cleanups.
+2.1.11:
+	- Driver internal cleanups.
+2.1.10:
+	- Force read-only (re)mounting of volumes with unsupported volume
+	  flags and various cleanups.
+2.1.9:
+	- Fix two bugs in handling of corner cases in the decompression engine.
+2.1.8:
+	- Read the $MFT mirror and compare it to the $MFT and if the two do not
+	  match, force a read-only mount and do not allow read-write remounts.
+	- Read and parse the $LogFile journal and if it indicates that the
+	  volume was not shutdown cleanly, force a read-only mount and do not
+	  allow read-write remounts.  If the $LogFile indicates a clean
+	  shutdown and a read-write (re)mount is requested, empty $LogFile to
+	  ensure that Windows cannot cause data corruption by replaying a stale
+	  journal after Linux has written to the volume.
+	- Improve time handling so that the NTFS time is fully preserved when
+	  converted to kernel time and only up to 99 nano-seconds are lost when
+	  kernel time is converted to NTFS time.
+2.1.7:
+	- Enable NFS exporting of mounted NTFS volumes.
+2.1.6:
+	- Fix minor bug in handling of compressed directories that fixes the
+	  erroneous "du" and "stat" output people reported.
 2.1.5:
 	- Minor bug fix in attribute list attribute handling that fixes the
 	  I/O errors on "ls" of certain fragmented files found by at least two
@@ -283,7 +608,7 @@ Note, a technical ChangeLog aimed at kernel hackers is in fs/ntfs/ChangeLog.
 	- Major bug fixes for reading files and volumes in corner cases which
 	  were being hit by Windows 2k/XP users.
 2.1.2:
-	- Major bug fixes aleviating the hangs in statfs experienced by some
+	- Major bug fixes alleviating the hangs in statfs experienced by some
 	  users.
 2.1.1:
 	- Update handling of compressed files so people no longer get the

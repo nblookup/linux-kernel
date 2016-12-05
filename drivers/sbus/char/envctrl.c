@@ -1,5 +1,4 @@
-/* $Id: envctrl.c,v 1.25 2002/01/15 09:01:26 davem Exp $
- * envctrl.c: Temperature and Fan monitoring on Machines providing it.
+/* envctrl.c: Temperature and Fan monitoring on Machines providing it.
  *
  * Copyright (C) 1998  Eddie C. Dost  (ecd@skynet.be)
  * Copyright (C) 2000  Vinh Truong    (vinh.truong@eng.sun.com)
@@ -19,25 +18,24 @@
  *              Daniele Bellucci <bellucda@tiscali.it>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/sched.h>
-#include <linux/errno.h>
+#include <linux/init.h>
+#include <linux/kthread.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
-#include <linux/init.h>
 #include <linux/miscdevice.h>
-#include <linux/mm.h>
+#include <linux/kmod.h>
+#include <linux/reboot.h>
 #include <linux/slab.h>
-#include <linux/kernel.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 
-#include <asm/ebus.h>
 #include <asm/uaccess.h>
 #include <asm/envctrl.h>
+#include <asm/io.h>
 
-#define __KERNEL_SYSCALLS__
-static int errno;
-#include <asm/unistd.h>
+#define DRIVER_NAME	"envctrl"
+#define PFX		DRIVER_NAME ": "
 
 #define ENVCTRL_MINOR	162
 
@@ -94,11 +92,11 @@ static int errno;
 #define ENVCTRL_CPUTEMP_MON			1    /* cpu temperature monitor */
 #define ENVCTRL_CPUVOLTAGE_MON	  	2    /* voltage monitor         */
 #define ENVCTRL_FANSTAT_MON  		3    /* fan status monitor      */
-#define ENVCTRL_ETHERTEMP_MON		4    /* ethernet temperarture */
+#define ENVCTRL_ETHERTEMP_MON		4    /* ethernet temperature */
 					     /* monitor                     */
 #define ENVCTRL_VOLTAGESTAT_MON	  	5    /* voltage status monitor  */
 #define ENVCTRL_MTHRBDTEMP_MON		6    /* motherboard temperature */
-#define ENVCTRL_SCSITEMP_MON		7    /* scsi temperarture */
+#define ENVCTRL_SCSITEMP_MON		7    /* scsi temperature */
 #define ENVCTRL_GLOBALADDR_MON		8    /* global address */
 
 /* Child device type.
@@ -130,10 +128,8 @@ static int errno;
  */
 #define ENVCTRL_CPCI_IGNORED_NODE		0x70
 
-struct pcf8584_reg {
-	 unsigned char data;
-	 unsigned char csr;
-};
+#define PCF8584_DATA	0x00
+#define PCF8584_CSR	0x01
 
 /* Each child device can be monitored by up to PCF8584_MAX_CHANNELS.
  * Property of a port or channel as defined by the firmware.
@@ -175,7 +171,7 @@ struct i2c_child_t {
 	char mon_type[PCF8584_MAX_CHANNELS];
 };
 
-volatile static struct pcf8584_reg *i2c = NULL;
+static void __iomem *i2c;
 static struct i2c_child_t i2c_childlist[ENVCTRL_MAX_CPU*2];
 static unsigned char chnls_mask[] = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80 };
 static unsigned int warning_temperature = 0;
@@ -184,22 +180,6 @@ static char read_cpu;
 
 /* Forward declarations. */
 static struct i2c_child_t *envctrl_get_i2c_child(unsigned char);
-
-/* Function description: Read a byte from an i2c controller register.
- * Return: A byte from the passed in address.
- */
-static inline unsigned char envctrl_readb(volatile unsigned char *p)
-{
-	return readb(p);
-}
-
-/* Function description: Write a byte to an i2c controller register.
- * Return: Nothing.
- */
-static inline void envctrl_writeb(unsigned char val, volatile unsigned char *p)
-{
-	writeb(val, p);
-}
 
 /* Function Description: Test the PIN bit (Pending Interrupt Not) 
  * 			 to test when serial transmission is completed .
@@ -210,13 +190,13 @@ static void envtrl_i2c_test_pin(void)
 	int limit = 1000000;
 
 	while (--limit > 0) {
-		if (!(envctrl_readb(&i2c->csr) & STATUS_PIN)) 
+		if (!(readb(i2c + PCF8584_CSR) & STATUS_PIN)) 
 			break;
 		udelay(1);
 	} 
 
 	if (limit <= 0)
-		printk(KERN_INFO "envctrl: Pin status will not clear.\n");
+		printk(KERN_INFO PFX "Pin status will not clear.\n");
 }
 
 /* Function Description: Test busy bit.
@@ -228,13 +208,13 @@ static void envctrl_i2c_test_bb(void)
 
 	while (--limit > 0) {
 		/* Busy bit 0 means busy. */
-		if (envctrl_readb(&i2c->csr) & STATUS_BB)
+		if (readb(i2c + PCF8584_CSR) & STATUS_BB)
 			break;
 		udelay(1);
 	} 
 
 	if (limit <= 0)
-		printk(KERN_INFO "envctrl: Busy bit will not clear.\n");
+		printk(KERN_INFO PFX "Busy bit will not clear.\n");
 }
 
 /* Function Description: Send the address for a read access.
@@ -245,20 +225,20 @@ static int envctrl_i2c_read_addr(unsigned char addr)
 	envctrl_i2c_test_bb();
 
 	/* Load address. */
-	envctrl_writeb(addr + 1, &i2c->data);
+	writeb(addr + 1, i2c + PCF8584_DATA);
 
 	envctrl_i2c_test_bb();
 
-	envctrl_writeb(OBD_SEND_START, &i2c->csr);
+	writeb(OBD_SEND_START, i2c + PCF8584_CSR);
 
 	/* Wait for PIN. */
 	envtrl_i2c_test_pin();
 
 	/* CSR 0 means acknowledged. */
-	if (!(envctrl_readb(&i2c->csr) & STATUS_LRB)) {
-		return envctrl_readb(&i2c->data);
+	if (!(readb(i2c + PCF8584_CSR) & STATUS_LRB)) {
+		return readb(i2c + PCF8584_DATA);
 	} else {
-		envctrl_writeb(OBD_SEND_STOP, &i2c->csr);
+		writeb(OBD_SEND_STOP, i2c + PCF8584_CSR);
 		return 0;
 	}
 }
@@ -269,10 +249,10 @@ static int envctrl_i2c_read_addr(unsigned char addr)
 static void envctrl_i2c_write_addr(unsigned char addr)
 {
 	envctrl_i2c_test_bb();
-	envctrl_writeb(addr, &i2c->data);
+	writeb(addr, i2c + PCF8584_DATA);
 
 	/* Generate Start condition. */
-	envctrl_writeb(OBD_SEND_START, &i2c->csr);
+	writeb(OBD_SEND_START, i2c + PCF8584_CSR);
 }
 
 /* Function Description: Read 1 byte of data from addr 
@@ -282,8 +262,8 @@ static void envctrl_i2c_write_addr(unsigned char addr)
 static unsigned char envctrl_i2c_read_data(void)
 {
 	envtrl_i2c_test_pin();
-	envctrl_writeb(CONTROL_ES0, &i2c->csr);  /* Send neg ack. */
-	return envctrl_readb(&i2c->data);
+	writeb(CONTROL_ES0, i2c + PCF8584_CSR);  /* Send neg ack. */
+	return readb(i2c + PCF8584_DATA);
 }
 
 /* Function Description: Instruct the device which port to read data from.  
@@ -292,7 +272,7 @@ static unsigned char envctrl_i2c_read_data(void)
 static void envctrl_i2c_write_data(unsigned char port)
 {
 	envtrl_i2c_test_pin();
-	envctrl_writeb(port, &i2c->data);
+	writeb(port, i2c + PCF8584_DATA);
 }
 
 /* Function Description: Generate Stop condition after last byte is sent.
@@ -301,7 +281,7 @@ static void envctrl_i2c_write_data(unsigned char port)
 static void envctrl_i2c_stop(void)
 {
 	envtrl_i2c_test_pin();
-	envctrl_writeb(OBD_SEND_STOP, &i2c->csr);
+	writeb(OBD_SEND_STOP, i2c + PCF8584_CSR);
 }
 
 /* Function Description: Read adc device.
@@ -323,7 +303,7 @@ static unsigned char envctrl_i2c_read_8591(unsigned char addr, unsigned char por
 	envctrl_i2c_read_data();
 	envctrl_i2c_stop();
 
-	return envctrl_readb(&i2c->data);
+	return readb(i2c + PCF8584_DATA);
 }
 
 /* Function Description: Read gpio device.
@@ -556,7 +536,7 @@ static unsigned char envctrl_i2c_voltage_status(struct i2c_child_t *pchild,
  * Return: Number of read bytes. 0 for error.
  */
 static ssize_t
-envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
+envctrl_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
 	struct i2c_child_t *pchild;
 	unsigned char data[10];
@@ -574,7 +554,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 
 		data[0] = (unsigned char)(warning_temperature);
 		ret = 1;
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -584,7 +564,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 
 		data[0] = (unsigned char)(shutdown_temperature);
 		ret = 1;
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -592,7 +572,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 		if (!(pchild = envctrl_get_i2c_child(ENVCTRL_MTHRBDTEMP_MON)))
 			return 0;
 		ret = envctrl_read_noncpu_info(pchild, ENVCTRL_MTHRBDTEMP_MON, data);
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -602,7 +582,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 		ret = envctrl_read_cpu_info(read_cpu, pchild, ENVCTRL_CPUTEMP_MON, data);
 
 		/* Reset cpu to the default cpu0. */
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -612,7 +592,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 		ret = envctrl_read_cpu_info(read_cpu, pchild, ENVCTRL_CPUVOLTAGE_MON, data);
 
 		/* Reset cpu to the default cpu0. */
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -620,7 +600,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 		if (!(pchild = envctrl_get_i2c_child(ENVCTRL_SCSITEMP_MON)))
 			return 0;
 		ret = envctrl_read_noncpu_info(pchild, ENVCTRL_SCSITEMP_MON, data);
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -628,7 +608,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 		if (!(pchild = envctrl_get_i2c_child(ENVCTRL_ETHERTEMP_MON)))
 			return 0;
 		ret = envctrl_read_noncpu_info(pchild, ENVCTRL_ETHERTEMP_MON, data);
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -637,7 +617,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 			return 0;
 		data[0] = envctrl_i2c_read_8574(pchild->addr);
 		ret = envctrl_i2c_fan_status(pchild,data[0], data);
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 	
@@ -646,7 +626,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 			return 0;
 		data[0] = envctrl_i2c_read_8574(pchild->addr);
 		ret = envctrl_i2c_globaladdr(pchild, data[0], data);
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -657,7 +637,7 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 				return 0;
 		data[0] = envctrl_i2c_read_8574(pchild->addr);
 		ret = envctrl_i2c_voltage_status(pchild, data[0], data);
-		if (copy_to_user((unsigned char *)buf, data, ret))
+		if (copy_to_user(buf, data, ret))
 			ret = -EFAULT;
 		break;
 
@@ -672,11 +652,10 @@ envctrl_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 /* Function Description: Command what to read.  Mapped to user ioctl().
  * Return: Gives 0 for implemented commands, -EINVAL otherwise.
  */
-static int
-envctrl_ioctl(struct inode *inode, struct file *file,
-	      unsigned int cmd, unsigned long arg)
+static long
+envctrl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	char *infobuf;
+	char __user *infobuf;
 
 	switch (cmd) {
 	case ENVCTRL_RD_WARNING_TEMPERATURE:
@@ -695,7 +674,7 @@ envctrl_ioctl(struct inode *inode, struct file *file,
 		/* Check to see if application passes in any cpu number,
 		 * the default is cpu0.
 		 */
-		infobuf = (char *) arg;
+		infobuf = (char __user *) arg;
 		if (infobuf == NULL) {
 			read_cpu = 0;
 		}else {
@@ -719,7 +698,7 @@ envctrl_ioctl(struct inode *inode, struct file *file,
 static int
 envctrl_open(struct inode *inode, struct file *file)
 {
-	file->private_data = 0;
+	file->private_data = NULL;
 	return 0;
 }
 
@@ -732,12 +711,16 @@ envctrl_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static struct file_operations envctrl_fops = {
-	.owner =	THIS_MODULE,
-	.read =		envctrl_read,
-	.ioctl =	envctrl_ioctl,
-	.open =		envctrl_open,
-	.release =	envctrl_release,
+static const struct file_operations envctrl_fops = {
+	.owner =		THIS_MODULE,
+	.read =			envctrl_read,
+	.unlocked_ioctl =	envctrl_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl =		envctrl_ioctl,
+#endif
+	.open =			envctrl_open,
+	.release =		envctrl_release,
+	.llseek =		noop_llseek,
 };	
 
 static struct miscdevice envctrl_dev = {
@@ -750,7 +733,7 @@ static struct miscdevice envctrl_dev = {
  * Return: None.
  */
 static void envctrl_set_mon(struct i2c_child_t *pchild,
-			    char *chnl_desc,
+			    const char *chnl_desc,
 			    int chnl_no)
 {
 	/* Firmware only has temperature type.  It does not distinguish
@@ -784,16 +767,14 @@ static void envctrl_set_mon(struct i2c_child_t *pchild,
  *                       decoding tables, monitor type, optional properties.
  * Return: None.
  */
-static void envctrl_init_adc(struct i2c_child_t *pchild, int node)
+static void envctrl_init_adc(struct i2c_child_t *pchild, struct device_node *dp)
 {
-	char chnls_desc[CHANNEL_DESC_SZ];
 	int i = 0, len;
-	char *pos = chnls_desc;
+	const char *pos;
+	const unsigned int *pval;
 
 	/* Firmware describe channels into a stream separated by a '\0'. */
-	len = prom_getproperty(node, "channels-description", chnls_desc,
-			       CHANNEL_DESC_SZ);
-	chnls_desc[CHANNEL_DESC_SZ - 1] = '\0';
+	pos = of_get_property(dp, "channels-description", &len);
 
 	while (len > 0) {
 		int l = strlen(pos) + 1;
@@ -803,10 +784,13 @@ static void envctrl_init_adc(struct i2c_child_t *pchild, int node)
 	}
 
 	/* Get optional properties. */
-        len = prom_getproperty(node, "warning-temp", (char *)&warning_temperature,
-			       sizeof(warning_temperature));
-        len = prom_getproperty(node, "shutdown-temp", (char *)&shutdown_temperature,
-			       sizeof(shutdown_temperature));
+	pval = of_get_property(dp, "warning-temp", NULL);
+	if (pval)
+		warning_temperature = *pval;
+
+	pval = of_get_property(dp, "shutdown-temp", NULL);
+	if (pval)
+		shutdown_temperature = *pval;
 }
 
 /* Function Description: Initialize child device monitoring fan status.
@@ -877,24 +861,20 @@ static void envctrl_init_voltage_status(struct i2c_child_t *pchild)
 /* Function Description: Initialize i2c child device.
  * Return: None.
  */
-static void envctrl_init_i2c_child(struct linux_ebus_child *edev_child,
+static void envctrl_init_i2c_child(struct device_node *dp,
 				   struct i2c_child_t *pchild)
 {
-	int node, len, i, tbls_size = 0;
-
-	node = edev_child->prom_node;
+	int len, i, tbls_size = 0;
+	const void *pval;
 
 	/* Get device address. */
-	len = prom_getproperty(node, "reg",
-			       (char *) &(pchild->addr),
-			       sizeof(pchild->addr));
+	pval = of_get_property(dp, "reg", &len);
+	memcpy(&pchild->addr, pval, len);
 
 	/* Get tables property.  Read firmware temperature tables. */
-	len = prom_getproperty(node, "translation",
-			       (char *) pchild->tblprop_array,
-			       (PCF8584_MAX_CHANNELS *
-				sizeof(struct pcf8584_tblprop)));
-	if (len > 0) {
+	pval = of_get_property(dp, "translation", &len);
+	if (pval && len > 0) {
+		memcpy(pchild->tblprop_array, pval, len);
                 pchild->total_tbls = len / sizeof(struct pcf8584_tblprop);
 		for (i = 0; i < pchild->total_tbls; i++) {
 			if ((pchild->tblprop_array[i].size + pchild->tblprop_array[i].offset) > tbls_size) {
@@ -904,15 +884,15 @@ static void envctrl_init_i2c_child(struct linux_ebus_child *edev_child,
 
                 pchild->tables = kmalloc(tbls_size, GFP_KERNEL);
 		if (pchild->tables == NULL){
-			printk("envctrl: Failed to allocate table.\n");
+			printk(KERN_ERR PFX "Failed to allocate table.\n");
 			return;
 		}
-                len = prom_getproperty(node, "tables",
-				       (char *) pchild->tables, tbls_size);
-                if (len <= 0) {
-			printk("envctrl: Failed to get table.\n");
+		pval = of_get_property(dp, "tables", &len);
+                if (!pval || len <= 0) {
+			printk(KERN_ERR PFX "Failed to get table.\n");
 			return;
 		}
+		memcpy(pchild->tables, pval, len);
 	}
 
 	/* SPARCengine ASM Reference Manual (ref. SMI doc 805-7581-04)
@@ -923,12 +903,11 @@ static void envctrl_init_i2c_child(struct linux_ebus_child *edev_child,
 	 * 'NULL' monitor type.
 	 */
 	if (ENVCTRL_CPCI_IGNORED_NODE == pchild->addr) {
+		struct device_node *root_node;
 		int len;
-		char prop[56];
 
-		len = prom_getproperty(prom_root_node, "name", prop, sizeof(prop));
-		if (0 < len && (0 == strncmp(prop, "SUNW,UltraSPARC-IIi-cEngine", len)))
-		{
+		root_node = of_find_node_by_path("/");
+		if (!strcmp(root_node->name, "SUNW,UltraSPARC-IIi-cEngine")) {
 			for (len = 0; len < PCF8584_MAX_CHANNELS; ++len) {
 				pchild->mon_type[len] = ENVCTRL_NOMON;
 			}
@@ -937,16 +916,14 @@ static void envctrl_init_i2c_child(struct linux_ebus_child *edev_child,
 	}
 
 	/* Get the monitor channels. */
-	len = prom_getproperty(node, "channels-in-use",
-			       (char *) pchild->chnl_array,
-			       (PCF8584_MAX_CHANNELS *
-				sizeof(struct pcf8584_channel)));
+	pval = of_get_property(dp, "channels-in-use", &len);
+	memcpy(pchild->chnl_array, pval, len);
 	pchild->total_chnls = len / sizeof(struct pcf8584_channel);
 
 	for (i = 0; i < pchild->total_chnls; i++) {
 		switch (pchild->chnl_array[i].type) {
 		case PCF8584_TEMP_TYPE:
-			envctrl_init_adc(pchild, node);
+			envctrl_init_adc(pchild, dp);
 			break;
 
 		case PCF8584_GLOBALADDR_TYPE:
@@ -961,7 +938,7 @@ static void envctrl_init_i2c_child(struct linux_ebus_child *edev_child,
 
 		case PCF8584_VOLTAGE_TYPE:
 			if (pchild->i2ctype == I2C_ADC) {
-				envctrl_init_adc(pchild,node);
+				envctrl_init_adc(pchild,dp);
 			} else {
 				envctrl_init_voltage_status(pchild);
 			}
@@ -994,17 +971,15 @@ static struct i2c_child_t *envctrl_get_i2c_child(unsigned char mon_type)
 static void envctrl_do_shutdown(void)
 {
 	static int inprog = 0;
-	static char *envp[] = {	
-		"HOME=/", "TERM=linux", "PATH=/sbin:/usr/sbin:/bin:/usr/bin", NULL };
-	char *argv[] = { 
-		"/sbin/shutdown", "-h", "now", NULL };	
+	int ret;
 
 	if (inprog != 0)
 		return;
 
 	inprog = 1;
 	printk(KERN_CRIT "kenvctrld: WARNING: Shutting down the system now.\n");
-	if (0 > execve("/sbin/shutdown", argv, envp)) {
+	ret = orderly_poweroff(true);
+	if (ret < 0) {
 		printk(KERN_CRIT "kenvctrld: WARNING: system shutdown failed!\n"); 
 		inprog = 0;  /* unlikely to succeed, but we could try again */
 	}
@@ -1020,26 +995,20 @@ static int kenvctrld(void *__unused)
 	struct i2c_child_t *cputemp;
 
 	if (NULL == (cputemp = envctrl_get_i2c_child(ENVCTRL_CPUTEMP_MON))) {
-		printk(KERN_ERR 
-		       "envctrl: kenvctrld unable to monitor CPU temp-- exiting\n");
+		printk(KERN_ERR  PFX
+		       "kenvctrld unable to monitor CPU temp-- exiting\n");
 		return -ENODEV;
 	}
 
-	poll_interval = 5 * HZ; /* TODO env_mon_interval */
+	poll_interval = 5000; /* TODO env_mon_interval */
 
-	daemonize("kenvctrld");
-	allow_signal(SIGKILL);
-
-	kenvctrld_task = current;
-
-	printk(KERN_INFO "envctrl: %s starting...\n", current->comm);
+	printk(KERN_INFO PFX "%s starting...\n", current->comm);
 	for (;;) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule_timeout(poll_interval);
+		msleep_interruptible(poll_interval);
 
-		if(signal_pending(current))
+		if (kthread_should_stop())
 			break;
-
+		
 		for (whichcpu = 0; whichcpu < ENVCTRL_MAX_CPU; ++whichcpu) {
 			if (0 < envctrl_read_cpu_info(whichcpu, cputemp,
 						      ENVCTRL_CPUTEMP_MON,
@@ -1055,74 +1024,52 @@ static int kenvctrld(void *__unused)
 			}
 		}
 	}
-	printk(KERN_INFO "envctrl: %s exiting...\n", current->comm);
+	printk(KERN_INFO PFX "%s exiting...\n", current->comm);
 	return 0;
 }
 
-static int __init envctrl_init(void)
+static int __devinit envctrl_probe(struct platform_device *op)
 {
-#ifdef CONFIG_PCI
-	struct linux_ebus *ebus = NULL;
-	struct linux_ebus_device *edev = NULL;
-	struct linux_ebus_child *edev_child = NULL;
-	int err, i = 0;
+	struct device_node *dp;
+	int index, err;
 
-	for_each_ebus(ebus) {
-		for_each_ebusdev(edev, ebus) {
-			if (!strcmp(edev->prom_name, "bbc")) {
-				/* If we find a boot-bus controller node,
-				 * then this envctrl driver is not for us.
-				 */
-				return -ENODEV;
-			}
+	if (i2c)
+		return -EINVAL;
+
+	i2c = of_ioremap(&op->resource[0], 0, 0x2, DRIVER_NAME);
+	if (!i2c)
+		return -ENOMEM;
+
+	index = 0;
+	dp = op->dev.of_node->child;
+	while (dp) {
+		if (!strcmp(dp->name, "gpio")) {
+			i2c_childlist[index].i2ctype = I2C_GPIO;
+			envctrl_init_i2c_child(dp, &(i2c_childlist[index++]));
+		} else if (!strcmp(dp->name, "adc")) {
+			i2c_childlist[index].i2ctype = I2C_ADC;
+			envctrl_init_i2c_child(dp, &(i2c_childlist[index++]));
 		}
-	}
 
-	/* Traverse through ebus and ebus device list for i2c device and
-	 * adc and gpio nodes.
-	 */
-	for_each_ebus(ebus) {
-		for_each_ebusdev(edev, ebus) {
-			if (!strcmp(edev->prom_name, "i2c")) {
-				i2c = ioremap(	edev->resource[0].start, 
-								sizeof(struct pcf8584_reg));
-				for_each_edevchild(edev, edev_child) {
-					if (!strcmp("gpio", edev_child->prom_name)) {
-						i2c_childlist[i].i2ctype = I2C_GPIO;
-						envctrl_init_i2c_child(edev_child, &(i2c_childlist[i++]));
-					}
-					if (!strcmp("adc", edev_child->prom_name)) {
-						i2c_childlist[i].i2ctype = I2C_ADC;
-						envctrl_init_i2c_child(edev_child, &(i2c_childlist[i++]));
-					}
-				}
-				goto done;
-			}
-		}
-	}
-
-done:
-	if (!edev) {
-		printk("envctrl: I2C device not found.\n");
-		return -ENODEV;
+		dp = dp->sibling;
 	}
 
 	/* Set device address. */
-	envctrl_writeb(CONTROL_PIN, &i2c->csr);
-	envctrl_writeb(PCF8584_ADDRESS, &i2c->data);
+	writeb(CONTROL_PIN, i2c + PCF8584_CSR);
+	writeb(PCF8584_ADDRESS, i2c + PCF8584_DATA);
 
 	/* Set system clock and SCL frequencies. */ 
-	envctrl_writeb(CONTROL_PIN | CONTROL_ES1, &i2c->csr);
-	envctrl_writeb(CLK_4_43 | BUS_CLK_90, &i2c->data);
+	writeb(CONTROL_PIN | CONTROL_ES1, i2c + PCF8584_CSR);
+	writeb(CLK_4_43 | BUS_CLK_90, i2c + PCF8584_DATA);
 
 	/* Enable serial interface. */
-	envctrl_writeb(CONTROL_PIN | CONTROL_ES0 | CONTROL_ACK, &i2c->csr);
+	writeb(CONTROL_PIN | CONTROL_ES0 | CONTROL_ACK, i2c + PCF8584_CSR);
 	udelay(200);
 
 	/* Register the device as a minor miscellaneous device. */
 	err = misc_register(&envctrl_dev);
 	if (err) {
-		printk("envctrl: Unable to get misc minor %d\n",
+		printk(KERN_ERR PFX "Unable to get misc minor %d\n",
 		       envctrl_dev.minor);
 		goto out_iounmap;
 	}
@@ -1131,71 +1078,76 @@ done:
 	 * a next child device, so we decrement before reverse-traversal of
 	 * child devices.
 	 */
-	printk("envctrl: initialized ");
-	for (--i; i >= 0; --i) {
+	printk(KERN_INFO PFX "Initialized ");
+	for (--index; index >= 0; --index) {
 		printk("[%s 0x%lx]%s", 
-			(I2C_ADC == i2c_childlist[i].i2ctype) ? ("adc") : 
-			((I2C_GPIO == i2c_childlist[i].i2ctype) ? ("gpio") : ("unknown")), 
-			i2c_childlist[i].addr, (0 == i) ? ("\n") : (" "));
+			(I2C_ADC == i2c_childlist[index].i2ctype) ? "adc" : 
+			((I2C_GPIO == i2c_childlist[index].i2ctype) ? "gpio" : "unknown"), 
+			i2c_childlist[index].addr, (0 == index) ? "\n" : " ");
 	}
 
-	err = kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
-	if (err < 0)
+	kenvctrld_task = kthread_run(kenvctrld, NULL, "kenvctrld");
+	if (IS_ERR(kenvctrld_task)) {
+		err = PTR_ERR(kenvctrld_task);
 		goto out_deregister;
+	}
 
 	return 0;
 
 out_deregister:
 	misc_deregister(&envctrl_dev);
 out_iounmap:
-	iounmap(i2c);
-	for (i = 0; i < ENVCTRL_MAX_CPU * 2; i++) {
-		if (i2c_childlist[i].tables)
-			kfree(i2c_childlist[i].tables);
-	}
+	of_iounmap(&op->resource[0], i2c, 0x2);
+	for (index = 0; index < ENVCTRL_MAX_CPU * 2; index++)
+		kfree(i2c_childlist[index].tables);
+
 	return err;
-#else
-	return -ENODEV;
-#endif
 }
 
-static void __exit envctrl_cleanup(void)
+static int __devexit envctrl_remove(struct platform_device *op)
 {
-	int i;
+	int index;
 
-	if (NULL != kenvctrld_task) {
-		force_sig(SIGKILL, kenvctrld_task);
-		for (;;) {
-			struct task_struct *p;
-			int found = 0;
+	kthread_stop(kenvctrld_task);
 
-			read_lock(&tasklist_lock);
-			for_each_process(p) {
-				if (p == kenvctrld_task) {
-					found = 1;
-					break;
-				}
-			}
-			read_unlock(&tasklist_lock);
-
-			if (!found)
-				break;
-
-			current->state = TASK_INTERRUPTIBLE;
-			schedule_timeout(HZ);
-		}
-		kenvctrld_task = NULL;
-	}
-
-	iounmap(i2c);
+	of_iounmap(&op->resource[0], i2c, 0x2);
 	misc_deregister(&envctrl_dev);
 
-	for (i = 0; i < ENVCTRL_MAX_CPU * 2; i++) {
-		if (i2c_childlist[i].tables)
-			kfree(i2c_childlist[i].tables);
-	}
+	for (index = 0; index < ENVCTRL_MAX_CPU * 2; index++)
+		kfree(i2c_childlist[index].tables);
+
+	return 0;
+}
+
+static const struct of_device_id envctrl_match[] = {
+	{
+		.name = "i2c",
+		.compatible = "i2cpcf,8584",
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(of, envctrl_match);
+
+static struct platform_driver envctrl_driver = {
+	.driver = {
+		.name = DRIVER_NAME,
+		.owner = THIS_MODULE,
+		.of_match_table = envctrl_match,
+	},
+	.probe		= envctrl_probe,
+	.remove		= __devexit_p(envctrl_remove),
+};
+
+static int __init envctrl_init(void)
+{
+	return platform_driver_register(&envctrl_driver);
+}
+
+static void __exit envctrl_exit(void)
+{
+	platform_driver_unregister(&envctrl_driver);
 }
 
 module_init(envctrl_init);
-module_exit(envctrl_cleanup);
+module_exit(envctrl_exit);
 MODULE_LICENSE("GPL");

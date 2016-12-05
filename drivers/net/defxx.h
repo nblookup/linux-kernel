@@ -16,7 +16,7 @@
  *   LVS	Lawrence V. Stefani <lstefani@yahoo.com>
  *
  * Maintainers:
- *   macro	Maciej W. Rozycki <macro@ds2.pg.gda.pl>
+ *   macro	Maciej W. Rozycki <macro@linux-mips.org>
  *
  * Modification History:
  *		Date		Name	Description
@@ -25,6 +25,8 @@
  *							macros to DEFXX.C.
  *		12-Sep-96	LVS		Removed packet request header pointers.
  *		04 Aug 2003	macro		Converted to the DMA API.
+ *		23 Oct 2006	macro		Big-endian host support.
+ *		14 Dec 2006	macro		TURBOchannel support.
  */
 
 #ifndef _DEFXX_H_
@@ -45,7 +47,7 @@ typedef struct							/* 64-bit counter */
 	} PI_CNTR;
 
 typedef struct							/* LAN address */
-	{										
+	{
 	PI_UINT32  lwrd_0;
 	PI_UINT32  lwrd_1;
 	} PI_LAN_ADDR;
@@ -146,7 +148,7 @@ typedef struct							/* Station ID address */
 #define PI_STATE_K_LINK_UNAVAIL	 		5
 #define PI_STATE_K_HALTED		   		6
 #define PI_STATE_K_RING_MEMBER			7
-#define PI_STATE_K_NUMBER				8 
+#define PI_STATE_K_NUMBER				8
 
 /* Define codes for command type */
 
@@ -175,9 +177,9 @@ typedef struct							/* Station ID address */
 #define PI_ITEM_K_EOL					0x00 	/* End-of-Item list 		  */
 #define PI_ITEM_K_T_REQ					0x01 	/* DECnet T_REQ 			  */
 #define PI_ITEM_K_TVX					0x02 	/* DECnet TVX 				  */
-#define PI_ITEM_K_RESTRICTED_TOKEN		0x03 	/* DECnet Restricted Token 	  */	 
+#define PI_ITEM_K_RESTRICTED_TOKEN		0x03 	/* DECnet Restricted Token 	  */
 #define PI_ITEM_K_LEM_THRESHOLD			0x04 	/* DECnet LEM Threshold 	  */
-#define PI_ITEM_K_RING_PURGER			0x05 	/* DECnet Ring Purger Enable  */	
+#define PI_ITEM_K_RING_PURGER			0x05 	/* DECnet Ring Purger Enable  */
 #define PI_ITEM_K_CNTR_INTERVAL			0x06 	/* Chars_Set 				  */
 #define PI_ITEM_K_IND_GROUP_PROM		0x07 	/* Filters_Set 				  */
 #define PI_ITEM_K_GROUP_PROM			0x08 	/* Filters_Set 				  */
@@ -283,16 +285,16 @@ typedef struct
 
 /* Start Response */
 
-typedef struct 
+typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	} PI_CMD_START_RSP;
 
 /* Filters_Set Request */
 
 #define PI_CMD_FILTERS_SET_K_ITEMS_MAX  63		/* Fits in a 512 byte buffer */
 
-typedef struct 
+typedef struct
 	{
 	PI_UINT32		cmd_type;
 	PI_ITEM_LIST	item[PI_CMD_FILTERS_SET_K_ITEMS_MAX];
@@ -302,21 +304,21 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	} PI_CMD_FILTERS_SET_RSP;
 
 /* Filters_Get Request */
 
 typedef struct
 	{
-	PI_UINT32		cmd_type;   
+	PI_UINT32		cmd_type;
 	} PI_CMD_FILTERS_GET_REQ;
 
 /* Filters_Get Response */
 
-typedef struct 
+typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	PI_UINT32		ind_group_prom;
 	PI_UINT32		group_prom;
 	PI_UINT32		broadcast_all;
@@ -339,14 +341,14 @@ typedef struct
 		PI_UINT32	item_code;
 		PI_UINT32	value;
 		PI_UINT32	item_index;
-		} item[PI_CMD_CHARS_SET_K_ITEMS_MAX];	
+		} item[PI_CMD_CHARS_SET_K_ITEMS_MAX];
 	} PI_CMD_CHARS_SET_REQ;
 
 /* Chars_Set Response */
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	} PI_CMD_CHARS_SET_RSP;
 
 
@@ -362,20 +364,20 @@ typedef struct
 		PI_UINT32	item_code;
 		PI_UINT32	value;
 		PI_UINT32	item_index;
-		} item[PI_CMD_SNMP_SET_K_ITEMS_MAX];	
+		} item[PI_CMD_SNMP_SET_K_ITEMS_MAX];
 	} PI_CMD_SNMP_SET_REQ;
 
 /* SNMP_Set Response */
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	} PI_CMD_SNMP_SET_RSP;
 
 
 /* SMT_MIB_Set Request */
 
-#define PI_CMD_SMT_MIB_SET_K_ITEMS_MAX 42	/* Max number of items */ 
+#define PI_CMD_SMT_MIB_SET_K_ITEMS_MAX 42	/* Max number of items */
 
 typedef struct
 	{
@@ -392,7 +394,7 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	} PI_CMD_SMT_MIB_SET_RSP;
 
 /* SMT_MIB_Get Request */
@@ -407,8 +409,8 @@ typedef struct
 typedef struct						  /* Refer to ANSI FDDI SMT Rev. 7.3 */
 	{
 	PI_RSP_HEADER  header;
-	
-	/* SMT GROUP */														  
+
+	/* SMT GROUP */
 
 	PI_STATION_ID  	smt_station_id;
 	PI_UINT32 		smt_op_version_id;
@@ -485,7 +487,7 @@ typedef struct						  /* Refer to ANSI FDDI SMT Rev. 7.3 */
 	PI_UINT32		port_connection_capabilities[PI_PHY_K_MAX];
 	PI_UINT32		port_bs_flag[PI_PHY_K_MAX];
 	PI_UINT32		port_ler_estimate[PI_PHY_K_MAX];
-	PI_UINT32		port_ler_cutoff[PI_PHY_K_MAX];	
+	PI_UINT32		port_ler_cutoff[PI_PHY_K_MAX];
 	PI_UINT32		port_ler_alarm[PI_PHY_K_MAX];
 	PI_UINT32		port_connect_state[PI_PHY_K_MAX];
 	PI_UINT32		port_pcm_state[PI_PHY_K_MAX];
@@ -497,7 +499,7 @@ typedef struct						  /* Refer to ANSI FDDI SMT Rev. 7.3 */
 
 	PI_CNTR	   		path_ring_latency;
 
-	} PI_CMD_SMT_MIB_GET_RSP; 
+	} PI_CMD_SMT_MIB_GET_RSP;
 
 
 /*
@@ -506,7 +508,7 @@ typedef struct						  /* Refer to ANSI FDDI SMT Rev. 7.3 */
  *  certain host-sent SMT frames such as PMF Get and Set requests.  The
  *  codes have been taken from the MIB summary section of ANSI SMT 7.3.
  */
-	
+
 #define PI_GRP_K_SMT_STATION_ID			0x100A
 #define PI_ITEM_K_SMT_STATION_ID		0x100B
 #define PI_ITEM_K_SMT_OP_VERS_ID		0x100D
@@ -536,7 +538,7 @@ typedef struct						  /* Refer to ANSI FDDI SMT Rev. 7.3 */
 #define PI_ITEM_K_SMT_REM_DISC_FLAG		0x102C
 #define PI_ITEM_K_SMT_STATION_STATUS	0x102D
 #define PI_ITEM_K_SMT_PEER_WRAP_FLAG	0x102E
-	
+
 #define PI_GRP_K_SMT_MIB_OPERATION	 	0x1032
 #define PI_ITEM_K_SMT_MSG_TIME_STAMP 	0x1033
 #define PI_ITEM_K_SMT_TRN_TIME_STAMP 	0x1034
@@ -643,9 +645,9 @@ typedef struct
 
 /* Addr_Filter_Set Response */
 
-typedef struct 
+typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	} PI_CMD_ADDR_FILTER_SET_RSP;
 
 /* Addr_Filter_Get Request */
@@ -659,7 +661,7 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	PI_LAN_ADDR		entry[PI_CMD_ADDR_FILTER_K_SIZE];
 	} PI_CMD_ADDR_FILTER_GET_RSP;
 
@@ -674,7 +676,7 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	PI_STATION_ID   station_id;						/* Station */
 	PI_UINT32		station_type;
 	PI_UINT32		smt_ver_id;
@@ -728,66 +730,66 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;		
+	PI_RSP_HEADER   header;
 
 	/* SMT GROUP */
 
-	PI_STATION_ID   smt_station_id;			
+	PI_STATION_ID   smt_station_id;
 	PI_UINT32		smt_op_version_id;
 	PI_UINT32		smt_hi_version_id;
 	PI_UINT32		smt_lo_version_id;
-	PI_UINT32		smt_mac_ct;				
-	PI_UINT32		smt_non_master_ct;			
-	PI_UINT32		smt_master_ct;				
-	PI_UINT32		smt_paths_available;			
-	PI_UINT32		smt_config_capabilities;		
-	PI_UINT32		smt_config_policy;		
-	PI_UINT32		smt_connection_policy;		
-	PI_UINT32		smt_t_notify;	
+	PI_UINT32		smt_mac_ct;
+	PI_UINT32		smt_non_master_ct;
+	PI_UINT32		smt_master_ct;
+	PI_UINT32		smt_paths_available;
+	PI_UINT32		smt_config_capabilities;
+	PI_UINT32		smt_config_policy;
+	PI_UINT32		smt_connection_policy;
+	PI_UINT32		smt_t_notify;
 	PI_UINT32		smt_status_reporting;
-	PI_UINT32		smt_ecm_state;	
-	PI_UINT32		smt_cf_state;	
-	PI_UINT32		smt_hold_state;		
+	PI_UINT32		smt_ecm_state;
+	PI_UINT32		smt_cf_state;
+	PI_UINT32		smt_hold_state;
 	PI_UINT32		smt_remote_disconnect_flag;
-	PI_UINT32		smt_station_action;			
+	PI_UINT32		smt_station_action;
 
 	/* MAC GROUP */
 
-	PI_UINT32		mac_frame_status_capabilities;	
+	PI_UINT32		mac_frame_status_capabilities;
 	PI_UINT32		mac_t_max_greatest_lower_bound;
 	PI_UINT32		mac_tvx_greatest_lower_bound;
 	PI_UINT32		mac_paths_available;
 	PI_UINT32		mac_current_path;
-	PI_LAN_ADDR		mac_upstream_nbr;			
-	PI_LAN_ADDR		mac_old_upstream_nbr;		
-	PI_UINT32		mac_dup_addr_test;			
+	PI_LAN_ADDR		mac_upstream_nbr;
+	PI_LAN_ADDR		mac_old_upstream_nbr;
+	PI_UINT32		mac_dup_addr_test;
 	PI_UINT32		mac_paths_requested;
 	PI_UINT32		mac_downstream_port_type;
-	PI_LAN_ADDR		mac_smt_address;			
-	PI_UINT32		mac_t_req;				
+	PI_LAN_ADDR		mac_smt_address;
+	PI_UINT32		mac_t_req;
 	PI_UINT32		mac_t_neg;
-	PI_UINT32		mac_t_max;				
-	PI_UINT32		mac_tvx_value;			
-	PI_UINT32		mac_t_min;				
+	PI_UINT32		mac_t_max;
+	PI_UINT32		mac_tvx_value;
+	PI_UINT32		mac_t_min;
 	PI_UINT32		mac_current_frame_status;
 	/*			  	mac_frame_cts 			*/
 	/* 				mac_error_cts 			*/
 	/* 		   		mac_lost_cts 			*/
-	PI_UINT32		mac_frame_error_threshold;		
-	PI_UINT32		mac_frame_error_ratio;		
+	PI_UINT32		mac_frame_error_threshold;
+	PI_UINT32		mac_frame_error_ratio;
 	PI_UINT32		mac_rmt_state;
 	PI_UINT32		mac_da_flag;
-	PI_UINT32		mac_una_da_flag;			
+	PI_UINT32		mac_una_da_flag;
 	PI_UINT32		mac_frame_condition;
-	PI_UINT32		mac_chip_set;			
-	PI_UINT32		mac_action;				
+	PI_UINT32		mac_chip_set;
+	PI_UINT32		mac_action;
 
 	/* PATH GROUP => Does not need to be implemented */
 
 	/* PORT GROUP */
 
-	PI_UINT32		port_pc_type[PI_PHY_K_MAX];			
-	PI_UINT32		port_pc_neighbor[PI_PHY_K_MAX];			
+	PI_UINT32		port_pc_type[PI_PHY_K_MAX];
+	PI_UINT32		port_pc_neighbor[PI_PHY_K_MAX];
 	PI_UINT32		port_connection_policies[PI_PHY_K_MAX];
 	PI_UINT32		port_remote_mac_indicated[PI_PHY_K_MAX];
 	PI_UINT32		port_ce_state[PI_PHY_K_MAX];
@@ -798,17 +800,17 @@ typedef struct
 	PI_UINT32		port_tb_max[PI_PHY_K_MAX];
 	PI_UINT32		port_bs_flag[PI_PHY_K_MAX];
 	/*				port_lct_fail_cts[PI_PHY_K_MAX];	*/
-	PI_UINT32		port_ler_estimate[PI_PHY_K_MAX];				
+	PI_UINT32		port_ler_estimate[PI_PHY_K_MAX];
 	/*				port_lem_reject_cts[PI_PHY_K_MAX];	*/
 	/*				port_lem_cts[PI_PHY_K_MAX];		*/
-	PI_UINT32		port_ler_cutoff[PI_PHY_K_MAX];				
-	PI_UINT32		port_ler_alarm[PI_PHY_K_MAX];				
+	PI_UINT32		port_ler_cutoff[PI_PHY_K_MAX];
+	PI_UINT32		port_ler_alarm[PI_PHY_K_MAX];
 	PI_UINT32		port_connect_state[PI_PHY_K_MAX];
 	PI_UINT32		port_pcm_state[PI_PHY_K_MAX];
 	PI_UINT32		port_pc_withhold[PI_PHY_K_MAX];
-	PI_UINT32		port_ler_condition[PI_PHY_K_MAX];				
-	PI_UINT32		port_chip_set[PI_PHY_K_MAX];				
-	PI_UINT32		port_action[PI_PHY_K_MAX];				
+	PI_UINT32		port_ler_condition[PI_PHY_K_MAX];
+	PI_UINT32		port_chip_set[PI_PHY_K_MAX];
+	PI_UINT32		port_action[PI_PHY_K_MAX];
 
 	/* ATTACHMENT GROUP */
 
@@ -833,7 +835,7 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;		
+	PI_RSP_HEADER   header;
 
 	/* SMT GROUP */
 
@@ -841,7 +843,7 @@ typedef struct
 
 	/* MAC GROUP */
 
-	PI_UINT32		emac_link_state;			
+	PI_UINT32		emac_link_state;
 	PI_UINT32		emac_ring_purger_state;
 	PI_UINT32		emac_ring_purger_enable;
 	PI_UINT32		emac_frame_strip_mode;
@@ -915,9 +917,9 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
-	PI_CNTR		time_since_reset;			
-	PI_CNTR_BLK		cntrs;				
+	PI_RSP_HEADER   header;
+	PI_CNTR		time_since_reset;
+	PI_CNTR_BLK		cntrs;
 	} PI_CMD_CNTRS_GET_RSP;
 
 /* Counters_Set Request */
@@ -925,14 +927,14 @@ typedef struct
 typedef struct
 	{
 	PI_UINT32	cmd_type;
-	PI_CNTR_BLK	cntrs;				
+	PI_CNTR_BLK	cntrs;
 	} PI_CMD_CNTRS_SET_REQ;
 
 /* Counters_Set Response */
 
-typedef struct 
+typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	} PI_CMD_CNTRS_SET_RSP;
 
 /* Error_Log_Clear Request */
@@ -946,7 +948,7 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	} PI_CMD_ERROR_LOG_CLEAR_RSP;
 
 /* Error_Log_Get Request */
@@ -966,7 +968,7 @@ typedef struct
 
 typedef struct
 	{
-	struct 
+	struct
 		{
 		PI_UINT32	fru_imp_mask;
 		PI_UINT32	test_id;
@@ -977,7 +979,7 @@ typedef struct
 
 typedef struct
 	{
-	PI_RSP_HEADER   header;	
+	PI_RSP_HEADER   header;
 	PI_UINT32		event_status;
 	PI_UINT32		caller_id;
 	PI_UINT32		timestamp_l;
@@ -993,7 +995,7 @@ typedef struct
 #define PI_LOG_EVENT_STATUS_K_VALID		0	/* Valid Event Status 		*/
 #define PI_LOG_EVENT_STATUS_K_INVALID	1	/* Invalid Event Status 	*/
 #define PI_LOG_CALLER_ID_K_NONE		 	0	/* No caller 				*/
-#define PI_LOG_CALLER_ID_K_SELFTEST	 	1	/* Normal power-up selftest */			
+#define PI_LOG_CALLER_ID_K_SELFTEST	 	1	/* Normal power-up selftest */
 #define PI_LOG_CALLER_ID_K_MFG		 	2	/* Mfg power-up selftest 	*/
 #define PI_LOG_CALLER_ID_K_ONLINE		3	/* On-line diagnostics 		*/
 #define PI_LOG_CALLER_ID_K_HW			4	/* Hardware 				*/
@@ -1026,7 +1028,7 @@ typedef union
 	PI_CMD_DEC_EXT_MIB_GET_REQ	dec_mib_get;
 	PI_CMD_SMT_MIB_SET_REQ		smt_mib_set;
 	PI_CMD_SMT_MIB_GET_REQ		smt_mib_get;
-	char						pad[PI_CMD_REQ_K_SIZE_MAX]; 
+	char						pad[PI_CMD_REQ_K_SIZE_MAX];
 	} PI_DMA_CMD_REQ;
 
 typedef union
@@ -1048,7 +1050,7 @@ typedef union
 	PI_CMD_DEC_EXT_MIB_GET_RSP	dec_mib_get;
 	PI_CMD_SMT_MIB_SET_RSP		smt_mib_set;
 	PI_CMD_SMT_MIB_GET_RSP		smt_mib_get;
-	char						pad[PI_CMD_RSP_K_SIZE_MAX]; 
+	char						pad[PI_CMD_RSP_K_SIZE_MAX];
 	} PI_DMA_CMD_RSP;
 
 typedef union
@@ -1094,7 +1096,7 @@ typedef struct
 #define PI_DESCR_BLK_K_SMT_HOST 	0x1000
 #define PI_DESCR_BLK_K_UNSOL		0x1200
 #define PI_DESCR_BLK_K_CMD_RSP		0x1280
-#define PI_DESCR_BLK_K_CMD_REQ		0x1300	
+#define PI_DESCR_BLK_K_CMD_REQ		0x1300
 
 /* Define format of a rcv descr (Rcv Data, Cmd Rsp, Unsolicited, SMT Host)   */
 /*   Note a field has been added for later versions of the PDQ to allow for  */
@@ -1110,10 +1112,10 @@ typedef struct
 	} PI_RCV_DESCR;
 
 #define	PI_RCV_DESCR_M_SOP	  		0x80000000
-#define PI_RCV_DESCR_M_SEG_LEN_LO 	0x60000000 
-#define PI_RCV_DESCR_M_MBZ	  		0x60000000 
+#define PI_RCV_DESCR_M_SEG_LEN_LO 	0x60000000
+#define PI_RCV_DESCR_M_MBZ	  		0x60000000
 #define PI_RCV_DESCR_M_SEG_LEN		0x1F800000
-#define PI_RCV_DESCR_M_SEG_LEN_HI	0x1FF00000	  
+#define PI_RCV_DESCR_M_SEG_LEN_HI	0x1FF00000
 #define PI_RCV_DESCR_M_SEG_CNT	  	0x000F0000
 #define PI_RCV_DESCR_M_BUFF_HI	  	0x0000FFFF
 
@@ -1121,7 +1123,7 @@ typedef struct
 #define PI_RCV_DESCR_V_SEG_LEN_LO 	29
 #define PI_RCV_DESCR_V_MBZ	  		29
 #define PI_RCV_DESCR_V_SEG_LEN	  	23
-#define PI_RCV_DESCR_V_SEG_LEN_HI 	20	  
+#define PI_RCV_DESCR_V_SEG_LEN_HI 	20
 #define PI_RCV_DESCR_V_SEG_CNT	  	16
 #define PI_RCV_DESCR_V_BUFF_HI	 	0
 
@@ -1135,7 +1137,7 @@ typedef struct
 
 #define	PI_XMT_DESCR_M_SOP			0x80000000
 #define PI_XMT_DESCR_M_EOP			0x40000000
-#define PI_XMT_DESCR_M_MBZ			0x20000000 
+#define PI_XMT_DESCR_M_MBZ			0x20000000
 #define PI_XMT_DESCR_M_SEG_LEN		0x1FFF0000
 #define PI_XMT_DESCR_M_BUFF_HI		0x0000FFFF
 
@@ -1195,7 +1197,7 @@ typedef struct
 #define PI_PCTRL_M_CONS_BLOCK			0x0040
 #define PI_PCTRL_M_UNINIT				0x0020
 #define PI_PCTRL_M_RING_MEMBER			0x0010
-#define PI_PCTRL_M_MLA					0x0008		
+#define PI_PCTRL_M_MLA					0x0008
 #define PI_PCTRL_M_FW_REV_READ			0x0004
 #define PI_PCTRL_M_DEV_SPECIFIC			0x0002
 #define PI_PCTRL_M_SUB_CMD				0x0001
@@ -1230,12 +1232,12 @@ typedef struct
 
 #define PI_PDATA_A_INIT_M_DESC_BLK_ADDR			0x0FFFFE000
 #define PI_PDATA_A_INIT_M_RESERVED				0x000001FFC
-#define PI_PDATA_A_INIT_M_BSWAP_DATA			0x000000002 
+#define PI_PDATA_A_INIT_M_BSWAP_DATA			0x000000002
 #define PI_PDATA_A_INIT_M_BSWAP_LITERAL			0x000000001
 
 #define PI_PDATA_A_INIT_V_DESC_BLK_ADDR			13
 #define PI_PDATA_A_INIT_V_RESERVED				3
-#define PI_PDATA_A_INIT_V_BSWAP_DATA			1 
+#define PI_PDATA_A_INIT_V_BSWAP_DATA			1
 #define PI_PDATA_A_INIT_V_BSWAP_LITERAL			0
 
 /* Port Reset Register */
@@ -1281,11 +1283,11 @@ typedef struct
 #define PI_HALT_ID_K_IMAGE_CRC_ERROR	7   		/* Image is bad, update it */
 #define PI_HALT_ID_K_BUS_EXCEPTION	 	8   		/* 68K bus exception	   */
 
-/* Host Interrupt Enable Register as seen by host */ 
+/* Host Interrupt Enable Register as seen by host */
 
 #define PI_HOST_INT_M_XMT_DATA_ENB		0x80000000	/* Type 2 Enables */
-#define PI_HOST_INT_M_RCV_DATA_ENB		0x40000000  
-#define PI_HOST_INT_M_SMT_HOST_ENB		0x10000000	/* Type 1 Enables */ 
+#define PI_HOST_INT_M_RCV_DATA_ENB		0x40000000
+#define PI_HOST_INT_M_SMT_HOST_ENB		0x10000000	/* Type 1 Enables */
 #define PI_HOST_INT_M_UNSOL_ENB			0x20000000
 #define PI_HOST_INT_M_CMD_RSP_ENB		0x08000000
 #define PI_HOST_INT_M_CMD_REQ_ENB		0x04000000
@@ -1301,8 +1303,8 @@ typedef struct
 #define PI_HOST_INT_M_BUS_PAR_ERR		0x00000001
 
 #define PI_HOST_INT_V_XMT_DATA_ENB		31			/* Type 2 Enables */
-#define PI_HOST_INT_V_RCV_DATA_ENB		30  
-#define PI_HOST_INT_V_SMT_HOST_ENB		29			/* Type 1 Enables */ 
+#define PI_HOST_INT_V_RCV_DATA_ENB		30
+#define PI_HOST_INT_V_SMT_HOST_ENB		29			/* Type 1 Enables */
 #define PI_HOST_INT_V_UNSOL_ENB			28
 #define PI_HOST_INT_V_CMD_RSP_ENB		27
 #define PI_HOST_INT_V_CMD_REQ_ENB		26
@@ -1333,8 +1335,8 @@ typedef struct
 #define PI_TYPE_0_STAT_M_PM_PAR_ERR		0x00000002
 #define PI_TYPE_0_STAT_M_BUS_PAR_ERR	0x00000001
 
-#define PI_TYPE_0_STAT_V_1MS			7			
-#define PI_TYPE_0_STAT_V_20MS			6	
+#define PI_TYPE_0_STAT_V_1MS			7
+#define PI_TYPE_0_STAT_V_20MS			6
 #define PI_TYPE_0_STAT_V_CSR_CMD_DONE	5
 #define PI_TYPE_0_STAT_V_STATE_CHANGE	4
 #define PI_TYPE_0_STAT_V_XMT_FLUSH		3
@@ -1344,7 +1346,7 @@ typedef struct
 
 /* Register definition structures are defined for both big and little endian systems */
 
-#ifndef  BIG_ENDIAN
+#ifndef __BIG_ENDIAN
 
 /* Little endian format of Type 1 Producer register */
 
@@ -1402,7 +1404,11 @@ typedef union
 		} index;
 	} PI_TYPE_2_CONSUMER;
 
-#else
+/* Define swapping required by DMA transfers.  */
+#define PI_PDATA_A_INIT_M_BSWAP_INIT	\
+	(PI_PDATA_A_INIT_M_BSWAP_DATA)
+
+#else /* __BIG_ENDIAN */
 
 /* Big endian format of Type 1 Producer register */
 
@@ -1460,11 +1466,23 @@ typedef union
 		} index;
 	} PI_TYPE_2_CONSUMER;
 
-#endif	/* #ifndef BIG_ENDIAN */
+/* Define swapping required by DMA transfers.  */
+#define PI_PDATA_A_INIT_M_BSWAP_INIT	\
+	(PI_PDATA_A_INIT_M_BSWAP_DATA | PI_PDATA_A_INIT_M_BSWAP_LITERAL)
+
+#endif /* __BIG_ENDIAN */
+
+/* Define TC PDQ CSR offset and length */
+
+#define PI_TC_K_CSR_OFFSET		0x100000
+#define PI_TC_K_CSR_LEN			0x40		/* 64 bytes */
 
 /* Define EISA controller register offsets */
 
-#define PI_ESIC_K_BURST_HOLDOFF		0x040
+#define PI_ESIC_K_CSR_IO_LEN		0x80		/* 128 bytes */
+
+#define PI_DEFEA_K_BURST_HOLDOFF	0x040
+
 #define PI_ESIC_K_SLOT_ID            	0xC80
 #define PI_ESIC_K_SLOT_CNTRL		0xC84
 #define PI_ESIC_K_MEM_ADD_CMP_0     	0xC85
@@ -1479,14 +1497,14 @@ typedef union
 #define PI_ESIC_K_MEM_ADD_LO_CMP_0  	0xC8E
 #define PI_ESIC_K_MEM_ADD_LO_CMP_1  	0xC8F
 #define PI_ESIC_K_MEM_ADD_LO_CMP_2  	0xC90
-#define PI_ESIC_K_IO_CMP_0_0		0xC91
-#define PI_ESIC_K_IO_CMP_0_1		0xC92
-#define PI_ESIC_K_IO_CMP_1_0		0xC93
-#define PI_ESIC_K_IO_CMP_1_1		0xC94
-#define PI_ESIC_K_IO_CMP_2_0		0xC95
-#define PI_ESIC_K_IO_CMP_2_1		0xC96
-#define PI_ESIC_K_IO_CMP_3_0		0xC97
-#define PI_ESIC_K_IO_CMP_3_1		0xC98
+#define PI_ESIC_K_IO_ADD_CMP_0_0	0xC91
+#define PI_ESIC_K_IO_ADD_CMP_0_1	0xC92
+#define PI_ESIC_K_IO_ADD_CMP_1_0	0xC93
+#define PI_ESIC_K_IO_ADD_CMP_1_1	0xC94
+#define PI_ESIC_K_IO_ADD_CMP_2_0	0xC95
+#define PI_ESIC_K_IO_ADD_CMP_2_1	0xC96
+#define PI_ESIC_K_IO_ADD_CMP_3_0	0xC97
+#define PI_ESIC_K_IO_ADD_CMP_3_1	0xC98
 #define PI_ESIC_K_IO_ADD_MASK_0_0    	0xC99
 #define PI_ESIC_K_IO_ADD_MASK_0_1    	0xC9A
 #define PI_ESIC_K_IO_ADD_MASK_1_0    	0xC9B
@@ -1509,11 +1527,16 @@ typedef union
 #define PI_ESIC_K_INPUT_PORT         	0xCAC
 #define PI_ESIC_K_OUTPUT_PORT        	0xCAD
 #define PI_ESIC_K_FUNCTION_CNTRL	0xCAE
-#define PI_ESIC_K_CSR_IO_LEN		PI_ESIC_K_FUNCTION_CNTRL+1	/* always last reg + 1 */
 
-/* Define the value all drivers must write to the function control register. */
+/* Define the bits in the function control register. */
 
-#define PI_ESIC_K_FUNCTION_CNTRL_IO_ENB	0x03
+#define PI_FUNCTION_CNTRL_M_IOCS0	0x01
+#define PI_FUNCTION_CNTRL_M_IOCS1	0x02
+#define PI_FUNCTION_CNTRL_M_IOCS2	0x04
+#define PI_FUNCTION_CNTRL_M_IOCS3	0x08
+#define PI_FUNCTION_CNTRL_M_MEMCS0	0x10
+#define PI_FUNCTION_CNTRL_M_MEMCS1	0x20
+#define PI_FUNCTION_CNTRL_M_DMA		0x80
 
 /* Define the bits in the slot control register. */
 
@@ -1530,6 +1553,10 @@ typedef union
 #define PI_BURST_HOLDOFF_V_HOLDOFF	2
 #define PI_BURST_HOLDOFF_V_RESERVED	1
 #define PI_BURST_HOLDOFF_V_MEM_MAP	0
+
+/* Define the implicit mask of the Memory Address Mask Register.  */
+
+#define PI_MEM_ADD_MASK_M		0x3ff
 
 /*
  * Define the fields in the IO Compare registers.
@@ -1568,6 +1595,7 @@ typedef union
 #define DEFEA_PROD_ID_1		0x0130A310		/* DEC product 300, rev 1	*/
 #define DEFEA_PROD_ID_2		0x0230A310		/* DEC product 300, rev 2	*/
 #define DEFEA_PROD_ID_3		0x0330A310		/* DEC product 300, rev 3	*/
+#define DEFEA_PROD_ID_4		0x0430A310		/* DEC product 300, rev 4	*/
 
 /**********************************************/
 /* Digital PFI Specification v1.0 Definitions */
@@ -1623,12 +1651,6 @@ typedef union
 #define PFI_STATUS_V_FIFO_FULL		 2
 #define PFI_STATUS_V_FIFO_EMPTY		 1
 #define PFI_STATUS_V_DMA_IN_PROGRESS 0
-
-#define DFX_MAX_EISA_SLOTS		16			/* maximum number of EISA slots to scan */
-#define DFX_MAX_NUM_BOARDS		8			/* maximum number of adapters supported */
-
-#define DFX_BUS_TYPE_PCI		0			/* type code for DEC FDDIcontroller/PCI */
-#define DFX_BUS_TYPE_EISA		1			/* type code for DEC FDDIcontroller/EISA */
 
 #define DFX_FC_PRH2_PRH1_PRH0		0x54003820	/* Packet Request Header bytes + FC */
 #define DFX_PRH0_BYTE			0x20		/* Packet Request Header byte 0 */
@@ -1692,7 +1714,7 @@ typedef struct DFX_board_tag
 	{
 	/* Keep virtual and physical pointers to locked, physically contiguous memory */
 
-	char				*kmalloced;					/* pci_free_consistent this on unload */ 
+	char				*kmalloced;					/* pci_free_consistent this on unload */
 	dma_addr_t			kmalloced_dma;
 	/* DMA handle for the above */
 	PI_DESCR_BLOCK			*descr_block_virt;				/* PDQ descriptor block virt address */
@@ -1739,18 +1761,19 @@ typedef struct DFX_board_tag
 	/* Store pointers to transmit buffers for transmit completion code */
 
 	XMT_DRIVER_DESCR		xmt_drv_descr_blk[PI_XMT_DATA_K_NUM_ENTRIES];
-	
+
 	/* Transmit spinlocks */
-	
+
 	spinlock_t			lock;
 
 	/* Store device, bus-specific, and parameter information for this adapter */
 
 	struct net_device		*dev;						/* pointer to device structure */
-	struct net_device		*next;
-	u32				bus_type;					/* bus type (0 == PCI, 1 == EISA) */
-	u16				base_addr;					/* base I/O address (same as dev->base_addr) */
-	struct pci_dev *		pci_dev;
+	union {
+		void __iomem *mem;
+		int port;
+	} base;										/* base address */
+	struct device			*bus_dev;
 	u32				full_duplex_enb;				/* FDDI Full Duplex enable (1 == on, 2 == off) */
 	u32				req_ttrt;					/* requested TTRT value (in 80ns units) */
 	u32				burst_size;					/* adapter burst size (enumerated) */

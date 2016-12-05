@@ -20,7 +20,7 @@
 
 struct nfs_string {
 	unsigned int len;
-	const char* data;
+	const char __user * data;
 };
 
 struct nfs4_mount_data {
@@ -45,14 +45,14 @@ struct nfs4_mount_data {
 	struct nfs_string hostname;		/* 1 */
 	/* Server IP address */
 	unsigned int host_addrlen;		/* 1 */
-	struct sockaddr* host_addr;		/* 1 */
+	struct sockaddr __user * host_addr;	/* 1 */
 
 	/* Transport protocol to use */
 	int proto;				/* 1 */
 
 	/* Pseudo-flavours to use for authentication. See RFC2623 */
 	int auth_flavourlen;			/* 1 */
-	int *auth_flavours;			/* 1 */
+	int __user *auth_flavours;		/* 1 */
 };
 
 /* bits in the flags field */
@@ -65,6 +65,7 @@ struct nfs4_mount_data {
 #define NFS4_MOUNT_NOCTO	0x0010	/* 1 */
 #define NFS4_MOUNT_NOAC		0x0020	/* 1 */
 #define NFS4_MOUNT_STRICTLOCK	0x1000	/* 1 */
-#define NFS4_MOUNT_FLAGMASK	0xFFFF
+#define NFS4_MOUNT_UNSHARED	0x8000	/* 1 */
+#define NFS4_MOUNT_FLAGMASK	0x9033
 
 #endif

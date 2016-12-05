@@ -1,15 +1,16 @@
-# $Id: Makefile,v 1.8 2003/04/09 05:20:47 starvik Exp $
+# $Id: Makefile,v 1.12 2004/10/19 13:07:43 starvik Exp $
 #
 # Makefile for the linux kernel.
 #
 
-extra-y := vmlinux.lds.s
+CPPFLAGS_vmlinux.lds := -DDRAM_VIRTUAL_BASE=0x$(CONFIG_ETRAX_DRAM_VIRTUAL_BASE)
+extra-y	:= vmlinux.lds
 
-obj-y   := process.o traps.o irq.o ptrace.o setup.o \
-	   time.o sys_cris.o semaphore.o
+obj-y   := process.o traps.o irq.o ptrace.o setup.o time.o sys_cris.o
 
-obj-$(CONFIG_MODULES)    += ksyms.o
+obj-$(CONFIG_MODULES)    += crisksyms.o
 obj-$(CONFIG_MODULES)	 += module.o
+obj-$(CONFIG_SYSTEM_PROFILER)   += profile.o
 
 clean:
 

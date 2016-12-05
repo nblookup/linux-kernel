@@ -3,13 +3,12 @@
  *
  * Author: Juergen Messerer <juergen.messerer@siemens.ch>
  */
-#include <linux/config.h>
 #include <linux/init.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/leds.h>
 #include <asm/system.h>
-#include <asm/arch/simpad.h>
+#include <mach/simpad.h>
 
 #include "leds.h"
 
@@ -28,11 +27,7 @@ extern void clear_cs3_bit(int value);
 
 void simpad_leds_event(led_event_t evt)
 {
-	unsigned long flags;
-
-	//local_irq_save(flags);
-
-	switch (evt) 
+	switch (evt)
 	{
 	case led_start:
 	        hw_led_state = LED_GREEN;
@@ -101,6 +96,5 @@ void simpad_leds_event(led_event_t evt)
 		set_cs3_bit(LED2_ON);
 	else 
 	        clear_cs3_bit(LED2_ON);
-	//local_irq_restore(flags);
 }
 

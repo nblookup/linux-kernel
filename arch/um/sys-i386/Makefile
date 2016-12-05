@@ -1,42 +1,23 @@
-obj-y = bugs.o checksum.o extable.o fault.o ksyms.o ldt.o module.o \
-	ptrace.o ptrace_user.o semaphore.o sigcontext.o syscalls.o sysrq.o
+#
+# Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+#
 
-obj-$(CONFIG_HIGHMEM) += highmem.o
+obj-y = bug.o bugs.o checksum.o delay.o fault.o ksyms.o ldt.o ptrace.o \
+	ptrace_user.o setjmp.o signal.o stub.o stub_segv.o syscalls.o sysrq.o \
+	sys_call_table.o tls.o atomic64_cx8_32.o
 
-USER_OBJS := bugs.o ptrace_user.o sigcontext.o fault.o
-USER_OBJS := $(foreach file,$(USER_OBJS),$(obj)/$(file))
+obj-$(CONFIG_BINFMT_ELF) += elfcore.o
 
-SYMLINKS = semaphore.c highmem.c module.c
-SYMLINKS := $(foreach f,$(SYMLINKS),$(src)/$f)
+subarch-obj-y = lib/semaphore_32.o lib/string_32.o
+subarch-obj-$(CONFIG_HIGHMEM) += mm/highmem_32.o
+subarch-obj-$(CONFIG_MODULES) += kernel/module.o
 
-semaphore.c-dir = kernel
-highmem.c-dir = mm
-module.c-dir = kernel
+USER_OBJS := bugs.o ptrace_user.o fault.o
 
-define make_link
-	-rm -f $1
-	ln -sf $(TOPDIR)/arch/i386/$($(notdir $1)-dir)/$(notdir $1) $1
-endef
+USER_OBJS += user-offsets.s
+extra-y += user-offsets.s
 
-$(USER_OBJS) : %.o: %.c
-	$(CC) $(CFLAGS_$(notdir $@)) $(USER_CFLAGS) -c -o $@ $<
+UNPROFILE_OBJS := stub_segv.o
+CFLAGS_stub_segv.o := $(CFLAGS_NO_HARDENING)
 
-$(SYMLINKS): 
-	$(call make_link,$@)
-
-clean:
-	$(MAKE) -C util clean
-
-fastdep:
-
-dep:
-
-archmrproper:
-	rm -f $(SYMLINKS)
-
-archclean:
-
-archdep:
-
-modules:
-
+include arch/um/scripts/Makefile.rules

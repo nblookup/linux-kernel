@@ -9,29 +9,33 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/tty.h>
 #include <linux/module.h>
-#include <linux/mm.h>
 #include <linux/errno.h>
+#include <linux/ioport.h>
 #include <linux/serial_core.h>
+#include <linux/mtd/mtd.h>
+#include <linux/mtd/partitions.h>
 #include <linux/delay.h>
+#include <linux/mm.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/irq.h>
 #include <asm/setup.h>
 #include <asm/page.h>
+#include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 
 #include <asm/mach/arch.h>
+#include <asm/mach/flash.h>
+#include <asm/mach/irda.h>
 #include <asm/mach/map.h>
 #include <asm/mach/serial_sa1100.h>
-#include <asm/arch/assabet.h>
+#include <mach/assabet.h>
+#include <mach/mcp.h>
 
 #include "generic.h"
 
@@ -92,11 +96,116 @@ static void assabet_lcd_power(int on)
 		ASSABET_BCR_clear(ASSABET_BCR_LCD_ON);
 }
 
-static int __init assabet_init(void)
-{
-	if (!machine_is_assabet())
-		return -EINVAL;
 
+/*
+ * Assabet flash support code.
+ */
+
+#ifdef ASSABET_REV_4
+/*
+ * Phase 4 Assabet has two 28F160B3 flash parts in bank 0:
+ */
+static struct mtd_partition assabet_partitions[] = {
+	{
+		.name		= "bootloader",
+		.size		= 0x00020000,
+		.offset		= 0,
+		.mask_flags	= MTD_WRITEABLE,
+	}, {
+		.name		= "bootloader params",
+		.size		= 0x00020000,
+		.offset		= MTDPART_OFS_APPEND,
+		.mask_flags	= MTD_WRITEABLE,
+	}, {
+		.name		= "jffs",
+		.size		= MTDPART_SIZ_FULL,
+		.offset		= MTDPART_OFS_APPEND,
+	}
+};
+#else
+/*
+ * Phase 5 Assabet has two 28F128J3A flash parts in bank 0:
+ */
+static struct mtd_partition assabet_partitions[] = {
+	{
+		.name		= "bootloader",
+		.size		= 0x00040000,
+		.offset		= 0,
+		.mask_flags	= MTD_WRITEABLE,
+	}, {
+		.name		= "bootloader params",
+		.size		= 0x00040000,
+		.offset		= MTDPART_OFS_APPEND,
+		.mask_flags	= MTD_WRITEABLE,
+	}, {
+		.name		= "jffs",
+		.size		= MTDPART_SIZ_FULL,
+		.offset		= MTDPART_OFS_APPEND,
+	}
+};
+#endif
+
+static struct flash_platform_data assabet_flash_data = {
+	.map_name	= "cfi_probe",
+	.parts		= assabet_partitions,
+	.nr_parts	= ARRAY_SIZE(assabet_partitions),
+};
+
+static struct resource assabet_flash_resources[] = {
+	{
+		.start	= SA1100_CS0_PHYS,
+		.end	= SA1100_CS0_PHYS + SZ_32M - 1,
+		.flags	= IORESOURCE_MEM,
+	}, {
+		.start	= SA1100_CS1_PHYS,
+		.end	= SA1100_CS1_PHYS + SZ_32M - 1,
+		.flags	= IORESOURCE_MEM,
+	}
+};
+
+
+/*
+ * Assabet IrDA support code.
+ */
+
+static int assabet_irda_set_power(struct device *dev, unsigned int state)
+{
+	static unsigned int bcr_state[4] = {
+		ASSABET_BCR_IRDA_MD0,
+		ASSABET_BCR_IRDA_MD1|ASSABET_BCR_IRDA_MD0,
+		ASSABET_BCR_IRDA_MD1,
+		0
+	};
+
+	if (state < 4) {
+		state = bcr_state[state];
+		ASSABET_BCR_clear(state ^ (ASSABET_BCR_IRDA_MD1|
+					   ASSABET_BCR_IRDA_MD0));
+		ASSABET_BCR_set(state);
+	}
+	return 0;
+}
+
+static void assabet_irda_set_speed(struct device *dev, unsigned int speed)
+{
+	if (speed < 4000000)
+		ASSABET_BCR_clear(ASSABET_BCR_IRDA_FSEL);
+	else
+		ASSABET_BCR_set(ASSABET_BCR_IRDA_FSEL);
+}
+
+static struct irda_platform_data assabet_irda_data = {
+	.set_power	= assabet_irda_set_power,
+	.set_speed	= assabet_irda_set_speed,
+};
+
+static struct mcp_plat_data assabet_mcp_data = {
+	.mccr0		= MCCR0_ADM,
+	.sclk_rate	= 11981000,
+};
+
+static void __init assabet_init(void)
+{
 	/*
 	 * Ensure that the power supply is in "high power" mode.
 	 */
@@ -140,11 +249,11 @@ static int __init assabet_init(void)
 #endif
 	}
 
-	return 0;
+	sa11x0_register_mtd(&assabet_flash_data, assabet_flash_resources,
+			    ARRAY_SIZE(assabet_flash_resources));
+	sa11x0_register_irda(&assabet_irda_data);
+	sa11x0_register_mcp(&assabet_mcp_data);
 }
-
-arch_initcall(assabet_init);
-
 
 /*
  * On Assabet, we must probe for the Neponset board _before_
@@ -157,9 +266,11 @@ static void __init map_sa1100_gpio_regs( void )
 	unsigned long phys = __PREG(GPLR) & PMD_MASK;
 	unsigned long virt = io_p2v(phys);
 	int prot = PMD_TYPE_SECT | PMD_SECT_AP_WRITE | PMD_DOMAIN(DOMAIN_IO);
-	pmd_t pmd;
-	pmd_val(pmd) = phys | prot;
-	set_pmd(pmd_offset(pgd_offset_k(virt), virt), pmd);
+	pmd_t *pmd;
+
+	pmd = pmd_offset(pgd_offset_k(virt), virt);
+	*pmd = __pmd(phys | prot);
+	flush_pmd_entry(pmd);
 }
 
 /*
@@ -182,7 +293,8 @@ static void __init get_assabet_scr(void)
 	GPDR |= 0x3fc;			/* Configure GPIO 9:2 as outputs */
 	GPSR = 0x3fc;			/* Write 0xFF to GPIO 9:2 */
 	GPDR &= ~(0x3fc);		/* Configure GPIO 9:2 as inputs */
-	for(i = 100; i--; scr = GPLR);	/* Read GPIO 9:2 */
+	for(i = 100; i--; )		/* Read GPIO 9:2 */
+		scr = GPLR;
 	GPDR |= 0x3fc;			/*  restore correct pin direction */
 	scr &= 0x3fc;			/* save as system configuration byte. */
 	SCR_value = scr;
@@ -277,9 +389,17 @@ static struct sa1100_port_fns assabet_port_fns __initdata = {
 };
 
 static struct map_desc assabet_io_desc[] __initdata = {
- /* virtual     physical    length      type */
-  { 0xf1000000, 0x12000000, 0x00100000, MT_DEVICE }, /* Board Control Register */
-  { 0xf2800000, 0x4b800000, 0x00800000, MT_DEVICE }  /* MQ200 */
+  	{	/* Board Control Register */
+		.virtual	=  0xf1000000,
+		.pfn		= __phys_to_pfn(0x12000000),
+		.length		= 0x00100000,
+		.type		= MT_DEVICE
+	}, {	/* MQ200 */
+		.virtual	=  0xf2800000,
+		.pfn		= __phys_to_pfn(0x4b800000),
+		.length		= 0x00800000,
+		.type		= MT_DEVICE
+	}
 };
 
 static void __init assabet_map_io(void)
@@ -327,9 +447,10 @@ static void __init assabet_map_io(void)
 
 
 MACHINE_START(ASSABET, "Intel-Assabet")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xf8000000)
-	BOOT_PARAMS(0xc0000100)
-	FIXUP(fixup_assabet)
-	MAPIO(assabet_map_io)
-	INITIRQ(sa1100_init_irq)
+	.boot_params	= 0xc0000100,
+	.fixup		= fixup_assabet,
+	.map_io		= assabet_map_io,
+	.init_irq	= sa1100_init_irq,
+	.timer		= &sa1100_timer,
+	.init_machine	= assabet_init,
 MACHINE_END

@@ -141,40 +141,22 @@ static int (*drives[4])[6] = {&drive0, &drive1, &drive2, &drive3};
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
-#include <linux/devfs_fs_kernel.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/mtio.h>
+#include <linux/device.h>
+#include <linux/sched.h>	/* current, TASK_*, schedule_timeout() */
+#include <linux/mutex.h>
 
 #include <asm/uaccess.h>
 
-#ifndef MODULE
-
-#include "setup.h"
-
-static STT pt_stt[5] = {
-	{"drive0", 6, drive0},
-	{"drive1", 6, drive1},
-	{"drive2", 6, drive2},
-	{"drive3", 6, drive3},
-	{"disable", 1, &disable}
-};
-
-void
-pt_setup(char *str, int *ints)
-{
-	generic_setup(pt_stt, 5, str);
-}
-
-#endif
-
-MODULE_PARM(verbose, "i");
-MODULE_PARM(major, "i");
-MODULE_PARM(name, "s");
-MODULE_PARM(drive0, "1-6i");
-MODULE_PARM(drive1, "1-6i");
-MODULE_PARM(drive2, "1-6i");
-MODULE_PARM(drive3, "1-6i");
+module_param(verbose, bool, 0);
+module_param(major, int, 0);
+module_param(name, charp, 0);
+module_param_array(drive0, int, NULL, 0);
+module_param_array(drive1, int, NULL, 0);
+module_param_array(drive2, int, NULL, 0);
+module_param_array(drive3, int, NULL, 0);
 
 #include "paride.h"
 
@@ -207,13 +189,13 @@ MODULE_PARM(drive3, "1-6i");
 #define ATAPI_MODE_SENSE	0x1a
 #define ATAPI_LOG_SENSE		0x4d
 
+static DEFINE_MUTEX(pt_mutex);
 static int pt_open(struct inode *inode, struct file *file);
-static int pt_ioctl(struct inode *inode, struct file *file,
-		    unsigned int cmd, unsigned long arg);
+static long pt_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int pt_release(struct inode *inode, struct file *file);
-static ssize_t pt_read(struct file *filp, char *buf,
+static ssize_t pt_read(struct file *filp, char __user *buf,
 		       size_t count, loff_t * ppos);
-static ssize_t pt_write(struct file *filp, const char *buf,
+static ssize_t pt_write(struct file *filp, const char __user *buf,
 			size_t count, loff_t * ppos);
 static int pt_detect(void);
 
@@ -245,20 +227,24 @@ struct pt_unit {
 
 static int pt_identify(struct pt_unit *tape);
 
-struct pt_unit pt[PT_UNITS];
+static struct pt_unit pt[PT_UNITS];
 
 static char pt_scratch[512];	/* scratch block buffer */
 
 /* kernel glue structures */
 
-static struct file_operations pt_fops = {
+static const struct file_operations pt_fops = {
 	.owner = THIS_MODULE,
 	.read = pt_read,
 	.write = pt_write,
-	.ioctl = pt_ioctl,
+	.unlocked_ioctl = pt_ioctl,
 	.open = pt_open,
 	.release = pt_release,
+	.llseek = noop_llseek,
 };
+
+/* sysfs class support */
+static struct class *pt_class;
 
 static inline int status_reg(struct pi_adapter *pi)
 {
@@ -290,11 +276,11 @@ static int pt_wait(struct pt_unit *tape, int go, int stop, char *fun, char *msg)
 	       && (j++ < PT_SPIN))
 		udelay(PT_SPIN_DEL);
 
-	if ((r & (STAT_ERR & stop)) || (j >= PT_SPIN)) {
+	if ((r & (STAT_ERR & stop)) || (j > PT_SPIN)) {
 		s = read_reg(pi, 7);
 		e = read_reg(pi, 1);
 		p = read_reg(pi, 2);
-		if (j >= PT_SPIN)
+		if (j > PT_SPIN)
 			e |= 0x100;
 		if (fun)
 			printk("%s: %s %s: alt=0x%x stat=0x%x err=0x%x"
@@ -399,8 +385,7 @@ static int pt_atapi(struct pt_unit *tape, char *cmd, int dlen, char *buf, char *
 
 static void pt_sleep(int cs)
 {
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(cs);
+	schedule_timeout_interruptible(cs);
 }
 
 static int pt_poll_dsc(struct pt_unit *tape, int pause, int tmo, char *msg)
@@ -667,8 +652,11 @@ static int pt_open(struct inode *inode, struct file *file)
 	struct pt_unit *tape = pt + unit;
 	int err;
 
-	if (unit >= PT_UNITS || (!tape->present))
+	mutex_lock(&pt_mutex);
+	if (unit >= PT_UNITS || (!tape->present)) {
+		mutex_unlock(&pt_mutex);
 		return -ENODEV;
+	}
 
 	err = -EBUSY;
 	if (!atomic_dec_and_test(&tape->available))
@@ -677,11 +665,11 @@ static int pt_open(struct inode *inode, struct file *file)
 	pt_identify(tape);
 
 	err = -ENODEV;
-	if (!tape->flags & PT_MEDIA)
+	if (!(tape->flags & PT_MEDIA))
 		goto out;
 
 	err = -EROFS;
-	if ((!tape->flags & PT_WRITE_OK) && (file->f_mode & 2))
+	if ((!(tape->flags & PT_WRITE_OK)) && (file->f_mode & FMODE_WRITE))
 		goto out;
 
 	if (!(iminor(inode) & 128))
@@ -695,45 +683,49 @@ static int pt_open(struct inode *inode, struct file *file)
 	}
 
 	file->private_data = tape;
+	mutex_unlock(&pt_mutex);
 	return 0;
 
 out:
 	atomic_inc(&tape->available);
+	mutex_unlock(&pt_mutex);
 	return err;
 }
 
-static int pt_ioctl(struct inode *inode, struct file *file,
-	 unsigned int cmd, unsigned long arg)
+static long pt_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct pt_unit *tape = file->private_data;
+	struct mtop __user *p = (void __user *)arg;
 	struct mtop mtop;
 
 	switch (cmd) {
 	case MTIOCTOP:
-		if (copy_from_user((char *) &mtop, (char *) arg,
-				   sizeof (struct mtop)))
+		if (copy_from_user(&mtop, p, sizeof(struct mtop)))
 			return -EFAULT;
 
 		switch (mtop.mt_op) {
 
 		case MTREW:
+			mutex_lock(&pt_mutex);
 			pt_rewind(tape);
+			mutex_unlock(&pt_mutex);
 			return 0;
 
 		case MTWEOF:
+			mutex_lock(&pt_mutex);
 			pt_write_fm(tape);
+			mutex_unlock(&pt_mutex);
 			return 0;
 
 		default:
-			printk("%s: Unimplemented mt_op %d\n", tape->name,
+			/* FIXME: rate limit ?? */
+			printk(KERN_DEBUG "%s: Unimplemented mt_op %d\n", tape->name,
 			       mtop.mt_op);
 			return -EINVAL;
 		}
 
 	default:
-		printk("%s: Unimplemented ioctl 0x%x\n", tape->name, cmd);
-		return -EINVAL;
-
+		return -ENOTTY;
 	}
 }
 
@@ -760,7 +752,7 @@ pt_release(struct inode *inode, struct file *file)
 
 }
 
-static ssize_t pt_read(struct file *filp, char *buf, size_t count, loff_t * ppos)
+static ssize_t pt_read(struct file *filp, char __user *buf, size_t count, loff_t * ppos)
 {
 	struct pt_unit *tape = filp->private_data;
 	struct pi_adapter *pi = tape->pi;
@@ -857,7 +849,7 @@ static ssize_t pt_read(struct file *filp, char *buf, size_t count, loff_t * ppos
 
 }
 
-static ssize_t pt_write(struct file *filp, const char *buf, size_t count, loff_t * ppos)
+static ssize_t pt_write(struct file *filp, const char __user *buf, size_t count, loff_t * ppos)
 {
 	struct pt_unit *tape = filp->private_data;
 	struct pi_adapter *pi = tape->pi;
@@ -960,32 +952,46 @@ static ssize_t pt_write(struct file *filp, const char *buf, size_t count, loff_t
 static int __init pt_init(void)
 {
 	int unit;
+	int err;
 
-	if (disable)
-		return -1;
+	if (disable) {
+		err = -EINVAL;
+		goto out;
+	}
 
-	if (pt_detect())
-		return -1;
+	if (pt_detect()) {
+		err = -ENODEV;
+		goto out;
+	}
 
-	if (register_chrdev(major, name, &pt_fops)) {
+	err = register_chrdev(major, name, &pt_fops);
+	if (err < 0) {
 		printk("pt_init: unable to get major number %d\n", major);
 		for (unit = 0; unit < PT_UNITS; unit++)
 			if (pt[unit].present)
 				pi_release(pt[unit].pi);
-		return -1;
+		goto out;
+	}
+	major = err;
+	pt_class = class_create(THIS_MODULE, "pt");
+	if (IS_ERR(pt_class)) {
+		err = PTR_ERR(pt_class);
+		goto out_chrdev;
 	}
 
-	devfs_mk_dir("pt");
 	for (unit = 0; unit < PT_UNITS; unit++)
 		if (pt[unit].present) {
-			devfs_mk_cdev(MKDEV(major, unit),
-				      S_IFCHR | S_IRUSR | S_IWUSR,
-				      "pt/%d", unit);
-			devfs_mk_cdev(MKDEV(major, unit + 128),
-				      S_IFCHR | S_IRUSR | S_IWUSR,
-				      "pt/%dn", unit);
+			device_create(pt_class, NULL, MKDEV(major, unit), NULL,
+				      "pt%d", unit);
+			device_create(pt_class, NULL, MKDEV(major, unit + 128),
+				      NULL, "pt%dn", unit);
 		}
-	return 0;
+	goto out;
+
+out_chrdev:
+	unregister_chrdev(major, "pt");
+out:
+	return err;
 }
 
 static void __exit pt_exit(void)
@@ -993,10 +999,10 @@ static void __exit pt_exit(void)
 	int unit;
 	for (unit = 0; unit < PT_UNITS; unit++)
 		if (pt[unit].present) {
-			devfs_remove("pt/%d", unit);
-			devfs_remove("pt/%dn", unit);
+			device_destroy(pt_class, MKDEV(major, unit));
+			device_destroy(pt_class, MKDEV(major, unit + 128));
 		}
-	devfs_remove("pt");
+	class_destroy(pt_class);
 	unregister_chrdev(major, name);
 	for (unit = 0; unit < PT_UNITS; unit++)
 		if (pt[unit].present)

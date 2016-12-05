@@ -2,10 +2,10 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/platform_device.h>
+
 #include <asm/setup.h>
 #include <asm/system.h>
 #include <asm/irq.h>
@@ -103,8 +103,6 @@
 
 #define SWAP(A) ((A>>8) | ((A&0xff) <<8))
 
-static struct fb_info fb_info;
-
 /* frame buffer operations */
 
 static int dnfb_blank(int blank, struct fb_info *info);
@@ -116,27 +114,26 @@ static struct fb_ops dn_fb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= dnfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
-struct fb_var_screeninfo dnfb_var __initdata = {
-	.xres		1280,
-	.yres		1024,
-	.xres_virtual	2048,
-	.yres_virtual	1024,
-	.bits_per_pixel	1,
-	.height		-1,
-	.width		-1,
-	.vmode		FB_VMODE_NONINTERLACED,
+struct fb_var_screeninfo dnfb_var __devinitdata = {
+	.xres		= 1280,
+	.yres		= 1024,
+	.xres_virtual	= 2048,
+	.yres_virtual	= 1024,
+	.bits_per_pixel	= 1,
+	.height		= -1,
+	.width		= -1,
+	.vmode		= FB_VMODE_NONINTERLACED,
 };
 
-static struct fb_fix_screeninfo dnfb_fix __initdata = {
-	.id		"Apollo Mono",
-	.smem_start	(FRAME_BUFFER_START + IO_BASE),
-	.smem_len	FRAME_BUFFER_LEN,
-	.type		FB_TYPE_PACKED_PIXELS,
-	.visual		FB_VISUAL_MONO10,
-	.line_length	256,
+static struct fb_fix_screeninfo dnfb_fix __devinitdata = {
+	.id		= "Apollo Mono",
+	.smem_start	= (FRAME_BUFFER_START + IO_BASE),
+	.smem_len	= FRAME_BUFFER_LEN,
+	.type		= FB_TYPE_PACKED_PIXELS,
+	.visual		= FB_VISUAL_MONO10,
+	.line_length	= 256,
 };
 
 static int dnfb_blank(int blank, struct fb_info *info)
@@ -148,7 +145,7 @@ static int dnfb_blank(int blank, struct fb_info *info)
 	return 0;
 }
 
-static 
+static
 void dnfb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
 
@@ -224,21 +221,40 @@ void dnfb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 	out_8(AP_CONTROL_0, NORMAL_MODE);
 }
 
+/*
+ * Initialization
+ */
 
-unsigned long __init dnfb_init(unsigned long mem_start)
+static int __devinit dnfb_probe(struct platform_device *dev)
 {
-	int err;
+	struct fb_info *info;
+	int err = 0;
 
-	fb_info.fbops = &dn_fb_ops;
-	fb_info.fix = dnfb_fix;
-	fb_info.var = dnfb_var;
-	fb_info.screen_base = (u_char *) fb_info.fix.smem_start;
+	info = framebuffer_alloc(0, &dev->dev);
+	if (!info)
+		return -ENOMEM;
 
-	fb_alloc_cmap(&fb_info.cmap, 2, 0);
+	info->fbops = &dn_fb_ops;
+	info->fix = dnfb_fix;
+	info->var = dnfb_var;
+	info->var.red.length = 1;
+	info->var.red.offset = 0;
+	info->var.green = info->var.blue = info->var.red;
+	info->screen_base = (u_char *) info->fix.smem_start;
 
-	err = register_framebuffer(&fb_info);
-	if (err < 0)
-		panic("unable to register apollo frame buffer\n");
+	err = fb_alloc_cmap(&info->cmap, 2, 0);
+	if (err < 0) {
+		framebuffer_release(info);
+		return err;
+	}
+
+	err = register_framebuffer(info);
+	if (err < 0) {
+		fb_dealloc_cmap(&info->cmap);
+		framebuffer_release(info);
+		return err;
+	}
+	platform_set_drvdata(dev, info);
 
 	/* now we have registered we can safely setup the hardware */
 	out_8(AP_CONTROL_3A, RESET_CREG);
@@ -249,7 +265,40 @@ unsigned long __init dnfb_init(unsigned long mem_start)
 	out_be16(AP_ROP_1, SWAP(0x3));
 
 	printk("apollo frame buffer alive and kicking !\n");
-	return mem_start;
+	return err;
 }
+
+static struct platform_driver dnfb_driver = {
+	.probe	= dnfb_probe,
+	.driver	= {
+		.name	= "dnfb",
+	},
+};
+
+static struct platform_device dnfb_device = {
+	.name	= "dnfb",
+};
+
+int __init dnfb_init(void)
+{
+	int ret;
+
+	if (!MACH_IS_APOLLO)
+		return -ENODEV;
+
+	if (fb_get_options("dnfb", NULL))
+		return -ENODEV;
+
+	ret = platform_driver_register(&dnfb_driver);
+
+	if (!ret) {
+		ret = platform_device_register(&dnfb_device);
+		if (ret)
+			platform_driver_unregister(&dnfb_driver);
+	}
+	return ret;
+}
+
+module_init(dnfb_init);
 
 MODULE_LICENSE("GPL");

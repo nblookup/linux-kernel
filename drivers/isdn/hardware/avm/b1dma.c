@@ -1,4 +1,4 @@
-/* $Id: b1dma.c,v 1.1.4.1.2.1 2001/12/21 15:00:17 kai Exp $
+/* $Id: b1dma.c,v 1.1.2.3 2004/02/10 01:07:12 keil Exp $
  * 
  * Common module for AVM B1 cards that support dma with AMCC
  * 
@@ -9,9 +9,10 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
@@ -19,6 +20,7 @@
 #include <linux/ioport.h>
 #include <linux/capi.h>
 #include <linux/kernelcapi.h>
+#include <linux/gfp.h>
 #include <asm/io.h>
 #include <linux/init.h>
 #include <asm/uaccess.h>
@@ -28,11 +30,9 @@
 #include <linux/isdn/capicmd.h>
 #include <linux/isdn/capiutil.h>
 
-#if BITS_PER_LONG != 32
-#error FIXME: driver requires 32-bit platform
-#endif
+static char *revision = "$Revision: 1.1.2.3 $";
 
-static char *revision = "$Revision: 1.1.4.1.2.1 $";
+#undef AVM_B1DMA_DEBUG
 
 /* ------------------------------------------------------------- */
 
@@ -41,7 +41,7 @@ MODULE_AUTHOR("Carsten Paeth");
 MODULE_LICENSE("GPL");
 
 static int suppress_pollack = 0;
-MODULE_PARM(suppress_pollack, "0-1i");
+module_param(suppress_pollack, bool, 0);
 
 /* ------------------------------------------------------------- */
 
@@ -239,7 +239,7 @@ void b1dma_reset(avmcard *card)
 
 /* ------------------------------------------------------------- */
 
-int b1dma_detect(avmcard *card)
+static int b1dma_detect(avmcard *card)
 {
 	b1dma_writel(card, 0, AMCC_MCSR);
 	mdelay(10);
@@ -394,20 +394,21 @@ static void b1dma_dispatch_tx(avmcard *card)
 			_put_slice(&p, skb->data, len);
 		}
 		txlen = (u8 *)p - (u8 *)dma->sendbuf.dmabuf;
-#ifdef CONFIG_B1DMA_DEBUG
+#ifdef AVM_B1DMA_DEBUG
 		printk(KERN_DEBUG "tx: put msg len=%d\n", txlen);
 #endif
 	} else {
 		txlen = skb->len-2;
-#ifdef CONFIG_B1DMA_POLLDEBUG
+#ifdef AVM_B1DMA_POLLDEBUG
 		if (skb->data[2] == SEND_POLLACK)
 			printk(KERN_INFO "%s: send ack\n", card->name);
 #endif
-#ifdef CONFIG_B1DMA_DEBUG
+#ifdef AVM_B1DMA_DEBUG
 		printk(KERN_DEBUG "tx: put 0x%x len=%d\n", 
 		       skb->data[2], txlen);
 #endif
-		memcpy(dma->sendbuf.dmabuf, skb->data+2, skb->len-2);
+		skb_copy_from_linear_data_offset(skb, 2, dma->sendbuf.dmabuf,
+						 skb->len - 2);
 	}
 	txlen = (txlen + 3) & ~3;
 
@@ -453,7 +454,7 @@ static void b1dma_handle_rx(avmcard *card)
 	u32 ApplId, MsgLen, DataB3Len, NCCI, WindowSize;
 	u8 b1cmd =  _get_byte(&p);
 
-#ifdef CONFIG_B1DMA_DEBUG
+#ifdef AVM_B1DMA_DEBUG
 	printk(KERN_DEBUG "rx: 0x%x %lu\n", b1cmd, (unsigned long)dma->recvlen);
 #endif
 	
@@ -488,11 +489,13 @@ static void b1dma_handle_rx(avmcard *card)
 					card->name);
 		} else {
 			memcpy(skb_put(skb, MsgLen), card->msgbuf, MsgLen);
-			if (CAPIMSG_CMD(skb->data) == CAPI_DATA_B3_CONF)
+			if (CAPIMSG_CMD(skb->data) == CAPI_DATA_B3_CONF) {
+				spin_lock(&card->lock);
 				capilib_data_b3_conf(&cinfo->ncci_head, ApplId,
-						     CAPIMSG_NCCI(skb->data),
-						     CAPIMSG_MSGID(skb->data));
-
+					CAPIMSG_NCCI(skb->data),
+					CAPIMSG_MSGID(skb->data));
+				spin_unlock(&card->lock);
+			}
 			capi_ctr_handle_message(ctrl, ApplId, skb);
 		}
 		break;
@@ -502,9 +505,9 @@ static void b1dma_handle_rx(avmcard *card)
 		ApplId = _get_word(&p);
 		NCCI = _get_word(&p);
 		WindowSize = _get_word(&p);
-
+		spin_lock(&card->lock);
 		capilib_new_ncci(&cinfo->ncci_head, ApplId, NCCI, WindowSize);
-
+		spin_unlock(&card->lock);
 		break;
 
 	case RECEIVE_FREE_NCCI:
@@ -512,13 +515,15 @@ static void b1dma_handle_rx(avmcard *card)
 		ApplId = _get_word(&p);
 		NCCI = _get_word(&p);
 
-		if (NCCI != 0xffffffff)
+		if (NCCI != 0xffffffff) {
+			spin_lock(&card->lock);
 			capilib_free_ncci(&cinfo->ncci_head, ApplId, NCCI);
-
+			spin_unlock(&card->lock);
+		}
 		break;
 
 	case RECEIVE_START:
-#ifdef CONFIG_B1DMA_POLLDEBUG
+#ifdef AVM_B1DMA_POLLDEBUG
 		printk(KERN_INFO "%s: receive poll\n", card->name);
 #endif
 		if (!suppress_pollack)
@@ -578,11 +583,16 @@ static void b1dma_handle_rx(avmcard *card)
 
 static void b1dma_handle_interrupt(avmcard *card)
 {
-	u32 status = b1dma_readl(card, AMCC_INTCSR);
+	u32 status;
 	u32 newcsr;
 
-	if ((status & ANY_S5933_INT) == 0) 
+	spin_lock(&card->lock);
+
+	status = b1dma_readl(card, AMCC_INTCSR);
+	if ((status & ANY_S5933_INT) == 0) {
+		spin_unlock(&card->lock);
 		return;
+	}
 
         newcsr = card->csr | (status & ALL_INT);
 	if (status & TX_TC_INT) newcsr &= ~EN_TX_TC_INT;
@@ -593,19 +603,27 @@ static void b1dma_handle_interrupt(avmcard *card)
 		struct avmcard_dmainfo *dma = card->dma;
 		u32 rxlen;
 	   	if (card->dma->recvlen == 0) {
-			dma->recvlen = *((u32 *)dma->recvbuf.dmabuf);
-			rxlen = (dma->recvlen + 3) & ~3;
-			b1dma_writel(card, dma->recvbuf.dmaaddr+4, AMCC_RXPTR);
-			b1dma_writel(card, rxlen, AMCC_RXLEN);
+	        	rxlen = b1dma_readl(card, AMCC_RXLEN);
+			if (rxlen == 0) {
+				dma->recvlen = *((u32 *)dma->recvbuf.dmabuf);
+				rxlen = (dma->recvlen + 3) & ~3;
+				b1dma_writel(card, dma->recvbuf.dmaaddr+4, AMCC_RXPTR);
+				b1dma_writel(card, rxlen, AMCC_RXLEN);
+#ifdef AVM_B1DMA_DEBUG
+			} else {
+				printk(KERN_ERR "%s: rx not complete (%d).\n",
+					card->name, rxlen);
+#endif
+			}
 		} else {
+			spin_unlock(&card->lock);
 			b1dma_handle_rx(card);
 	   		dma->recvlen = 0;
+			spin_lock(&card->lock);
 			b1dma_writel(card, dma->recvbuf.dmaaddr, AMCC_RXPTR);
 			b1dma_writel(card, 4, AMCC_RXLEN);
 		}
 	}
-
-	spin_lock(&card->lock);
 
 	if ((status & TX_TC_INT) != 0) {
 		if (skb_queue_empty(&card->dma->send_queue))
@@ -618,7 +636,7 @@ static void b1dma_handle_interrupt(avmcard *card)
 	spin_unlock(&card->lock);
 }
 
-irqreturn_t b1dma_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
+irqreturn_t b1dma_interrupt(int interrupt, void *devptr)
 {
 	avmcard *card = devptr;
 
@@ -736,17 +754,18 @@ void b1dma_reset_ctr(struct capi_ctr *ctrl)
 {
 	avmctrl_info *cinfo = (avmctrl_info *)(ctrl->driverdata);
 	avmcard *card = cinfo->card;
+	unsigned long flags;
 
+	spin_lock_irqsave(&card->lock, flags);
  	b1dma_reset(card);
 
 	memset(cinfo->version, 0, sizeof(cinfo->version));
 	capilib_release(&cinfo->ncci_head);
-	capi_ctr_reseted(ctrl);
+	spin_unlock_irqrestore(&card->lock, flags);
+	capi_ctr_down(ctrl);
 }
 
-
 /* ------------------------------------------------------------- */
-
 
 void b1dma_register_appl(struct capi_ctr *ctrl,
 				u16 appl,
@@ -791,8 +810,11 @@ void b1dma_release_appl(struct capi_ctr *ctrl, u16 appl)
 	avmcard *card = cinfo->card;
 	struct sk_buff *skb;
 	void *p;
+	unsigned long flags;
 
+	spin_lock_irqsave(&card->lock, flags);
 	capilib_release_appl(&cinfo->ncci_head, appl);
+	spin_unlock_irqrestore(&card->lock, flags);
 
 	skb = alloc_skb(7, GFP_ATOMIC);
 	if (!skb) {
@@ -820,35 +842,36 @@ u16 b1dma_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 	u16 retval = CAPI_NOERROR;
 
  	if (CAPIMSG_CMD(skb->data) == CAPI_DATA_B3_REQ) {
+		unsigned long flags;
+		spin_lock_irqsave(&card->lock, flags);
 		retval = capilib_data_b3_req(&cinfo->ncci_head,
 					     CAPIMSG_APPID(skb->data),
 					     CAPIMSG_NCCI(skb->data),
 					     CAPIMSG_MSGID(skb->data));
+		spin_unlock_irqrestore(&card->lock, flags);
 	}
 	if (retval == CAPI_NOERROR) 
 		b1dma_queue_tx(card, skb);
-	else
-		dev_kfree_skb_any(skb);
 
 	return retval;
 }
 
 /* ------------------------------------------------------------- */
 
-int b1dmactl_read_proc(char *page, char **start, off_t off,
-        		int count, int *eof, struct capi_ctr *ctrl)
+static int b1dmactl_proc_show(struct seq_file *m, void *v)
 {
+	struct capi_ctr *ctrl = m->private;
 	avmctrl_info *cinfo = (avmctrl_info *)(ctrl->driverdata);
 	avmcard *card = cinfo->card;
 	u8 flag;
-	int len = 0;
 	char *s;
 	u32 txoff, txlen, rxoff, rxlen, csr;
+	unsigned long flags;
 
-	len += sprintf(page+len, "%-16s %s\n", "name", card->name);
-	len += sprintf(page+len, "%-16s 0x%x\n", "io", card->port);
-	len += sprintf(page+len, "%-16s %d\n", "irq", card->irq);
-	len += sprintf(page+len, "%-16s 0x%lx\n", "membase", card->membase);
+	seq_printf(m, "%-16s %s\n", "name", card->name);
+	seq_printf(m, "%-16s 0x%x\n", "io", card->port);
+	seq_printf(m, "%-16s %d\n", "irq", card->irq);
+	seq_printf(m, "%-16s 0x%lx\n", "membase", card->membase);
 	switch (card->cardtype) {
 	case avm_b1isa: s = "B1 ISA"; break;
 	case avm_b1pci: s = "B1 PCI"; break;
@@ -861,18 +884,18 @@ int b1dmactl_read_proc(char *page, char **start, off_t off,
 	case avm_c2: s = "C2"; break;
 	default: s = "???"; break;
 	}
-	len += sprintf(page+len, "%-16s %s\n", "type", s);
-	if ((s = cinfo->version[VER_DRIVER]) != 0)
-	   len += sprintf(page+len, "%-16s %s\n", "ver_driver", s);
-	if ((s = cinfo->version[VER_CARDTYPE]) != 0)
-	   len += sprintf(page+len, "%-16s %s\n", "ver_cardtype", s);
-	if ((s = cinfo->version[VER_SERIAL]) != 0)
-	   len += sprintf(page+len, "%-16s %s\n", "ver_serial", s);
+	seq_printf(m, "%-16s %s\n", "type", s);
+	if ((s = cinfo->version[VER_DRIVER]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_driver", s);
+	if ((s = cinfo->version[VER_CARDTYPE]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_cardtype", s);
+	if ((s = cinfo->version[VER_SERIAL]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_serial", s);
 
 	if (card->cardtype != avm_m1) {
         	flag = ((u8 *)(ctrl->profile.manu))[3];
         	if (flag)
-			len += sprintf(page+len, "%-16s%s%s%s%s%s%s%s\n",
+			seq_printf(m, "%-16s%s%s%s%s%s%s%s\n",
 			"protocol",
 			(flag & 0x01) ? " DSS1" : "",
 			(flag & 0x02) ? " CT1" : "",
@@ -886,7 +909,7 @@ int b1dmactl_read_proc(char *page, char **start, off_t off,
 	if (card->cardtype != avm_m1) {
         	flag = ((u8 *)(ctrl->profile.manu))[5];
 		if (flag)
-			len += sprintf(page+len, "%-16s%s%s%s%s\n",
+			seq_printf(m, "%-16s%s%s%s%s\n",
 			"linetype",
 			(flag & 0x01) ? " point to point" : "",
 			(flag & 0x02) ? " point to multipoint" : "",
@@ -894,7 +917,10 @@ int b1dmactl_read_proc(char *page, char **start, off_t off,
 			(flag & 0x04) ? " leased line with D-channel" : ""
 			);
 	}
-	len += sprintf(page+len, "%-16s %s\n", "cardname", cinfo->cardname);
+	seq_printf(m, "%-16s %s\n", "cardname", cinfo->cardname);
+
+
+	spin_lock_irqsave(&card->lock, flags);
 
 	txoff = (dma_addr_t)b1dma_readl(card, AMCC_TXPTR)-card->dma->sendbuf.dmaaddr;
 	txlen = b1dma_readl(card, AMCC_TXLEN);
@@ -904,26 +930,31 @@ int b1dmactl_read_proc(char *page, char **start, off_t off,
 
 	csr  = b1dma_readl(card, AMCC_INTCSR);
 
-        len += sprintf(page+len, "%-16s 0x%lx\n",
-				"csr (cached)", (unsigned long)card->csr);
-        len += sprintf(page+len, "%-16s 0x%lx\n",
-				"csr", (unsigned long)csr);
-        len += sprintf(page+len, "%-16s %lu\n",
-				"txoff", (unsigned long)txoff);
-        len += sprintf(page+len, "%-16s %lu\n",
-				"txlen", (unsigned long)txlen);
-        len += sprintf(page+len, "%-16s %lu\n",
-				"rxoff", (unsigned long)rxoff);
-        len += sprintf(page+len, "%-16s %lu\n",
-				"rxlen", (unsigned long)rxlen);
+	spin_unlock_irqrestore(&card->lock, flags);
 
-	if (off+count >= len)
-	   *eof = 1;
-	if (len < off)
-           return 0;
-	*start = page + off;
-	return ((count < len-off) ? count : len-off);
+	seq_printf(m, "%-16s 0x%lx\n", "csr (cached)", (unsigned long)card->csr);
+	seq_printf(m, "%-16s 0x%lx\n", "csr", (unsigned long)csr);
+	seq_printf(m, "%-16s %lu\n", "txoff", (unsigned long)txoff);
+	seq_printf(m, "%-16s %lu\n", "txlen", (unsigned long)txlen);
+	seq_printf(m, "%-16s %lu\n", "rxoff", (unsigned long)rxoff);
+	seq_printf(m, "%-16s %lu\n", "rxlen", (unsigned long)rxlen);
+
+	return 0;
 }
+
+static int b1dmactl_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, b1dmactl_proc_show, PDE(inode)->data);
+}
+
+const struct file_operations b1dmactl_proc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= b1dmactl_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+EXPORT_SYMBOL(b1dmactl_proc_fops);
 
 /* ------------------------------------------------------------- */
 
@@ -937,16 +968,15 @@ EXPORT_SYMBOL(b1dma_reset_ctr);
 EXPORT_SYMBOL(b1dma_register_appl);
 EXPORT_SYMBOL(b1dma_release_appl);
 EXPORT_SYMBOL(b1dma_send_message);
-EXPORT_SYMBOL(b1dmactl_read_proc);
 
-int b1dma_init(void)
+static int __init b1dma_init(void)
 {
 	char *p;
 	char rev[32];
 
-	if ((p = strchr(revision, ':')) != 0 && p[1]) {
+	if ((p = strchr(revision, ':')) != NULL && p[1]) {
 		strlcpy(rev, p + 2, sizeof(rev));
-		if ((p = strchr(rev, '$')) != 0 && p > rev)
+		if ((p = strchr(rev, '$')) != NULL && p > rev)
 		   *(p-1) = 0;
 	} else
 		strcpy(rev, "1.0");
@@ -956,7 +986,7 @@ int b1dma_init(void)
 	return 0;
 }
 
-void b1dma_exit(void)
+static void __exit b1dma_exit(void)
 {
 }
 

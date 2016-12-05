@@ -20,9 +20,9 @@
 #include <linux/init.h>
 
 #include <asm/traps.h>
-#include <asm/bootinfo.h> 
-#include <asm/macintosh.h> 
-#include <asm/macints.h> 
+#include <asm/bootinfo.h>
+#include <asm/macintosh.h>
+#include <asm/macints.h>
 #include <asm/mac_psc.h>
 
 #define DEBUG_PSC
@@ -30,13 +30,13 @@
 int psc_present;
 volatile __u8 *psc;
 
-irqreturn_t psc_irq(int, void *, struct pt_regs *);
+irqreturn_t psc_irq(int, void *);
 
 /*
  * Debugging dump, used in various places to see what's going on.
  */
 
-void psc_debug_dump(void)
+static void psc_debug_dump(void)
 {
 	int	i;
 
@@ -55,7 +55,7 @@ void psc_debug_dump(void)
  * expanded to cover what I think are the other 7 channels.
  */
 
-void psc_dma_die_die_die(void)
+static void psc_dma_die_die_die(void)
 {
 	int i;
 
@@ -88,7 +88,7 @@ void __init psc_init(void)
 
 	/*
 	 * The PSC is always at the same spot, but using psc
-	 * keeps things consisant with the psc_xxxx functions.
+	 * keeps things consistent with the psc_xxxx functions.
 	 */
 
 	psc = (void *) PSC_BASE;
@@ -117,29 +117,26 @@ void __init psc_init(void)
 
 void __init psc_register_interrupts(void)
 {
-	sys_request_irq(3, psc_irq, IRQ_FLG_LOCK, "psc3",
-			(void *) 0x30);
-	sys_request_irq(4, psc_irq, IRQ_FLG_LOCK, "psc4",
-			(void *) 0x40);
-	sys_request_irq(5, psc_irq, IRQ_FLG_LOCK, "psc5",
-			(void *) 0x50);
-	sys_request_irq(6, psc_irq, IRQ_FLG_LOCK, "psc6",
-			(void *) 0x60);
+	if (request_irq(IRQ_AUTO_3, psc_irq, 0, "psc3", (void *) 0x30))
+		pr_err("Couldn't register psc%d interrupt\n", 3);
+	if (request_irq(IRQ_AUTO_4, psc_irq, 0, "psc4", (void *) 0x40))
+		pr_err("Couldn't register psc%d interrupt\n", 4);
+	if (request_irq(IRQ_AUTO_5, psc_irq, 0, "psc5", (void *) 0x50))
+		pr_err("Couldn't register psc%d interrupt\n", 5);
+	if (request_irq(IRQ_AUTO_6, psc_irq, 0, "psc6", (void *) 0x60))
+		pr_err("Couldn't register psc%d interrupt\n", 6);
 }
 
 /*
  * PSC interrupt handler. It's a lot like the VIA interrupt handler.
  */
 
-irqreturn_t psc_irq(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t psc_irq(int irq, void *dev_id)
 {
 	int pIFR	= pIFRbase + ((int) dev_id);
 	int pIER	= pIERbase + ((int) dev_id);
-	int base_irq;
-	int irq_bit,i;
-	unsigned char events;
-
-	base_irq = irq << 3;
+	int irq_num;
+	unsigned char irq_bit, events;
 
 #ifdef DEBUG_IRQS
 	printk("psc_irq: irq %d pIFR = 0x%02X pIER = 0x%02X\n",
@@ -150,14 +147,16 @@ irqreturn_t psc_irq(int irq, void *dev_id, struct pt_regs *regs)
 	if (!events)
 		return IRQ_NONE;
 
-	for (i = 0, irq_bit = 1 ; i < 4 ; i++, irq_bit <<= 1) {
-	        if (events & irq_bit) {
-			psc_write_byte(pIER, irq_bit);
-			mac_do_irq_list(base_irq + i, regs);
+	irq_num = irq << 3;
+	irq_bit = 1;
+	do {
+		if (events & irq_bit) {
 			psc_write_byte(pIFR, irq_bit);
-			psc_write_byte(pIER, irq_bit | 0x80);
+			m68k_handle_int(irq_num);
 		}
-	}
+		irq_num++;
+		irq_bit <<= 1;
+	} while (events >= irq_bit);
 	return IRQ_HANDLED;
 }
 

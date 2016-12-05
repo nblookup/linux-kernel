@@ -15,25 +15,22 @@
  */
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/fcntl.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
-#include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
-#include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/crc32.h>
+#include <linux/bitops.h>
+#include <linux/platform_device.h>
+#include <linux/io.h>
 
+#include <mach/hardware.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/irq.h>
-#include <asm/io.h>
-#include <asm/dma.h>
 
 #define TX_BUFFERS 15
 #define RX_BUFFERS 25
@@ -41,7 +38,7 @@
 #include "am79c961a.h"
 
 static irqreturn_t
-am79c961_interrupt (int irq, void *dev_id, struct pt_regs *regs);
+am79c961_interrupt (int irq, void *dev_id);
 
 static unsigned int net_debug = NET_DEBUG;
 
@@ -53,25 +50,31 @@ static const char version[] =
 #ifdef __arm__
 static void write_rreg(u_long base, u_int reg, u_int val)
 {
-	__asm__("str%?h	%1, [%2]	@ NET_RAP
-		str%?h	%0, [%2, #-4]	@ NET_RDP
-		" : : "r" (val), "r" (reg), "r" (ISAIO_BASE + 0x0464));
+	__asm__(
+	"str%?h	%1, [%2]	@ NET_RAP\n\t"
+	"str%?h	%0, [%2, #-4]	@ NET_RDP"
+	:
+	: "r" (val), "r" (reg), "r" (ISAIO_BASE + 0x0464));
 }
 
 static inline unsigned short read_rreg(u_long base_addr, u_int reg)
 {
 	unsigned short v;
-	__asm__("str%?h	%1, [%2]	@ NET_RAP
-		ldr%?h	%0, [%2, #-4]	@ NET_RDP
-		" : "=r" (v): "r" (reg), "r" (ISAIO_BASE + 0x0464));
+	__asm__(
+	"str%?h	%1, [%2]	@ NET_RAP\n\t"
+	"ldr%?h	%0, [%2, #-4]	@ NET_RDP"
+	: "=r" (v)
+	: "r" (reg), "r" (ISAIO_BASE + 0x0464));
 	return v;
 }
 
 static inline void write_ireg(u_long base, u_int reg, u_int val)
 {
-	__asm__("str%?h	%1, [%2]	@ NET_RAP
-		str%?h	%0, [%2, #8]	@ NET_IDP
-		" : : "r" (val), "r" (reg), "r" (ISAIO_BASE + 0x0464));
+	__asm__(
+	"str%?h	%1, [%2]	@ NET_RAP\n\t"
+	"str%?h	%0, [%2, #8]	@ NET_IDP"
+	:
+	: "r" (val), "r" (reg), "r" (ISAIO_BASE + 0x0464));
 }
 
 static inline unsigned short read_ireg(u_long base_addr, u_int reg)
@@ -79,7 +82,7 @@ static inline unsigned short read_ireg(u_long base_addr, u_int reg)
 	u_short v;
 	__asm__(
 	"str%?h	%1, [%2]	@ NAT_RAP\n\t"
-	"str%?h	%0, [%2, #8]	@ NET_IDP\n\t"
+	"ldr%?h	%0, [%2, #8]	@ NET_IDP\n\t"
 	: "=r" (v)
 	: "r" (reg), "r" (ISAIO_BASE + 0x0464));
 	return v;
@@ -101,16 +104,16 @@ am_writebuffer(struct net_device *dev, u_int offset, unsigned char *buf, unsigne
 	}
 	while (length > 8) {
 		unsigned int tmp, tmp2;
-		__asm__ __volatile__("
-			ldm%?ia	%1!, {%2, %3}
-			str%?h	%2, [%0], #4
-			mov%?	%2, %2, lsr #16
-			str%?h	%2, [%0], #4
-			str%?h	%3, [%0], #4
-			mov%?	%3, %3, lsr #16
-			str%?h	%3, [%0], #4
-		" : "=&r" (offset), "=&r" (buf), "=r" (tmp), "=r" (tmp2)
-		  : "0" (offset), "1" (buf));
+		__asm__ __volatile__(
+			"ldm%?ia	%1!, {%2, %3}\n\t"
+			"str%?h	%2, [%0], #4\n\t"
+			"mov%?	%2, %2, lsr #16\n\t"
+			"str%?h	%2, [%0], #4\n\t"
+			"str%?h	%3, [%0], #4\n\t"
+			"mov%?	%3, %3, lsr #16\n\t"
+			"str%?h	%3, [%0], #4"
+		: "=&r" (offset), "=&r" (buf), "=r" (tmp), "=r" (tmp2)
+		: "0" (offset), "1" (buf));
 		length -= 8;
 	}
 	while (length > 0) {
@@ -128,36 +131,36 @@ am_readbuffer(struct net_device *dev, u_int offset, unsigned char *buf, unsigned
 	length = (length + 1) & ~1;
 	if ((int)buf & 2) {
 		unsigned int tmp;
-		__asm__ __volatile__("
-			ldr%?h	%2, [%0], #4
-			str%?b	%2, [%1], #1
-			mov%?	%2, %2, lsr #8
-			str%?b	%2, [%1], #1
-		" : "=&r" (offset), "=&r" (buf), "=r" (tmp): "0" (offset), "1" (buf));
+		__asm__ __volatile__(
+			"ldr%?h	%2, [%0], #4\n\t"
+			"str%?b	%2, [%1], #1\n\t"
+			"mov%?	%2, %2, lsr #8\n\t"
+			"str%?b	%2, [%1], #1"
+		: "=&r" (offset), "=&r" (buf), "=r" (tmp): "0" (offset), "1" (buf));
 		length -= 2;
 	}
 	while (length > 8) {
 		unsigned int tmp, tmp2, tmp3;
-		__asm__ __volatile__("
-			ldr%?h	%2, [%0], #4
-			ldr%?h	%3, [%0], #4
-			orr%?	%2, %2, %3, lsl #16
-			ldr%?h	%3, [%0], #4
-			ldr%?h	%4, [%0], #4
-			orr%?	%3, %3, %4, lsl #16
-			stm%?ia	%1!, {%2, %3}
-		" : "=&r" (offset), "=&r" (buf), "=r" (tmp), "=r" (tmp2), "=r" (tmp3)
-		  : "0" (offset), "1" (buf));
+		__asm__ __volatile__(
+			"ldr%?h	%2, [%0], #4\n\t"
+			"ldr%?h	%3, [%0], #4\n\t"
+			"orr%?	%2, %2, %3, lsl #16\n\t"
+			"ldr%?h	%3, [%0], #4\n\t"
+			"ldr%?h	%4, [%0], #4\n\t"
+			"orr%?	%3, %3, %4, lsl #16\n\t"
+			"stm%?ia	%1!, {%2, %3}"
+		: "=&r" (offset), "=&r" (buf), "=r" (tmp), "=r" (tmp2), "=r" (tmp3)
+		: "0" (offset), "1" (buf));
 		length -= 8;
 	}
 	while (length > 0) {
 		unsigned int tmp;
-		__asm__ __volatile__("
-			ldr%?h	%2, [%0], #4
-			str%?b	%2, [%1], #1
-			mov%?	%2, %2, lsr #8
-			str%?b	%2, [%1], #1
-		" : "=&r" (offset), "=&r" (buf), "=r" (tmp) : "0" (offset), "1" (buf));
+		__asm__ __volatile__(
+			"ldr%?h	%2, [%0], #4\n\t"
+			"str%?b	%2, [%1], #1\n\t"
+			"mov%?	%2, %2, lsr #8\n\t"
+			"str%?b	%2, [%1], #1"
+		: "=&r" (offset), "=&r" (buf), "=r" (tmp) : "0" (offset), "1" (buf));
 		length -= 2;
 	}
 }
@@ -196,7 +199,7 @@ am79c961_ramtest(struct net_device *dev, unsigned int val)
 static void
 am79c961_init_for_open(struct net_device *dev)
 {
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	struct dev_priv *priv = netdev_priv(dev);
 	unsigned long flags;
 	unsigned char *p;
 	u_int hdr_addr, first_free_addr;
@@ -205,9 +208,9 @@ am79c961_init_for_open(struct net_device *dev)
 	/*
 	 * Stop the chip.
 	 */
-	spin_lock_irqsave(priv->chip_lock, flags);
+	spin_lock_irqsave(&priv->chip_lock, flags);
 	write_rreg (dev->base_addr, CSR0, CSR0_BABL|CSR0_CERR|CSR0_MISS|CSR0_MERR|CSR0_TINT|CSR0_RINT|CSR0_STOP);
-	spin_unlock_irqrestore(priv->chip_lock, flags);
+	spin_unlock_irqrestore(&priv->chip_lock, flags);
 
 	write_ireg (dev->base_addr, 5, 0x00a0); /* Receive address LED */
 	write_ireg (dev->base_addr, 6, 0x0081); /* Collision LED */
@@ -271,18 +274,21 @@ am79c961_init_for_open(struct net_device *dev)
 static void am79c961_timer(unsigned long data)
 {
 	struct net_device *dev = (struct net_device *)data;
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	struct dev_priv *priv = netdev_priv(dev);
 	unsigned int lnkstat, carrier;
 
 	lnkstat = read_ireg(dev->base_addr, ISALED0) & ISALED0_LNKST;
 	carrier = netif_carrier_ok(dev);
 
-	if (lnkstat && !carrier)
+	if (lnkstat && !carrier) {
 		netif_carrier_on(dev);
-	else if (!lnkstat && carrier)
+		printk("%s: link up\n", dev->name);
+	} else if (!lnkstat && carrier) {
 		netif_carrier_off(dev);
+		printk("%s: link down\n", dev->name);
+	}
 
-	mod_timer(&priv->timer, jiffies + 5*HZ);
+	mod_timer(&priv->timer, jiffies + msecs_to_jiffies(500));
 }
 
 /*
@@ -291,10 +297,8 @@ static void am79c961_timer(unsigned long data)
 static int
 am79c961_open(struct net_device *dev)
 {
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	struct dev_priv *priv = netdev_priv(dev);
 	int ret;
-
-	memset (&priv->stats, 0, sizeof (priv->stats));
 
 	ret = request_irq(dev->irq, am79c961_interrupt, 0, dev->name, dev);
 	if (ret)
@@ -318,7 +322,7 @@ am79c961_open(struct net_device *dev)
 static int
 am79c961_close(struct net_device *dev)
 {
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	struct dev_priv *priv = netdev_priv(dev);
 	unsigned long flags;
 
 	del_timer_sync(&priv->timer);
@@ -326,32 +330,23 @@ am79c961_close(struct net_device *dev)
 	netif_stop_queue(dev);
 	netif_carrier_off(dev);
 
-	spin_lock_irqsave(priv->chip_lock, flags);
+	spin_lock_irqsave(&priv->chip_lock, flags);
 	write_rreg (dev->base_addr, CSR0, CSR0_STOP);
 	write_rreg (dev->base_addr, CSR3, CSR3_MASKALL);
-	spin_unlock_irqrestore(priv->chip_lock, flags);
+	spin_unlock_irqrestore(&priv->chip_lock, flags);
 
 	free_irq (dev->irq, dev);
 
 	return 0;
 }
 
-/*
- * Get the current statistics.
- */
-static struct net_device_stats *am79c961_getstats (struct net_device *dev)
+static void am79c961_mc_hash(char *addr, unsigned short *hash)
 {
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
-	return &priv->stats;
-}
-
-static void am79c961_mc_hash(struct dev_mc_list *dmi, unsigned short *hash)
-{
-	if (dmi->dmi_addrlen == ETH_ALEN && dmi->dmi_addr[0] & 0x01) {
+	if (addr[0] & 0x01) {
 		int idx, bit;
 		u32 crc;
 
-		crc = ether_crc_le(ETH_ALEN, dmi->dmi_addr);
+		crc = ether_crc_le(ETH_ALEN, addr);
 
 		idx = crc >> 30;
 		bit = (crc >> 26) & 15;
@@ -365,7 +360,7 @@ static void am79c961_mc_hash(struct dev_mc_list *dmi, unsigned short *hash)
  */
 static void am79c961_setmulticastlist (struct net_device *dev)
 {
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	struct dev_priv *priv = netdev_priv(dev);
 	unsigned long flags;
 	unsigned short multi_hash[4], mode;
 	int i, stopped;
@@ -377,15 +372,15 @@ static void am79c961_setmulticastlist (struct net_device *dev)
 	} else if (dev->flags & IFF_ALLMULTI) {
 		memset(multi_hash, 0xff, sizeof(multi_hash));
 	} else {
-		struct dev_mc_list *dmi;
+		struct netdev_hw_addr *ha;
 
 		memset(multi_hash, 0x00, sizeof(multi_hash));
 
-		for (dmi = dev->mc_list; dmi; dmi = dmi->next)
-			am79c961_mc_hash(dmi, multi_hash);
+		netdev_for_each_mc_addr(ha, dev)
+			am79c961_mc_hash(ha->addr, multi_hash);
 	}
 
-	spin_lock_irqsave(priv->chip_lock, flags);
+	spin_lock_irqsave(&priv->chip_lock, flags);
 
 	stopped = read_rreg(dev->base_addr, CSR0) & CSR0_STOP;
 
@@ -399,16 +394,16 @@ static void am79c961_setmulticastlist (struct net_device *dev)
 		 * Spin waiting for chip to report suspend mode
 		 */
 		while ((read_rreg(dev->base_addr, CTRL1) & CTRL1_SPND) == 0) {
-			spin_unlock_irqrestore(priv->chip_lock, flags);
+			spin_unlock_irqrestore(&priv->chip_lock, flags);
 			nop();
-			spin_lock_irqsave(priv->chip_lock, flags);
+			spin_lock_irqsave(&priv->chip_lock, flags);
 		}
 	}
 
 	/*
 	 * Update the multicast hash table
 	 */
-	for (i = 0; i < sizeof(multi_hash) / sizeof(multi_hash[0]); i++)
+	for (i = 0; i < ARRAY_SIZE(multi_hash); i++)
 		write_rreg(dev->base_addr, i + LADRL, multi_hash[i]);
 
 	/*
@@ -423,7 +418,7 @@ static void am79c961_setmulticastlist (struct net_device *dev)
 		write_rreg(dev->base_addr, CTRL1, 0);
 	}
 
-	spin_unlock_irqrestore(priv->chip_lock, flags);
+	spin_unlock_irqrestore(&priv->chip_lock, flags);
 }
 
 static void am79c961_timeout(struct net_device *dev)
@@ -444,7 +439,7 @@ static void am79c961_timeout(struct net_device *dev)
 static int
 am79c961_sendpacket(struct sk_buff *skb, struct net_device *dev)
 {
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	struct dev_priv *priv = netdev_priv(dev);
 	unsigned int hdraddr, bufaddr;
 	unsigned int head;
 	unsigned long flags;
@@ -461,10 +456,9 @@ am79c961_sendpacket(struct sk_buff *skb, struct net_device *dev)
 	am_writeword (dev, hdraddr + 2, TMD_OWN|TMD_STP|TMD_ENP);
 	priv->txhead = head;
 
-	spin_lock_irqsave(priv->chip_lock, flags);
+	spin_lock_irqsave(&priv->chip_lock, flags);
 	write_rreg (dev->base_addr, CSR0, CSR0_TDMD|CSR0_IENA);
-	dev->trans_start = jiffies;
-	spin_unlock_irqrestore(priv->chip_lock, flags);
+	spin_unlock_irqrestore(&priv->chip_lock, flags);
 
 	/*
 	 * If the next packet is owned by the ethernet device,
@@ -476,7 +470,7 @@ am79c961_sendpacket(struct sk_buff *skb, struct net_device *dev)
 
 	dev_kfree_skb(skb);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /*
@@ -505,14 +499,14 @@ am79c961_rx(struct net_device *dev, struct dev_priv *priv)
 
 		if ((status & (RMD_ERR|RMD_STP|RMD_ENP)) != (RMD_STP|RMD_ENP)) {
 			am_writeword (dev, hdraddr + 2, RMD_OWN);
-			priv->stats.rx_errors ++;
+			dev->stats.rx_errors++;
 			if (status & RMD_ERR) {
 				if (status & RMD_FRAM)
-					priv->stats.rx_frame_errors ++;
+					dev->stats.rx_frame_errors++;
 				if (status & RMD_CRC)
-					priv->stats.rx_crc_errors ++;
+					dev->stats.rx_crc_errors++;
 			} else if (status & RMD_STP)
-				priv->stats.rx_length_errors ++;
+				dev->stats.rx_length_errors++;
 			continue;
 		}
 
@@ -520,20 +514,18 @@ am79c961_rx(struct net_device *dev, struct dev_priv *priv)
 		skb = dev_alloc_skb(len + 2);
 
 		if (skb) {
-			skb->dev = dev;
 			skb_reserve(skb, 2);
 
 			am_readbuffer(dev, pktaddr, skb_put(skb, len), len);
 			am_writeword(dev, hdraddr + 2, RMD_OWN);
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_rx(skb);
-			dev->last_rx = jiffies;
-			priv->stats.rx_bytes += len;
-			priv->stats.rx_packets ++;
+			dev->stats.rx_bytes += len;
+			dev->stats.rx_packets++;
 		} else {
 			am_writeword (dev, hdraddr + 2, RMD_OWN);
 			printk (KERN_WARNING "%s: memory squeeze, dropping packet.\n", dev->name);
-			priv->stats.rx_dropped ++;
+			dev->stats.rx_dropped++;
 			break;
 		}
 	} while (1);
@@ -562,7 +554,7 @@ am79c961_tx(struct net_device *dev, struct dev_priv *priv)
 		if (status & TMD_ERR) {
 			u_int status2;
 
-			priv->stats.tx_errors ++;
+			dev->stats.tx_errors++;
 
 			status2 = am_readword (dev, hdraddr + 6);
 
@@ -572,28 +564,28 @@ am79c961_tx(struct net_device *dev, struct dev_priv *priv)
 			am_writeword (dev, hdraddr + 6, 0);
 
 			if (status2 & TST_RTRY)
-				priv->stats.collisions += 16;
+				dev->stats.collisions += 16;
 			if (status2 & TST_LCOL)
-				priv->stats.tx_window_errors ++;
+				dev->stats.tx_window_errors++;
 			if (status2 & TST_LCAR)
-				priv->stats.tx_carrier_errors ++;
+				dev->stats.tx_carrier_errors++;
 			if (status2 & TST_UFLO)
-				priv->stats.tx_fifo_errors ++;
+				dev->stats.tx_fifo_errors++;
 			continue;
 		}
-		priv->stats.tx_packets ++;
+		dev->stats.tx_packets++;
 		len = am_readword (dev, hdraddr + 4);
-		priv->stats.tx_bytes += -len;
+		dev->stats.tx_bytes += -len;
 	} while (priv->txtail != priv->txhead);
 
 	netif_wake_queue(dev);
 }
 
 static irqreturn_t
-am79c961_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+am79c961_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *)dev_id;
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	struct dev_priv *priv = netdev_priv(dev);
 	u_int status, n = 100;
 	int handled = 0;
 
@@ -613,15 +605,26 @@ am79c961_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		}
 		if (status & CSR0_MISS) {
 			handled = 1;
-			priv->stats.rx_dropped ++;
+			dev->stats.rx_dropped++;
 		}
 		if (status & CSR0_CERR) {
 			handled = 1;
 			mod_timer(&priv->timer, jiffies);
+		}
 	} while (--n && status & (CSR0_RINT | CSR0_TINT));
 
 	return IRQ_RETVAL(handled);
 }
+
+#ifdef CONFIG_NET_POLL_CONTROLLER
+static void am79c961_poll_controller(struct net_device *dev)
+{
+	unsigned long flags;
+	local_irq_save(flags);
+	am79c961_interrupt(dev->irq, dev);
+	local_irq_restore(flags);
+}
+#endif
 
 /*
  * Initialise the chip.  Note that we always expect
@@ -630,7 +633,7 @@ am79c961_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 static int
 am79c961_hw_init(struct net_device *dev)
 {
-	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	struct dev_priv *priv = netdev_priv(dev);
 
 	spin_lock_irq(&priv->chip_lock);
 	write_rreg (dev->base_addr, CSR0, CSR0_STOP);
@@ -650,27 +653,57 @@ static void __init am79c961_banner(void)
 	if (net_debug && version_printed++ == 0)
 		printk(KERN_INFO "%s", version);
 }
+static const struct net_device_ops am79c961_netdev_ops = {
+	.ndo_open		= am79c961_open,
+	.ndo_stop		= am79c961_close,
+	.ndo_start_xmit		= am79c961_sendpacket,
+	.ndo_set_multicast_list	= am79c961_setmulticastlist,
+	.ndo_tx_timeout		= am79c961_timeout,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address	= eth_mac_addr,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= am79c961_poll_controller,
+#endif
+};
 
-static int __init am79c961_init(void)
+static int __devinit am79c961_probe(struct platform_device *pdev)
 {
+	struct resource *res;
 	struct net_device *dev;
 	struct dev_priv *priv;
 	int i, ret;
+
+	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
+	if (!res)
+		return -ENODEV;
 
 	dev = alloc_etherdev(sizeof(struct dev_priv));
 	ret = -ENOMEM;
 	if (!dev)
 		goto out;
 
-	priv = dev->priv;
+	SET_NETDEV_DEV(dev, &pdev->dev);
+
+	priv = netdev_priv(dev);
 
 	/*
 	 * Fixed address and IRQ lines here.
 	 * The PNP initialisation should have been
 	 * done by the ether bootp loader.
 	 */
-	dev->base_addr = 0x220;
-	dev->irq = IRQ_EBSA110_ETHERNET;
+	dev->base_addr = res->start;
+	ret = platform_get_irq(pdev, 0);
+
+	if (ret < 0) {
+		ret = -ENODEV;
+		goto nodev;
+	}
+	dev->irq = ret;
+
+	ret = -ENODEV;
+	if (!request_region(dev->base_addr, 0x18, dev->name))
+		goto nodev;
 
 	/*
 	 * Reset the device.
@@ -682,23 +715,15 @@ static int __init am79c961_init(void)
 	 * Check the manufacturer part of the
 	 * ether address.
 	 */
-    	ret = -ENODEV;
 	if (inb(dev->base_addr) != 0x08 ||
 	    inb(dev->base_addr + 2) != 0x00 ||
 	    inb(dev->base_addr + 4) != 0x2b)
-	    	goto nodev;
+	    	goto release;
 
-	if (!request_region(dev->base_addr, 0x18, dev->name))
-		goto nodev;
+	for (i = 0; i < 6; i++)
+		dev->dev_addr[i] = inb(dev->base_addr + i * 2) & 0xff;
 
 	am79c961_banner();
-	printk(KERN_INFO "%s: ether address ", dev->name);
-
-	/* Retrive and print the ethernet address. */
-	for (i = 0; i < 6; i++) {
-		dev->dev_addr[i] = inb(dev->base_addr + i * 2) & 0xff;
-		printk (i == 5 ? "%02x\n" : "%02x:", dev->dev_addr[i]);
-	}
 
 	spin_lock_init(&priv->chip_lock);
 	init_timer(&priv->timer);
@@ -708,23 +733,33 @@ static int __init am79c961_init(void)
 	if (am79c961_hw_init(dev))
 		goto release;
 
-	dev->open		= am79c961_open;
-	dev->stop		= am79c961_close;
-	dev->hard_start_xmit	= am79c961_sendpacket;
-	dev->get_stats		= am79c961_getstats;
-	dev->set_multicast_list	= am79c961_setmulticastlist;
-	dev->tx_timeout		= am79c961_timeout;
+	dev->netdev_ops = &am79c961_netdev_ops;
 
 	ret = register_netdev(dev);
-	if (ret == 0)
+	if (ret == 0) {
+		printk(KERN_INFO "%s: ether address %pM\n",
+		       dev->name, dev->dev_addr);
 		return 0;
+	}
 
 release:
 	release_region(dev->base_addr, 0x18);
 nodev:
-	kfree(dev);
+	free_netdev(dev);
 out:
 	return ret;
+}
+
+static struct platform_driver am79c961_driver = {
+	.probe		= am79c961_probe,
+	.driver		= {
+		.name	= "am79c961",
+	},
+};
+
+static int __init am79c961_init(void)
+{
+	return platform_driver_register(&am79c961_driver);
 }
 
 __initcall(am79c961_init);

@@ -1,19 +1,19 @@
 /*
 	drivers/net/tulip/eeprom.c
 
-	Maintained by Jeff Garzik <jgarzik@pobox.com>
 	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
 	This software may be used and distributed according to the terms
 	of the GNU General Public License, incorporated herein by reference.
 
-	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
-	for more information on this driver, or visit the project
-	Web page at http://sourceforge.net/projects/tulip/
-
+	Please refer to Documentation/DocBook/tulip-user.{pdf,ps,html}
+	for more information on this driver.
+	Please submit bug reports to http://bugzilla.kernel.org/.
 */
 
+#include <linux/pci.h>
+#include <linux/slab.h>
 #include "tulip.h"
 #include <linux/init.h>
 #include <asm/unaligned.h>
@@ -62,7 +62,23 @@ static struct eeprom_fixup eeprom_fixups[] __devinitdata = {
 	 */
 	{ 0x1e00, 0x0000, 0x000b, 0x8f01, 0x0103, 0x0300, 0x0821, 0x000, 0x0001, 0x0000, 0x01e1 }
   },
-  {0, 0, 0, 0, {}}};
+  {"Cobalt Microserver", 0, 0x10, 0xE0, {0x1e00, /* 0 == controller #, 1e == offset	*/
+					 0x0000, /* 0 == high offset, 0 == gap		*/
+					 0x0800, /* Default Autoselect			*/
+					 0x8001, /* 1 leaf, extended type, bogus len	*/
+					 0x0003, /* Type 3 (MII), PHY #0		*/
+					 0x0400, /* 0 init instr, 4 reset instr		*/
+					 0x0801, /* Set control mode, GP0 output	*/
+					 0x0000, /* Drive GP0 Low (RST is active low)	*/
+					 0x0800, /* control mode, GP0 input (undriven)	*/
+					 0x0000, /* clear control mode			*/
+					 0x7800, /* 100TX FDX + HDX, 10bT FDX + HDX	*/
+					 0x01e0, /* Advertise all above			*/
+					 0x5000, /* FDX all above			*/
+					 0x1800, /* Set fast TTM in 100bt modes		*/
+					 0x0000, /* PHY cannot be unplugged		*/
+  }},
+  {NULL}};
 
 
 static const char *block_name[] __devinitdata = {
@@ -79,23 +95,19 @@ static const char *block_name[] __devinitdata = {
  * tulip_build_fake_mediatable - Build a fake mediatable entry.
  * @tp: Ptr to the tulip private data.
  *
- * Some cards like the 3x5 HSC cards (J3514A) do not have a standard 
+ * Some cards like the 3x5 HSC cards (J3514A) do not have a standard
  * srom and can not be handled under the fixup routine.  These cards
- * still need a valid mediatable entry for correct csr12 setup and 
+ * still need a valid mediatable entry for correct csr12 setup and
  * mii handling.
- * 
+ *
  * Since this is currently a parisc-linux specific function, the
  * #ifdef __hppa__ should completely optimize this function away for
  * non-parisc hardware.
  */
 static void __devinit tulip_build_fake_mediatable(struct tulip_private *tp)
 {
-#ifdef __hppa__
-	unsigned char *ee_data = tp->eeprom;
-
-	if (ee_data[0] == 0x3c && ee_data[1] == 0x10 && 
-		(ee_data[2] == 0x63 || ee_data[2] == 0x61) && ee_data[3] == 0x10) {
-
+#ifdef CONFIG_GSC
+	if (tp->flags & NEEDS_FAKE_MEDIA_TABLE) {
 		static unsigned char leafdata[] =
 			{ 0x01,       /* phy number */
 			  0x02,       /* gpr setup sequence length */
@@ -103,13 +115,13 @@ static void __devinit tulip_build_fake_mediatable(struct tulip_private *tp)
 			  0x02,       /* phy reset sequence length */
 			  0x01, 0x00, /* phy reset sequence */
 			  0x00, 0x78, /* media capabilities */
-			  0x00, 0xe0, /* nway advertisment */
+			  0x00, 0xe0, /* nway advertisement */
 			  0x00, 0x05, /* fdx bit map */
 			  0x00, 0x06  /* ttm bit map */
 			};
 
-		tp->mtable = (struct mediatable *)
-			kmalloc(sizeof(struct mediatable) + sizeof(struct medialeaf), GFP_KERNEL);
+		tp->mtable = kmalloc(sizeof(struct mediatable) +
+				     sizeof(struct medialeaf), GFP_KERNEL);
 
 		if (tp->mtable == NULL)
 			return; /* Horrible, impossible failure. */
@@ -127,20 +139,26 @@ static void __devinit tulip_build_fake_mediatable(struct tulip_private *tp)
 		tp->flags |= HAS_PHY_IRQ;
 		tp->csr12_shadow = -1;
 	}
-#endif 
+#endif
 }
 
 void __devinit tulip_parse_eeprom(struct net_device *dev)
 {
+	/*
+	  dev is not registered at this point, so logging messages can't
+	  use dev_<level> or netdev_<level> but dev->name is good via a
+	  hack in the caller
+	*/
+
 	/* The last media info list parsed, for multiport boards.  */
 	static struct mediatable *last_mediatable;
 	static unsigned char *last_ee_data;
 	static int controller_index;
-	struct tulip_private *tp = (struct tulip_private *)dev->priv;
+	struct tulip_private *tp = netdev_priv(dev);
 	unsigned char *ee_data = tp->eeprom;
 	int i;
 
-	tp->mtable = 0;
+	tp->mtable = NULL;
 	/* Detect an old-style (SA only) EEPROM layout:
 	   memcmp(eedata, eedata+16, 8). */
 	for (i = 0; i < 8; i ++)
@@ -150,36 +168,33 @@ void __devinit tulip_parse_eeprom(struct net_device *dev)
 		if (ee_data[0] == 0xff) {
 			if (last_mediatable) {
 				controller_index++;
-				printk(KERN_INFO "%s:  Controller %d of multiport board.\n",
-					   dev->name, controller_index);
+				pr_info("%s: Controller %d of multiport board\n",
+					dev->name, controller_index);
 				tp->mtable = last_mediatable;
 				ee_data = last_ee_data;
 				goto subsequent_board;
 			} else
-				printk(KERN_INFO "%s:  Missing EEPROM, this interface may "
-					   "not work correctly!\n",
-			   dev->name);
+				pr_info("%s: Missing EEPROM, this interface may not work correctly!\n",
+					dev->name);
 			return;
 		}
 	  /* Do a fix-up based on the vendor half of the station address prefix. */
 	  for (i = 0; eeprom_fixups[i].name; i++) {
-		if (dev->dev_addr[0] == eeprom_fixups[i].addr0
-			&&  dev->dev_addr[1] == eeprom_fixups[i].addr1
-			&&  dev->dev_addr[2] == eeprom_fixups[i].addr2) {
-		  if (dev->dev_addr[2] == 0xE8  &&  ee_data[0x1a] == 0x55)
+		  if (dev->dev_addr[0] == eeprom_fixups[i].addr0 &&
+		      dev->dev_addr[1] == eeprom_fixups[i].addr1 &&
+		      dev->dev_addr[2] == eeprom_fixups[i].addr2) {
+		  if (dev->dev_addr[2] == 0xE8 && ee_data[0x1a] == 0x55)
 			  i++;			/* An Accton EN1207, not an outlaw Maxtech. */
 		  memcpy(ee_data + 26, eeprom_fixups[i].newtable,
 				 sizeof(eeprom_fixups[i].newtable));
-		  printk(KERN_INFO "%s: Old format EEPROM on '%s' board.  Using"
-				 " substitute media control info.\n",
-				 dev->name, eeprom_fixups[i].name);
+		  pr_info("%s: Old format EEPROM on '%s' board.  Using substitute media control info\n",
+			  dev->name, eeprom_fixups[i].name);
 		  break;
 		}
 	  }
 	  if (eeprom_fixups[i].name == NULL) { /* No fixup found. */
-		  printk(KERN_INFO "%s: Old style EEPROM with no media selection "
-				 "information.\n",
-			   dev->name);
+		  pr_info("%s: Old style EEPROM with no media selection information\n",
+			  dev->name);
 		return;
 	  }
 	}
@@ -207,13 +222,14 @@ subsequent_board:
 	        /* there is no phy information, don't even try to build mtable */
 	        if (count == 0) {
 			if (tulip_debug > 0)
-				printk(KERN_WARNING "%s: no phy info, aborting mtable build\n", dev->name);
+				pr_warning("%s: no phy info, aborting mtable build\n",
+					   dev->name);
 		        return;
 		}
 
-		mtable = (struct mediatable *)
-			kmalloc(sizeof(struct mediatable) + count*sizeof(struct medialeaf),
-					GFP_KERNEL);
+		mtable = kmalloc(sizeof(struct mediatable) +
+				 count * sizeof(struct medialeaf),
+				 GFP_KERNEL);
 		if (mtable == NULL)
 			return;				/* Horrible, impossible failure. */
 		last_mediatable = tp->mtable = mtable;
@@ -223,8 +239,10 @@ subsequent_board:
 		mtable->has_nonmii = mtable->has_mii = mtable->has_reset = 0;
 		mtable->csr15dir = mtable->csr15val = 0;
 
-		printk(KERN_INFO "%s:  EEPROM default media type %s.\n", dev->name,
-			   media & 0x0800 ? "Autosense" : medianame[media & MEDIA_MASK]);
+		pr_info("%s: EEPROM default media type %s\n",
+			dev->name,
+			media & 0x0800 ? "Autosense"
+				       : medianame[media & MEDIA_MASK]);
 		for (i = 0; i < count; i++) {
 			struct medialeaf *leaf = &mtable->mleaf[i];
 
@@ -287,16 +305,17 @@ subsequent_board:
 			}
 			if (tulip_debug > 1  &&  leaf->media == 11) {
 				unsigned char *bp = leaf->leafdata;
-				printk(KERN_INFO "%s:  MII interface PHY %d, setup/reset "
-					   "sequences %d/%d long, capabilities %2.2x %2.2x.\n",
-					   dev->name, bp[0], bp[1], bp[2 + bp[1]*2],
-					   bp[5 + bp[2 + bp[1]*2]*2], bp[4 + bp[2 + bp[1]*2]*2]);
+				pr_info("%s: MII interface PHY %d, setup/reset sequences %d/%d long, capabilities %02x %02x\n",
+					dev->name,
+					bp[0], bp[1], bp[2 + bp[1]*2],
+					bp[5 + bp[2 + bp[1]*2]*2],
+					bp[4 + bp[2 + bp[1]*2]*2]);
 			}
-			printk(KERN_INFO "%s:  Index #%d - Media %s (#%d) described "
-				   "by a %s (%d) block.\n",
-				   dev->name, i, medianame[leaf->media & 15], leaf->media,
-				   leaf->type < ARRAY_SIZE(block_name) ? block_name[leaf->type] : "<unknown>",
-				   leaf->type);
+			pr_info("%s: Index #%d - Media %s (#%d) described by a %s (%d) block\n",
+				dev->name,
+				i, medianame[leaf->media & 15], leaf->media,
+				leaf->type < ARRAY_SIZE(block_name) ? block_name[leaf->type] : "<unknown>",
+				leaf->type);
 		}
 		if (new_advertise)
 			tp->sym_advertise = new_advertise;
@@ -306,54 +325,61 @@ subsequent_board:
 
 /*  EEPROM_Ctrl bits. */
 #define EE_SHIFT_CLK	0x02	/* EEPROM shift clock. */
-#define EE_CS			0x01	/* EEPROM chip select. */
+#define EE_CS		0x01	/* EEPROM chip select. */
 #define EE_DATA_WRITE	0x04	/* Data from the Tulip to EEPROM. */
-#define EE_WRITE_0		0x01
-#define EE_WRITE_1		0x05
+#define EE_WRITE_0	0x01
+#define EE_WRITE_1	0x05
 #define EE_DATA_READ	0x08	/* Data from the EEPROM chip. */
-#define EE_ENB			(0x4800 | EE_CS)
+#define EE_ENB		(0x4800 | EE_CS)
 
 /* Delay between EEPROM clock transitions.
    Even at 33Mhz current PCI implementations don't overrun the EEPROM clock.
    We add a bus turn-around to insure that this remains true. */
-#define eeprom_delay()	inl(ee_addr)
+#define eeprom_delay()	ioread32(ee_addr)
 
 /* The EEPROM commands include the alway-set leading bit. */
 #define EE_READ_CMD		(6)
 
 /* Note: this routine returns extra data bits for size detection. */
-int __devinit tulip_read_eeprom(long ioaddr, int location, int addr_len)
+int __devinit tulip_read_eeprom(struct net_device *dev, int location, int addr_len)
 {
 	int i;
 	unsigned retval = 0;
-	long ee_addr = ioaddr + CSR9;
+	struct tulip_private *tp = netdev_priv(dev);
+	void __iomem *ee_addr = tp->base_addr + CSR9;
 	int read_cmd = location | (EE_READ_CMD << addr_len);
 
-	outl(EE_ENB & ~EE_CS, ee_addr);
-	outl(EE_ENB, ee_addr);
+	/* If location is past the end of what we can address, don't
+	 * read some other location (ie truncate). Just return zero.
+	 */
+	if (location > (1 << addr_len) - 1)
+		return 0;
+
+	iowrite32(EE_ENB & ~EE_CS, ee_addr);
+	iowrite32(EE_ENB, ee_addr);
 
 	/* Shift the read command bits out. */
 	for (i = 4 + addr_len; i >= 0; i--) {
 		short dataval = (read_cmd & (1 << i)) ? EE_DATA_WRITE : 0;
-		outl(EE_ENB | dataval, ee_addr);
+		iowrite32(EE_ENB | dataval, ee_addr);
 		eeprom_delay();
-		outl(EE_ENB | dataval | EE_SHIFT_CLK, ee_addr);
+		iowrite32(EE_ENB | dataval | EE_SHIFT_CLK, ee_addr);
 		eeprom_delay();
-		retval = (retval << 1) | ((inl(ee_addr) & EE_DATA_READ) ? 1 : 0);
+		retval = (retval << 1) | ((ioread32(ee_addr) & EE_DATA_READ) ? 1 : 0);
 	}
-	outl(EE_ENB, ee_addr);
+	iowrite32(EE_ENB, ee_addr);
 	eeprom_delay();
 
 	for (i = 16; i > 0; i--) {
-		outl(EE_ENB | EE_SHIFT_CLK, ee_addr);
+		iowrite32(EE_ENB | EE_SHIFT_CLK, ee_addr);
 		eeprom_delay();
-		retval = (retval << 1) | ((inl(ee_addr) & EE_DATA_READ) ? 1 : 0);
-		outl(EE_ENB, ee_addr);
+		retval = (retval << 1) | ((ioread32(ee_addr) & EE_DATA_READ) ? 1 : 0);
+		iowrite32(EE_ENB, ee_addr);
 		eeprom_delay();
 	}
 
 	/* Terminate the EEPROM access. */
-	outl(EE_ENB & ~EE_CS, ee_addr);
-	return retval;
+	iowrite32(EE_ENB & ~EE_CS, ee_addr);
+	return (tp->flags & HAS_SWAPPED_SEEPROM) ? swab16(retval) : retval;
 }
 

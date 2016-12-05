@@ -29,74 +29,83 @@
 #include <linux/acpi.h>
 #include <acpi/acpi_bus.h>
 
-
 #define ACPI_MAX_STRING			80
 
+/*
+ * Please update drivers/acpi/debug.c and Documentation/acpi/debug.txt
+ * if you add to this list.
+ */
 #define ACPI_BUS_COMPONENT		0x00010000
+#define ACPI_AC_COMPONENT		0x00020000
+#define ACPI_BATTERY_COMPONENT		0x00040000
+#define ACPI_BUTTON_COMPONENT		0x00080000
+#define ACPI_SBS_COMPONENT		0x00100000
+#define ACPI_FAN_COMPONENT		0x00200000
+#define ACPI_PCI_COMPONENT		0x00400000
+#define ACPI_POWER_COMPONENT		0x00800000
+#define ACPI_CONTAINER_COMPONENT	0x01000000
 #define ACPI_SYSTEM_COMPONENT		0x02000000
+#define ACPI_THERMAL_COMPONENT		0x04000000
+#define ACPI_MEMORY_DEVICE_COMPONENT	0x08000000
+#define ACPI_VIDEO_COMPONENT		0x10000000
+#define ACPI_PROCESSOR_COMPONENT	0x20000000
 
-/* _HID definitions */
+/*
+ * _HID definitions
+ * HIDs must conform to ACPI spec(6.1.4)
+ * Linux specific HIDs do not apply to this and begin with LNX:
+ */
 
-#define ACPI_POWER_HID			"ACPI_PWR"
-#define ACPI_PROCESSOR_HID		"ACPI_CPU"
-#define ACPI_SYSTEM_HID			"ACPI_SYS"
-#define ACPI_THERMAL_HID		"ACPI_THM"
-#define ACPI_BUTTON_HID_POWERF		"ACPI_FPB"
-#define ACPI_BUTTON_HID_SLEEPF		"ACPI_FSB"
+#define ACPI_POWER_HID			"LNXPOWER"
+#define ACPI_PROCESSOR_OBJECT_HID	"LNXCPU"
+#define ACPI_SYSTEM_HID			"LNXSYSTM"
+#define ACPI_THERMAL_HID		"LNXTHERM"
+#define ACPI_BUTTON_HID_POWERF		"LNXPWRBN"
+#define ACPI_BUTTON_HID_SLEEPF		"LNXSLPBN"
+#define ACPI_VIDEO_HID			"LNXVIDEO"
+#define ACPI_BAY_HID			"LNXIOBAY"
+#define ACPI_DOCK_HID			"LNXDOCK"
+/* Quirk for broken IBM BIOSes */
+#define ACPI_SMBUS_IBM_HID		"SMBUSIBM"
 
+/*
+ * For fixed hardware buttons, we fabricate acpi_devices with HID
+ * ACPI_BUTTON_HID_POWERF or ACPI_BUTTON_HID_SLEEPF.  Fixed hardware
+ * signals only an event; it doesn't supply a notification value.
+ * To allow drivers to treat notifications from fixed hardware the
+ * same as those from real devices, we turn the events into this
+ * notification value.
+ */
+#define ACPI_FIXED_HARDWARE_EVENT	0x100
 
 /* --------------------------------------------------------------------------
                                        PCI
    -------------------------------------------------------------------------- */
 
-#ifdef CONFIG_ACPI_PCI
-
-#define ACPI_PCI_COMPONENT		0x00400000
-
-/* ACPI PCI Root Bridge (pci_root.c) */
-
-void acpi_pci_get_translations (struct acpi_pci_id* id, u64* mem_tra, u64* io_tra);
 
 /* ACPI PCI Interrupt Link (pci_link.c) */
 
-int acpi_pci_link_check (void);
-int acpi_pci_link_get_irq (acpi_handle handle, int index, int* edge_level, int* active_high_low);
+int acpi_irq_penalty_init(void);
+int acpi_pci_link_allocate_irq(acpi_handle handle, int index, int *triggering,
+			       int *polarity, char **name);
+int acpi_pci_link_free_irq(acpi_handle handle);
 
 /* ACPI PCI Interrupt Routing (pci_irq.c) */
 
-int acpi_pci_irq_add_prt (acpi_handle handle, int segment, int bus);
+int acpi_pci_irq_add_prt(acpi_handle handle, struct pci_bus *bus);
+void acpi_pci_irq_del_prt(struct pci_bus *bus);
 
 /* ACPI PCI Device Binding (pci_bind.c) */
 
 struct pci_bus;
 
-int acpi_pci_bind (struct acpi_device *device);
-int acpi_pci_bind_root (struct acpi_device *device, struct acpi_pci_id *id, struct pci_bus *bus);
+struct pci_dev *acpi_get_pci_dev(acpi_handle);
+int acpi_pci_bind_root(struct acpi_device *device);
 
 /* Arch-defined function to add a bus to the system */
 
-struct pci_bus *pci_acpi_scan_root(struct acpi_device *device, int domain, int bus);
-
-#endif /*CONFIG_ACPI_PCI*/
-
-
-/* --------------------------------------------------------------------------
-                                  Power Resource
-   -------------------------------------------------------------------------- */
-
-#ifdef CONFIG_ACPI_POWER
-
-int acpi_power_get_inferred_state (struct acpi_device *device);
-int acpi_power_transition (struct acpi_device *device, int state);
-#endif
-
-
-/* --------------------------------------------------------------------------
-                                  Embedded Controller
-   -------------------------------------------------------------------------- */
-#ifdef CONFIG_ACPI_EC
-int acpi_ec_ecdt_probe (void);
-#endif
+struct pci_bus *pci_acpi_scan_root(struct acpi_pci_root *root);
+void pci_acpi_crs_quirks(void);
 
 /* --------------------------------------------------------------------------
                                     Processor
@@ -106,62 +115,43 @@ int acpi_ec_ecdt_probe (void);
 #define ACPI_PROCESSOR_LIMIT_INCREMENT	0x01
 #define ACPI_PROCESSOR_LIMIT_DECREMENT	0x02
 
-int acpi_processor_set_thermal_limit(acpi_handle handle, int type);
+/*--------------------------------------------------------------------------
+                                  Dock Station
+  -------------------------------------------------------------------------- */
+struct acpi_dock_ops {
+	acpi_notify_handler handler;
+	acpi_notify_handler uevent;
+};
 
-
-/* --------------------------------------------------------------------------
-                                Debug Support
-   -------------------------------------------------------------------------- */
-
-#define ACPI_DEBUG_RESTORE	0
-#define ACPI_DEBUG_LOW		1
-#define ACPI_DEBUG_MEDIUM	2
-#define ACPI_DEBUG_HIGH		3
-#define ACPI_DEBUG_DRIVERS	4
-
-extern u32 acpi_dbg_level;
-extern u32 acpi_dbg_layer;
-
-static inline void
-acpi_set_debug (
-	u32			flag)
+#if defined(CONFIG_ACPI_DOCK) || defined(CONFIG_ACPI_DOCK_MODULE)
+extern int is_dock_device(acpi_handle handle);
+extern int register_dock_notifier(struct notifier_block *nb);
+extern void unregister_dock_notifier(struct notifier_block *nb);
+extern int register_hotplug_dock_device(acpi_handle handle,
+					struct acpi_dock_ops *ops,
+					void *context);
+extern void unregister_hotplug_dock_device(acpi_handle handle);
+#else
+static inline int is_dock_device(acpi_handle handle)
 {
-	static u32		layer_save;
-	static u32		level_save;
-
-	switch (flag) {
-	case ACPI_DEBUG_RESTORE:
-		acpi_dbg_layer = layer_save;
-		acpi_dbg_level = level_save;
-		break;
-	case ACPI_DEBUG_LOW:
-	case ACPI_DEBUG_MEDIUM:
-	case ACPI_DEBUG_HIGH:
-	case ACPI_DEBUG_DRIVERS:
-		layer_save = acpi_dbg_layer;
-		level_save = acpi_dbg_level;
-		break;
-	}
-
-	switch (flag) {
-	case ACPI_DEBUG_LOW:
-		acpi_dbg_layer = ACPI_COMPONENT_DEFAULT | ACPI_ALL_DRIVERS;
-		acpi_dbg_level = ACPI_DEBUG_DEFAULT;
-		break;
-	case ACPI_DEBUG_MEDIUM:
-		acpi_dbg_layer = ACPI_COMPONENT_DEFAULT | ACPI_ALL_DRIVERS;
-		acpi_dbg_level = ACPI_LV_FUNCTIONS | ACPI_LV_ALL_EXCEPTIONS;
-		break;
-	case ACPI_DEBUG_HIGH:
-		acpi_dbg_layer = 0xFFFFFFFF;
-		acpi_dbg_level = 0xFFFFFFFF;
-		break;
-	case ACPI_DEBUG_DRIVERS:
-		acpi_dbg_layer = ACPI_ALL_DRIVERS;
-		acpi_dbg_level = 0xFFFFFFFF;
-		break;
-	}
+	return 0;
 }
-
+static inline int register_dock_notifier(struct notifier_block *nb)
+{
+	return -ENODEV;
+}
+static inline void unregister_dock_notifier(struct notifier_block *nb)
+{
+}
+static inline int register_hotplug_dock_device(acpi_handle handle,
+					       struct acpi_dock_ops *ops,
+					       void *context)
+{
+	return -ENODEV;
+}
+static inline void unregister_hotplug_dock_device(acpi_handle handle)
+{
+}
+#endif
 
 #endif /*__ACPI_DRIVERS_H__*/

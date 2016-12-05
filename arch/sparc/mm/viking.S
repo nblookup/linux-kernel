@@ -1,4 +1,4 @@
-/* $Id: viking.S,v 1.19 2001/12/21 04:56:15 davem Exp $
+/*
  * viking.S: High speed Viking cache/mmu operations
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -6,16 +6,14 @@
  * Copyright (C) 1999  Pavel Semerad  (semerad@ss1000.ms.mff.cuni.cz)
  */
 
-#include <linux/config.h>
 #include <asm/ptrace.h>
 #include <asm/psr.h>
-#include <asm/asm_offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/asi.h>
 #include <asm/mxcc.h>
 #include <asm/page.h>
 #include <asm/pgtsrmmu.h>
 #include <asm/viking.h>
-#include <asm/cprefix.h>
 #include <asm/btfixup.h>
 
 #ifdef CONFIG_SMP

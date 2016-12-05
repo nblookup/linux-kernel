@@ -15,12 +15,12 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
 #include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pci.h>
@@ -51,47 +51,32 @@ eiger_update_irq_hw(unsigned long irq, unsigned long mask)
 }
 
 static inline void
-eiger_enable_irq(unsigned int irq)
+eiger_enable_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 	unsigned long mask;
 	mask = (cached_irq_mask[irq >= 64] &= ~(1UL << (irq & 63)));
 	eiger_update_irq_hw(irq, mask);
 }
 
 static void
-eiger_disable_irq(unsigned int irq)
+eiger_disable_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 	unsigned long mask;
 	mask = (cached_irq_mask[irq >= 64] |= 1UL << (irq & 63));
 	eiger_update_irq_hw(irq, mask);
 }
 
-static unsigned int
-eiger_startup_irq(unsigned int irq)
-{
-	eiger_enable_irq(irq);
-	return 0; /* never anything pending */
-}
-
-static void
-eiger_end_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		eiger_enable_irq(irq);
-}
-
-static struct hw_interrupt_type eiger_irq_type = {
-	.typename	= "EIGER",
-	.startup	= eiger_startup_irq,
-	.shutdown	= eiger_disable_irq,
-	.enable		= eiger_enable_irq,
-	.disable	= eiger_disable_irq,
-	.ack		= eiger_disable_irq,
-	.end		= eiger_end_irq,
+static struct irq_chip eiger_irq_type = {
+	.name		= "EIGER",
+	.irq_unmask	= eiger_enable_irq,
+	.irq_mask	= eiger_disable_irq,
+	.irq_mask_ack	= eiger_disable_irq,
 };
 
 static void
-eiger_device_interrupt(unsigned long vector, struct pt_regs * regs)
+eiger_device_interrupt(unsigned long vector)
 {
 	unsigned intstatus;
 
@@ -118,20 +103,20 @@ eiger_device_interrupt(unsigned long vector, struct pt_regs * regs)
 		 * despatch an interrupt if it's set.
 		 */
 
-		if (intstatus & 8) handle_irq(16+3, regs);
-		if (intstatus & 4) handle_irq(16+2, regs);
-		if (intstatus & 2) handle_irq(16+1, regs);
-		if (intstatus & 1) handle_irq(16+0, regs);
+		if (intstatus & 8) handle_irq(16+3);
+		if (intstatus & 4) handle_irq(16+2);
+		if (intstatus & 2) handle_irq(16+1);
+		if (intstatus & 1) handle_irq(16+0);
 	} else {
-		isa_device_interrupt(vector, regs);
+		isa_device_interrupt(vector);
 	}
 }
 
 static void
-eiger_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
+eiger_srm_device_interrupt(unsigned long vector)
 {
 	int irq = (vector - 0x800) >> 4;
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 static void __init
@@ -153,8 +138,8 @@ eiger_init_irq(void)
 	init_i8259a_irqs();
 
 	for (i = 16; i < 128; ++i) {
-		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = &eiger_irq_type;
+		irq_set_chip_and_handler(i, &eiger_irq_type, handle_level_irq);
+		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 }
 
@@ -194,27 +179,20 @@ eiger_swizzle(struct pci_dev *dev, u8 *pinp)
 	   case 0x0f: bridge_count = 4; break; /* 4 */
 	};
 
-	/*  Check first for the built-in bridges on hose 0. */
-	if (hose->index == 0
-	    && PCI_SLOT(dev->bus->self->devfn) > 20-bridge_count) {
-		slot = PCI_SLOT(dev->devfn);
-	} else {
-		/* Must be a card-based bridge.  */
-		do {
-			/* Check for built-in bridges on hose 0. */
-			if (hose->index == 0
-			    && (PCI_SLOT(dev->bus->self->devfn)
-				> 20 - bridge_count)) {
-                  		slot = PCI_SLOT(dev->devfn);
-				break;
-			}
-			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
-
-			/* Move up the chain of bridges.  */
-			dev = dev->bus->self;
-			/* Slot of the next bridge.  */
+	slot = PCI_SLOT(dev->devfn);
+	while (dev->bus->self) {
+		/* Check for built-in bridges on hose 0. */
+		if (hose->index == 0
+		    && (PCI_SLOT(dev->bus->self->devfn)
+			> 20 - bridge_count)) {
 			slot = PCI_SLOT(dev->devfn);
-		} while (dev->bus->self);
+			break;
+		}
+		/* Must be a card-based bridge.  */
+		pin = pci_swizzle_interrupt_pin(dev, pin);
+
+		/* Move up the chain of bridges.  */
+		dev = dev->bus->self;
 	}
 	*pinp = pin;
 	return slot;
@@ -229,7 +207,6 @@ struct alpha_machine_vector eiger_mv __initmv = {
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_TSUNAMI_IO,
-	DO_TSUNAMI_BUS,
 	.machine_check		= tsunami_machine_check,
 	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
 	.min_io_address		= DEFAULT_IO_BASE,

@@ -91,10 +91,12 @@ struct chain {
 };
 
 /* These belong in scsi.h also */
-#define any2scsi(up, p)				\
-(up)[0] = (((unsigned long)(p)) >> 16)  ;	\
-(up)[1] = (((unsigned long)(p)) >> 8);		\
-(up)[2] = ((unsigned long)(p));
+static inline void any2scsi(u8 *p, u32 v)
+{
+	p[0] = v >> 16;
+	p[1] = v >> 8;
+	p[2] = v;
+}
 
 #define scsi2int(up) ( (((long)*(up)) << 16) + (((long)(up)[1]) << 8) + ((long)(up)[2]) )
 
@@ -129,9 +131,8 @@ struct ccb {			/* Command Control Block 5.3 */
 				/* REQUEST SENSE */
 };
 
-static int aha1542_detect(Scsi_Host_Template *);
-static int aha1542_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-static int aha1542_abort(Scsi_Cmnd * SCpnt);
+static int aha1542_detect(struct scsi_host_template *);
+static int aha1542_queuecommand(struct Scsi_Host *, struct scsi_cmnd *);
 static int aha1542_bus_reset(Scsi_Cmnd * SCpnt);
 static int aha1542_dev_reset(Scsi_Cmnd * SCpnt);
 static int aha1542_host_reset(Scsi_Cmnd * SCpnt);

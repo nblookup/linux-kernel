@@ -156,7 +156,7 @@ typedef struct coproc_operations
 	struct module *owner;
 	int (*open) (void *devc, int sub_device);
 	void (*close) (void *devc, int sub_device);
-	int (*ioctl) (void *devc, unsigned int cmd, caddr_t arg, int local);
+	int (*ioctl) (void *devc, unsigned int cmd, void __user * arg, int local);
 	void (*reset) (void *devc);
 
 	void *devc;		/* Driver specific info */
@@ -171,14 +171,14 @@ struct audio_driver
 			      int count, int intrflag);
 	void (*start_input) (int dev, unsigned long buf, 
 			     int count, int intrflag);
-	int (*ioctl) (int dev, unsigned int cmd, caddr_t arg);
+	int (*ioctl) (int dev, unsigned int cmd, void __user * arg);
 	int (*prepare_for_input) (int dev, int bufsize, int nbufs);
 	int (*prepare_for_output) (int dev, int bufsize, int nbufs);
 	void (*halt_io) (int dev);
 	int (*local_qlen)(int dev);
 	void (*copy_user) (int dev,
 			char *localbuf, int localoffs,
-                        const char *userbuf, int useroffs,
+                        const char __user *userbuf, int useroffs,
                         int max_in, int max_out,
                         int *used, int *returned,
                         int len);
@@ -247,7 +247,7 @@ struct mixer_operations
 	struct module *owner;
 	char id[16];
 	char name[64];
-	int (*ioctl) (int dev, unsigned int cmd, caddr_t arg);
+	int (*ioctl) (int dev, unsigned int cmd, void __user * arg);
 	
 	void *devc;
 	int modify_counter;
@@ -264,14 +264,14 @@ struct synth_operations
 
 	int (*open) (int dev, int mode);
 	void (*close) (int dev);
-	int (*ioctl) (int dev, unsigned int cmd, caddr_t arg);
+	int (*ioctl) (int dev, unsigned int cmd, void __user * arg);
 	int (*kill_note) (int dev, int voice, int note, int velocity);
 	int (*start_note) (int dev, int voice, int note, int velocity);
 	int (*set_instr) (int dev, int voice, int instr);
 	void (*reset) (int dev);
 	void (*hw_control) (int dev, unsigned char *event);
-	int (*load_patch) (int dev, int format, const char *addr,
-	     int offs, int count, int pmgr_flag);
+	int (*load_patch) (int dev, int format, const char __user *addr,
+	     int count, int pmgr_flag);
 	void (*aftertouch) (int dev, int voice, int pressure);
 	void (*controller) (int dev, int voice, int ctrl_num, int value);
 	void (*panning) (int dev, int voice, int value);
@@ -317,7 +317,7 @@ struct midi_operations
 		void (*outputintr)(int dev)
 		);
 	void (*close) (int dev);
-	int (*ioctl) (int dev, unsigned int cmd, caddr_t arg);
+	int (*ioctl) (int dev, unsigned int cmd, void __user * arg);
 	int (*outputc) (int dev, unsigned char data);
 	int (*start_read) (int dev);
 	int (*end_read) (int dev);
@@ -348,26 +348,12 @@ struct sound_timer_operations
 	void (*close)(int dev);
 	int (*event)(int dev, unsigned char *ev);
 	unsigned long (*get_time)(int dev);
-	int (*ioctl) (int dev, unsigned int cmd, caddr_t arg);
+	int (*ioctl) (int dev, unsigned int cmd, void __user * arg);
 	void (*arm_timer)(int dev, long time);
 };
 
-#ifdef _DEV_TABLE_C_   
-struct audio_operations *audio_devs[MAX_AUDIO_DEV];
-int num_audiodevs;
-struct mixer_operations *mixer_devs[MAX_MIXER_DEV];
-int num_mixers;
-struct synth_operations *synth_devs[MAX_SYNTH_DEV+MAX_MIDI_DEV];
-int num_synths;
-struct midi_operations *midi_devs[MAX_MIDI_DEV];
-int num_midis;
-
 extern struct sound_timer_operations default_sound_timer;
-struct sound_timer_operations *sound_timer_devs[MAX_TIMER_DEV] = {
-	&default_sound_timer, NULL
-}; 
-int num_sound_timers = 1;
-#else
+
 extern struct audio_operations *audio_devs[MAX_AUDIO_DEV];
 extern int num_audiodevs;
 extern struct mixer_operations *mixer_devs[MAX_MIXER_DEV];
@@ -378,7 +364,6 @@ extern struct midi_operations *midi_devs[MAX_MIDI_DEV];
 extern int num_midis;
 extern struct sound_timer_operations * sound_timer_devs[MAX_TIMER_DEV];
 extern int num_sound_timers;
-#endif	/* _DEV_TABLE_C_ */
 
 extern int sound_map_buffer (int dev, struct dma_buffparms *dmap, buffmem_desc *info);
 void sound_timer_init (struct sound_lowlev_timer *t, char *name);
@@ -397,7 +382,6 @@ void sound_unload_mixerdev(int dev);
 void sound_unload_mididev(int dev);
 void sound_unload_synthdev(int dev);
 void sound_unload_timerdev(int dev);
-int sound_alloc_audiodev(void);
 int sound_alloc_mixerdev(void);
 int sound_alloc_timerdev(void);
 int sound_alloc_synthdev(void);

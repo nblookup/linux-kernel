@@ -23,8 +23,6 @@
  * ON AN "AS IS" BASIS, AND THE AUSTRALIAN NATIONAL UNIVERSITY HAS NO
  * OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
  * OR MODIFICATIONS.
- *
- * $Id: ppp-comp.h,v 1.6 1997/11/27 06:04:44 paulus Exp $
  */
 
 /*
@@ -111,6 +109,8 @@ struct compressor {
 
 	/* Used in locking compressor modules */
 	struct module *owner;
+	/* Extra skb space needed by the compressor algorithm */
+	unsigned int comp_extra;
 };
 
 /*
@@ -189,6 +189,13 @@ struct compressor {
 #define DEFLATE_METHOD(x)	((x) & 0x0F)
 #define DEFLATE_MAKE_OPT(w)	((((w) - 8) << 4) + DEFLATE_METHOD_VAL)
 #define DEFLATE_CHK_SEQUENCE	0
+
+/*
+ * Definitions for MPPE.
+ */
+
+#define CI_MPPE                18      /* config option for MPPE */
+#define CILEN_MPPE              6      /* length of config option */
 
 /*
  * Definitions for other, as yet unsupported, compression methods.

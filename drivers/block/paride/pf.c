@@ -152,40 +152,21 @@ enum {D_PRT, D_PRO, D_UNI, D_MOD, D_SLV, D_LUN, D_DLY};
 #include <linux/spinlock.h>
 #include <linux/blkdev.h>
 #include <linux/blkpg.h>
+#include <linux/mutex.h>
 #include <asm/uaccess.h>
 
-static spinlock_t pf_spin_lock;
+static DEFINE_MUTEX(pf_mutex);
+static DEFINE_SPINLOCK(pf_spin_lock);
 
-#ifndef MODULE
-
-#include "setup.h"
-
-static STT pf_stt[7] = {
-	{"drive0", 7, drive0},
-	{"drive1", 7, drive1},
-	{"drive2", 7, drive2},
-	{"drive3", 7, drive3},
-	{"disable", 1, &disable},
-	{"cluster", 1, &cluster},
-	{"nice", 1, &nice}
-};
-
-void pf_setup(char *str, int *ints)
-{
-	generic_setup(pf_stt, 7, str);
-}
-
-#endif
-
-MODULE_PARM(verbose, "i");
-MODULE_PARM(major, "i");
-MODULE_PARM(name, "s");
-MODULE_PARM(cluster, "i");
-MODULE_PARM(nice, "i");
-MODULE_PARM(drive0, "1-7i");
-MODULE_PARM(drive1, "1-7i");
-MODULE_PARM(drive2, "1-7i");
-MODULE_PARM(drive3, "1-7i");
+module_param(verbose, bool, 0644);
+module_param(major, int, 0);
+module_param(name, charp, 0);
+module_param(cluster, int, 0);
+module_param(nice, int, 0);
+module_param_array(drive0, int, NULL, 0);
+module_param_array(drive1, int, NULL, 0);
+module_param_array(drive2, int, NULL, 0);
+module_param_array(drive3, int, NULL, 0);
 
 #include "paride.h"
 #include "pseudo.h"
@@ -222,12 +203,13 @@ MODULE_PARM(drive3, "1-7i");
 #define ATAPI_READ_10		0x28
 #define ATAPI_WRITE_10		0x2a
 
-static int pf_open(struct inode *inode, struct file *file);
-static void do_pf_request(request_queue_t * q);
-static int pf_ioctl(struct inode *inode, struct file *file,
+static int pf_open(struct block_device *bdev, fmode_t mode);
+static void do_pf_request(struct request_queue * q);
+static int pf_ioctl(struct block_device *bdev, fmode_t mode,
 		    unsigned int cmd, unsigned long arg);
+static int pf_getgeo(struct block_device *bdev, struct hd_geometry *geo);
 
-static int pf_release(struct inode *inode, struct file *file);
+static int pf_release(struct gendisk *disk, fmode_t mode);
 
 static int pf_detect(void);
 static void do_pf_read(void);
@@ -256,12 +238,13 @@ struct pf_unit {
 	struct gendisk *disk;
 };
 
-struct pf_unit units[PF_UNITS];
+static struct pf_unit units[PF_UNITS];
 
 static int pf_identify(struct pf_unit *pf);
 static void pf_lock(struct pf_unit *pf, int func);
 static void pf_eject(struct pf_unit *pf);
-static int pf_check_media(struct gendisk *disk);
+static unsigned int pf_check_events(struct gendisk *disk,
+				    unsigned int clearing);
 
 static char pf_scratch[512];	/* scratch block buffer */
 
@@ -282,15 +265,16 @@ static char *pf_buf;		/* buffer for request in progress */
 
 /* kernel glue structures */
 
-static struct block_device_operations pf_fops = {
+static const struct block_device_operations pf_fops = {
 	.owner		= THIS_MODULE,
 	.open		= pf_open,
 	.release	= pf_release,
 	.ioctl		= pf_ioctl,
-	.media_changed	= pf_check_media,
+	.getgeo		= pf_getgeo,
+	.check_events	= pf_check_events,
 };
 
-void pf_init_units(void)
+static void __init pf_init_units(void)
 {
 	struct pf_unit *pf;
 	int unit;
@@ -315,75 +299,88 @@ void pf_init_units(void)
 	}
 }
 
-static int pf_open(struct inode *inode, struct file *file)
+static int pf_open(struct block_device *bdev, fmode_t mode)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
+	struct pf_unit *pf = bdev->bd_disk->private_data;
+	int ret;
 
+	mutex_lock(&pf_mutex);
 	pf_identify(pf);
 
+	ret = -ENODEV;
 	if (pf->media_status == PF_NM)
-		return -ENODEV;
+		goto out;
 
-	if ((pf->media_status == PF_RO) && (file->f_mode & 2))
-		return -EROFS;
+	ret = -EROFS;
+	if ((pf->media_status == PF_RO) && (mode & FMODE_WRITE))
+		goto out;
 
+	ret = 0;
 	pf->access++;
 	if (pf->removable)
 		pf_lock(pf, 1);
-
-	return 0;
+out:
+	mutex_unlock(&pf_mutex);
+	return ret;
 }
 
-static int pf_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+static int pf_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
-	struct hd_geometry *geo = (struct hd_geometry *) arg;
-	struct hd_geometry g;
-	sector_t capacity;
+	struct pf_unit *pf = bdev->bd_disk->private_data;
+	sector_t capacity = get_capacity(pf->disk);
 
-	if (cmd == CDROMEJECT) {
-		if (pf->access == 1) {
-			pf_eject(pf);
-			return 0;
-		}
-		return -EBUSY;
-	}
-	if (cmd != HDIO_GETGEO)
-		return -EINVAL;
-	capacity = get_capacity(pf->disk);
 	if (capacity < PF_FD_MAX) {
-		g.cylinders = sector_div(capacity, PF_FD_HDS * PF_FD_SPT);
-		g.heads = PF_FD_HDS;
-		g.sectors = PF_FD_SPT;
+		geo->cylinders = sector_div(capacity, PF_FD_HDS * PF_FD_SPT);
+		geo->heads = PF_FD_HDS;
+		geo->sectors = PF_FD_SPT;
 	} else {
-		g.cylinders = sector_div(capacity, PF_HD_HDS * PF_HD_SPT);
-		g.heads = PF_HD_HDS;
-		g.sectors = PF_HD_SPT;
+		geo->cylinders = sector_div(capacity, PF_HD_HDS * PF_HD_SPT);
+		geo->heads = PF_HD_HDS;
+		geo->sectors = PF_HD_SPT;
 	}
-	if (copy_to_user(geo, &g, sizeof(g)))
-		return -EFAULT;
+
 	return 0;
 }
 
-static int pf_release(struct inode *inode, struct file *file)
+static int pf_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
+	struct pf_unit *pf = bdev->bd_disk->private_data;
 
-	if (pf->access <= 0)
+	if (cmd != CDROMEJECT)
 		return -EINVAL;
+
+	if (pf->access != 1)
+		return -EBUSY;
+	mutex_lock(&pf_mutex);
+	pf_eject(pf);
+	mutex_unlock(&pf_mutex);
+
+	return 0;
+}
+
+static int pf_release(struct gendisk *disk, fmode_t mode)
+{
+	struct pf_unit *pf = disk->private_data;
+
+	mutex_lock(&pf_mutex);
+	if (pf->access <= 0) {
+		mutex_unlock(&pf_mutex);
+		return -EINVAL;
+	}
 
 	pf->access--;
 
 	if (!pf->access && pf->removable)
 		pf_lock(pf, 0);
 
+	mutex_unlock(&pf_mutex);
 	return 0;
 
 }
 
-static int pf_check_media(struct gendisk *disk)
+static unsigned int pf_check_events(struct gendisk *disk, unsigned int clearing)
 {
-	return 1;
+	return DISK_EVENT_MEDIA_CHANGE;
 }
 
 static inline int status_reg(struct pf_unit *pf)
@@ -410,11 +407,11 @@ static int pf_wait(struct pf_unit *pf, int go, int stop, char *fun, char *msg)
 	       && (j++ < PF_SPIN))
 		udelay(PF_SPIN_DEL);
 
-	if ((r & (STAT_ERR & stop)) || (j >= PF_SPIN)) {
+	if ((r & (STAT_ERR & stop)) || (j > PF_SPIN)) {
 		s = read_reg(pf, 7);
 		e = read_reg(pf, 1);
 		p = read_reg(pf, 2);
-		if (j >= PF_SPIN)
+		if (j > PF_SPIN)
 			e |= 0x100;
 		if (fun)
 			printk("%s: %s %s: alt=0x%x stat=0x%x err=0x%x"
@@ -507,13 +504,11 @@ static int pf_atapi(struct pf_unit *pf, char *cmd, int dlen, char *buf, char *fu
 	return r;
 }
 
-#define DBMSG(msg)      ((verbose>1)?(msg):NULL)
-
 static void pf_lock(struct pf_unit *pf, int func)
 {
 	char lo_cmd[12] = { ATAPI_LOCK, pf->lun << 5, 0, 0, func, 0, 0, 0, 0, 0, 0, 0 };
 
-	pf_atapi(pf, lo_cmd, 0, pf_scratch, func ? "unlock" : "lock");
+	pf_atapi(pf, lo_cmd, 0, pf_scratch, func ? "lock" : "unlock");
 }
 
 static void pf_eject(struct pf_unit *pf)
@@ -528,8 +523,7 @@ static void pf_eject(struct pf_unit *pf)
 
 static void pf_sleep(int cs)
 {
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(cs);
+	schedule_timeout_interruptible(cs);
 }
 
 /* the ATAPI standard actually specifies the contents of all 7 registers
@@ -575,7 +569,7 @@ static void pf_mode_sense(struct pf_unit *pf)
 	    { ATAPI_MODE_SENSE, pf->lun << 5, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0 };
 	char buf[8];
 
-	pf_atapi(pf, ms_cmd, 8, buf, DBMSG("mode sense"));
+	pf_atapi(pf, ms_cmd, 8, buf, "mode sense");
 	pf->media_status = PF_RW;
 	if (buf[3] & 0x80)
 		pf->media_status = PF_RO;
@@ -611,7 +605,7 @@ static void pf_get_capacity(struct pf_unit *pf)
 	char buf[8];
 	int bs;
 
-	if (pf_atapi(pf, rc_cmd, 8, buf, DBMSG("get capacity"))) {
+	if (pf_atapi(pf, rc_cmd, 8, buf, "get capacity")) {
 		pf->media_status = PF_NM;
 		return;
 	}
@@ -727,7 +721,7 @@ static int pf_detect(void)
 			if (pi_init(pf->pi, 0, conf[D_PRT], conf[D_MOD],
 				    conf[D_UNI], conf[D_PRO], conf[D_DLY],
 				    pf_scratch, PI_PF, verbose, pf->name)) {
-				if (!pf_probe(pf) && pf->disk) {
+				if (pf->disk && !pf_probe(pf)) {
 					pf->present = 1;
 					k++;
 				} else
@@ -772,22 +766,30 @@ static int pf_ready(void)
 
 static struct request_queue *pf_queue;
 
-static void do_pf_request(request_queue_t * q)
+static void pf_end_request(int err)
+{
+	if (pf_req && !__blk_end_request_cur(pf_req, err))
+		pf_req = NULL;
+}
+
+static void do_pf_request(struct request_queue * q)
 {
 	if (pf_busy)
 		return;
 repeat:
-	pf_req = elv_next_request(q);
-	if (!pf_req)
-		return;
+	if (!pf_req) {
+		pf_req = blk_fetch_request(q);
+		if (!pf_req)
+			return;
+	}
 
 	pf_current = pf_req->rq_disk->private_data;
-	pf_block = pf_req->sector;
-	pf_run = pf_req->nr_sectors;
-	pf_count = pf_req->current_nr_sectors;
+	pf_block = blk_rq_pos(pf_req);
+	pf_run = blk_rq_sectors(pf_req);
+	pf_count = blk_rq_cur_sectors(pf_req);
 
 	if (pf_block + pf_count > get_capacity(pf_req->rq_disk)) {
-		end_request(pf_req, 0);
+		pf_end_request(-EIO);
 		goto repeat;
 	}
 
@@ -802,7 +804,7 @@ repeat:
 		pi_do_claimed(pf_current->pi, do_pf_write);
 	else {
 		pf_busy = 0;
-		end_request(pf_req, 0);
+		pf_end_request(-EIO);
 		goto repeat;
 	}
 }
@@ -816,23 +818,25 @@ static int pf_next_buf(void)
 	pf_buf += 512;
 	pf_block++;
 	if (!pf_run)
-		return 0;
-	if (!pf_count)
 		return 1;
-	spin_lock_irqsave(&pf_spin_lock, saved_flags);
-	end_request(pf_req, 1);
-	pf_count = pf_req->current_nr_sectors;
-	pf_buf = pf_req->buffer;
-	spin_unlock_irqrestore(&pf_spin_lock, saved_flags);
-	return 1;
+	if (!pf_count) {
+		spin_lock_irqsave(&pf_spin_lock, saved_flags);
+		pf_end_request(0);
+		spin_unlock_irqrestore(&pf_spin_lock, saved_flags);
+		if (!pf_req)
+			return 1;
+		pf_count = blk_rq_cur_sectors(pf_req);
+		pf_buf = pf_req->buffer;
+	}
+	return 0;
 }
 
-static inline void next_request(int success)
+static inline void next_request(int err)
 {
 	unsigned long saved_flags;
 
 	spin_lock_irqsave(&pf_spin_lock, saved_flags);
-	end_request(pf_req, success);
+	pf_end_request(err);
 	pf_busy = 0;
 	do_pf_request(pf_queue);
 	spin_unlock_irqrestore(&pf_spin_lock, saved_flags);
@@ -841,7 +845,7 @@ static inline void next_request(int success)
 /* detach from the calling context - in case the spinlock is held */
 static void do_pf_read(void)
 {
-	ps_set_intr(do_pf_read_start, 0, 0, nice);
+	ps_set_intr(do_pf_read_start, NULL, 0, nice);
 }
 
 static void do_pf_read_start(void)
@@ -855,7 +859,7 @@ static void do_pf_read_start(void)
 			pi_do_claimed(pf_current->pi, do_pf_read_start);
 			return;
 		}
-		next_request(0);
+		next_request(-EIO);
 		return;
 	}
 	pf_mask = STAT_DRQ;
@@ -874,7 +878,7 @@ static void do_pf_read_drq(void)
 				pi_do_claimed(pf_current->pi, do_pf_read_start);
 				return;
 			}
-			next_request(0);
+			next_request(-EIO);
 			return;
 		}
 		pi_read_block(pf_current->pi, pf_buf, 512);
@@ -882,12 +886,12 @@ static void do_pf_read_drq(void)
 			break;
 	}
 	pi_disconnect(pf_current->pi);
-	next_request(1);
+	next_request(0);
 }
 
 static void do_pf_write(void)
 {
-	ps_set_intr(do_pf_write_start, 0, 0, nice);
+	ps_set_intr(do_pf_write_start, NULL, 0, nice);
 }
 
 static void do_pf_write_start(void)
@@ -901,7 +905,7 @@ static void do_pf_write_start(void)
 			pi_do_claimed(pf_current->pi, do_pf_write_start);
 			return;
 		}
-		next_request(0);
+		next_request(-EIO);
 		return;
 	}
 
@@ -914,7 +918,7 @@ static void do_pf_write_start(void)
 				pi_do_claimed(pf_current->pi, do_pf_write_start);
 				return;
 			}
-			next_request(0);
+			next_request(-EIO);
 			return;
 		}
 		pi_write_block(pf_current->pi, pf_buf, 512);
@@ -934,11 +938,11 @@ static void do_pf_write_done(void)
 			pi_do_claimed(pf_current->pi, do_pf_write_start);
 			return;
 		}
-		next_request(0);
+		next_request(-EIO);
 		return;
 	}
 	pi_disconnect(pf_current->pi);
-	next_request(1);
+	next_request(0);
 }
 
 static int __init pf_init(void)
@@ -947,29 +951,28 @@ static int __init pf_init(void)
 	int unit;
 
 	if (disable)
-		return -1;
+		return -EINVAL;
 
 	pf_init_units();
 
 	if (pf_detect())
-		return -1;
+		return -ENODEV;
 	pf_busy = 0;
 
 	if (register_blkdev(major, name)) {
 		for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++)
 			put_disk(pf->disk);
-		return -1;
+		return -EBUSY;
 	}
 	pf_queue = blk_init_queue(do_pf_request, &pf_spin_lock);
 	if (!pf_queue) {
 		unregister_blkdev(major, name);
 		for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++)
 			put_disk(pf->disk);
-		return -1;
+		return -ENOMEM;
 	}
 
-	blk_queue_max_phys_segments(pf_queue, cluster);
-	blk_queue_max_hw_segments(pf_queue, cluster);
+	blk_queue_max_segments(pf_queue, cluster);
 
 	for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++) {
 		struct gendisk *disk = pf->disk;

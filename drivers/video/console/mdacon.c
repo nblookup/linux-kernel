@@ -27,15 +27,12 @@
  */
 
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/string.h>
 #include <linux/kd.h>
-#include <linux/slab.h>
 #include <linux/vt_kern.h>
 #include <linux/vt_buffer.h>
 #include <linux/selection.h>
@@ -47,7 +44,7 @@
 #include <asm/io.h>
 #include <asm/vga.h>
 
-static spinlock_t mda_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(mda_lock);
 
 /* description of the hardware layout */
 
@@ -64,7 +61,6 @@ static unsigned int	mda_gfx_port;		/* Graphics control port */
 
 /* current hardware state */
 
-static int	mda_origin_loc=-1;
 static int	mda_cursor_loc=-1;
 static int	mda_cursor_size_from=-1;
 static int	mda_cursor_size_to=-1;
@@ -74,13 +70,15 @@ static char *mda_type_name;
 
 /* console information */
 
-static int	mda_first_vc = 1;
+static int	mda_first_vc = 13;
 static int	mda_last_vc  = 16;
 
 static struct vc_data	*mda_display_fg = NULL;
 
-MODULE_PARM(mda_first_vc, "1-255i");
-MODULE_PARM(mda_last_vc,  "1-255i");
+module_param(mda_first_vc, int, 0);
+MODULE_PARM_DESC(mda_first_vc, "First virtual console. Default: 13");
+module_param(mda_last_vc, int, 0);
+MODULE_PARM_DESC(mda_last_vc, "Last virtual console. Default: 16");
 
 /* MDA register values
  */
@@ -148,16 +146,6 @@ static int test_mda_b(unsigned char val, unsigned char reg)
 }
 #endif
 
-static inline void mda_set_origin(unsigned int location)
-{
-	if (mda_origin_loc == location)
-		return;
-
-	write_mda_w(location >> 1, 0x0c);
-
-	mda_origin_loc = location;
-}
-
 static inline void mda_set_cursor(unsigned int location) 
 {
 	if (mda_cursor_loc == location)
@@ -209,7 +197,7 @@ static int __init mdacon_setup(char *str)
 __setup("mdacon=", mdacon_setup);
 #endif
 
-static int __init mda_detect(void)
+static int mda_detect(void)
 {
 	int count=0;
 	u16 *p, p_save;
@@ -294,7 +282,7 @@ static int __init mda_detect(void)
 	return 1;
 }
 
-static void __init mda_initialize(void)
+static void mda_initialize(void)
 {
 	write_mda_b(97, 0x00);		/* horizontal total */
 	write_mda_b(80, 0x01);		/* horizontal displayed */
@@ -319,13 +307,13 @@ static void __init mda_initialize(void)
 	outb_p(0x00, mda_gfx_port);
 }
 
-static const char __init *mdacon_startup(void)
+static const char *mdacon_startup(void)
 {
 	mda_num_columns = 80;
 	mda_num_lines   = 25;
 
-	mda_vram_base = VGA_MAP_MEM(0xb0000);
 	mda_vram_len  = 0x01000;
+	mda_vram_base = VGA_MAP_MEM(0xb0000, mda_vram_len);
 
 	mda_index_port  = 0x3b4;
 	mda_value_port  = 0x3b5;
@@ -362,16 +350,13 @@ static void mdacon_init(struct vc_data *c, int init)
 	if (init) {
 		c->vc_cols = mda_num_columns;
 		c->vc_rows = mda_num_lines;
-	} else {
-		vc_resize(c->vc_num, mda_num_columns, mda_num_lines);
-        }
-	
+	} else
+		vc_resize(c, mda_num_columns, mda_num_lines);
+
 	/* make the first MDA console visible */
 
 	if (mda_display_fg == NULL)
 		mda_display_fg = c;
-
-	MOD_INC_USE_COUNT;
 }
 
 static void mdacon_deinit(struct vc_data *c)
@@ -380,8 +365,6 @@ static void mdacon_deinit(struct vc_data *c)
 
 	if (mda_display_fg == c)
 		mda_display_fg = NULL;
-
-	MOD_DEC_USE_COUNT;
 }
 
 static inline u16 mda_convert_attr(u16 ch)
@@ -402,7 +385,7 @@ static inline u16 mda_convert_attr(u16 ch)
 }
 
 static u8 mdacon_build_attr(struct vc_data *c, u8 color, u8 intensity, 
-			    u8 blink, u8 underline, u8 reverse)
+			    u8 blink, u8 underline, u8 reverse, u8 italic)
 {
 	/* The attribute is just a bit vector:
 	 *
@@ -415,6 +398,7 @@ static u8 mdacon_build_attr(struct vc_data *c, u8 color, u8 intensity,
 	return (intensity & 3) |
 		((underline & 1) << 2) |
 		((reverse   & 1) << 3) |
+		(!!italic << 4) |
 		((blink     & 1) << 7);
 }
 
@@ -502,7 +486,7 @@ static int mdacon_set_palette(struct vc_data *c, unsigned char *table)
 	return -EINVAL;
 }
 
-static int mdacon_blank(struct vc_data *c, int blank)
+static int mdacon_blank(struct vc_data *c, int blank, int mode_switch)
 {
 	if (mda_type == TYPE_MDA) {
 		if (blank) 
@@ -519,11 +503,6 @@ static int mdacon_blank(struct vc_data *c, int blank)
 				mda_mode_port);
 		return 0;
 	}
-}
-
-static int mdacon_font_op(struct vc_data *c, struct console_font_op *op)
-{
-	return -ENOSYS;
 }
 
 static int mdacon_scrolldelta(struct vc_data *c, int lines)
@@ -585,7 +564,8 @@ static int mdacon_scroll(struct vc_data *c, int t, int b, int dir, int lines)
  *  The console `switch' structure for the MDA based console
  */
 
-const struct consw mda_con = {
+static const struct consw mda_con = {
+	.owner =		THIS_MODULE,
 	.con_startup =		mdacon_startup,
 	.con_init =		mdacon_init,
 	.con_deinit =		mdacon_deinit,
@@ -597,7 +577,6 @@ const struct consw mda_con = {
 	.con_bmove =		mdacon_bmove,
 	.con_switch =		mdacon_switch,
 	.con_blank =		mdacon_blank,
-	.con_font_op =		mdacon_font_op,
 	.con_set_palette =	mdacon_set_palette,
 	.con_scrolldelta =	mdacon_scrolldelta,
 	.con_build_attr =	mdacon_build_attr,
@@ -609,11 +588,10 @@ int __init mda_console_init(void)
 	if (mda_first_vc > mda_last_vc)
 		return 1;
 
-	take_over_console(&mda_con, mda_first_vc-1, mda_last_vc-1, 0);
-	return 0;
+	return take_over_console(&mda_con, mda_first_vc-1, mda_last_vc-1, 0);
 }
 
-void __exit mda_console_exit(void)
+static void __exit mda_console_exit(void)
 {
 	give_up_console(&mda_con);
 }

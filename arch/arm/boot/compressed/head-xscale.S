@@ -5,9 +5,7 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/linkage.h>
-#include <asm/mach-types.h>
 
 		.section        ".start", "ax"
 
@@ -34,39 +32,10 @@ __XScale_start:
 		bic	r0, r0, #0x1000		@ clear Icache
 		mcr	p15, 0, r0, c1, c0, 0
 
-#ifdef	CONFIG_ARCH_IQ80321
-		orr	pc, pc, #PHYS_OFFSET	@ jump to physical memory if we are not there.
-		nop
-		mov	r7, #MACH_TYPE_IQ80321
-#endif
-
-#ifdef CONFIG_ARCH_LUBBOCK
-		mov	r7, #MACH_TYPE_LUBBOCK
-#endif
-
-#ifdef CONFIG_ARCH_COTULLA_IDP
-		mov	r7, #MACH_TYPE_COTULLA_IDP
-#endif
-
-#ifdef CONFIG_ARCH_IQ80310
-		/*
-		 * Crank the CPU up to 733MHz
-		 */
-		mov	r1, #9
-		mcr	p14, 0, r1, c6, c0, 0
-
-		/*
-		 * Disable ECC error notification
-		 * At some point, we should add an ECC handler to Linux
-		 */
-		mov	r1, #0x1500
-		mov	r0, #0x4
-		str	r0, [r1, #0x34]
-
-		mov	r7, #MACH_TYPE_IQ80310
-#endif
-
-#ifdef CONFIG_ARCH_ADI_EVB
-		mov	r7, #MACH_TYPE_ADI_EVB
+#ifdef CONFIG_ARCH_IXP2000
+		mov	r1, #-1
+		mov	r0, #0xd6000000
+		str	r1, [r0, #0x14]
+		str	r1, [r0, #0x18]
 #endif
 

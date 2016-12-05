@@ -4,48 +4,39 @@
 # for more details.
 #
 # Copyright (C) 1995, 1998, 2001, 2002 by Ralf Baechle
+# Copyright (C) 2004  Maciej W. Rozycki
 #
 
 #
 # Some DECstations need all possible sections of an ECOFF executable
 #
-ifdef CONFIG_DECSTATION
-  E2EFLAGS = -a
-else
-  E2EFLAGS =
+ifdef CONFIG_MACH_DECSTATION
+  e2eflag := -a
 endif
 
 #
 # Drop some uninteresting sections in the kernel.
 # This is only relevant for ELF kernels but doesn't hurt a.out
 #
-drop-sections	= .reginfo .mdebug .comment .note
-strip-flags	= $(addprefix --remove-section=,$(drop-sections))
+drop-sections := .reginfo .mdebug .comment .note .pdr .options .MIPS.options
+strip-flags   := $(addprefix --remove-section=,$(drop-sections))
 
-all: vmlinux.ecoff addinitrd
+hostprogs-y := elf2ecoff
 
-vmlinux.rm200: vmlinux
-	$(OBJCOPY) \
-		--change-addresses=0xfffffffc \
-		-O elf32-tradlittlemips \
-		$(strip-flags) \
-		$< $@
+targets := vmlinux.ecoff
+quiet_cmd_ecoff = ECOFF   $@
+      cmd_ecoff = $(obj)/elf2ecoff $(VMLINUX) $@ $(e2eflag)
+$(obj)/vmlinux.ecoff: $(obj)/elf2ecoff $(VMLINUX) FORCE
+	$(call if_changed,ecoff)
 
-vmlinux.ecoff:	$(obj)/elf2ecoff vmlinux
-	./elf2ecoff vmlinux $(obj)/vmlinux.ecoff $(E2EFLAGS)
+targets += vmlinux.bin
+quiet_cmd_bin = OBJCOPY $@
+      cmd_bin = $(OBJCOPY) -O binary $(strip-flags) $(VMLINUX) $@
+$(obj)/vmlinux.bin: $(VMLINUX) FORCE
+	$(call if_changed,bin)
 
-$(obj)/elf2ecoff: $(obj)/elf2ecoff.c
-	$(HOSTCC) -o $@ $^
-
-$(obj)/addinitrd: $(obj)/addinitrd.c
-	$(HOSTCC) -o $@ $^
-
-archhelp:
-	@echo	'* vmlinux.rm200	- Bootable kernel image for RM200C'
-
-CLEAN_FILES += addinitrd \
-	       elf2ecoff \
-	       vmlinux.ecoff \
-	       vmlinux.rm200 \
-	       zImage.tmp \
-	       zImage
+targets += vmlinux.srec
+quiet_cmd_srec = OBJCOPY $@
+      cmd_srec = $(OBJCOPY) -S -O srec $(strip-flags) $(VMLINUX) $@
+$(obj)/vmlinux.srec: $(VMLINUX) FORCE
+	$(call if_changed,srec)

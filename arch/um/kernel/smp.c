@@ -1,9 +1,14 @@
-/* 
- * Copyright (C) 2000 Jeff Dike (jdike@karaya.com)
+/*
+ * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
-#include "linux/config.h"
+#include "linux/percpu.h"
+#include "asm/pgalloc.h"
+#include "asm/tlb.h"
+
+/* For some reason, mmu_gathers are referenced when CONFIG_SMP is off. */
+DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 #ifdef CONFIG_SMP
 
@@ -12,20 +17,13 @@
 #include "linux/threads.h"
 #include "linux/interrupt.h"
 #include "linux/err.h"
+#include "linux/hardirq.h"
 #include "asm/smp.h"
 #include "asm/processor.h"
 #include "asm/spinlock.h"
-#include "asm/hardirq.h"
-#include "user_util.h"
-#include "kern_util.h"
 #include "kern.h"
 #include "irq_user.h"
 #include "os.h"
-
-/* CPU online map, set by smp_boot_cpus */
-unsigned long cpu_online_map = cpumask_of_cpu(0);
-
-EXPORT_SYMBOL(cpu_online_map);
 
 /* Per CPU bogomips and other parameters
  * The only piece used here is the ipi pipe, which is set before SMP is
@@ -33,65 +31,16 @@ EXPORT_SYMBOL(cpu_online_map);
  */
 struct cpuinfo_um cpu_data[NR_CPUS];
 
-spinlock_t um_bh_lock = SPIN_LOCK_UNLOCKED;
-
-atomic_t global_bh_count;
-
-/* Not used by UML */
-unsigned char global_irq_holder = NO_PROC_ID;
-unsigned volatile long global_irq_lock;
-
-/* Set when the idlers are all forked */
-int smp_threads_ready = 0;
-
 /* A statistic, can be a little off */
 int num_reschedules_sent = 0;
-
-/* Small, random number, never changed */
-unsigned long cache_decay_ticks = 5;
 
 /* Not changed after boot */
 struct task_struct *idle_threads[NR_CPUS];
 
 void smp_send_reschedule(int cpu)
 {
-	write(cpu_data[cpu].ipi_pipe[1], "R", 1);
+	os_write_file(cpu_data[cpu].ipi_pipe[1], "R", 1);
 	num_reschedules_sent++;
-}
-
-static void show(char * str)
-{
-	int cpu = smp_processor_id();
-
-	printk(KERN_INFO "\n%s, CPU %d:\n", str, cpu);
-}
-	
-#define MAXCOUNT 100000000
-
-static inline void wait_on_bh(void)
-{
-	int count = MAXCOUNT;
-	do {
-		if (!--count) {
-			show("wait_on_bh");
-			count = ~0;
-		}
-		/* nothing .. wait for the other bh's to go away */
-	} while (atomic_read(&global_bh_count) != 0);
-}
-
-/*
- * This is called when we want to synchronize with
- * bottom half handlers. We need to wait until
- * no other CPU is executing any bottom half handler.
- *
- * Don't wait if we're already running in an interrupt
- * context or are inside a bh handler. 
- */
-void synchronize_bh(void)
-{
-	if (atomic_read(&global_bh_count) && !in_interrupt())
-		wait_on_bh();
 }
 
 void smp_send_stop(void)
@@ -99,93 +48,94 @@ void smp_send_stop(void)
 	int i;
 
 	printk(KERN_INFO "Stopping all CPUs...");
-	for(i = 0; i < num_online_cpus(); i++){
-		if(i == current->thread_info->cpu)
+	for (i = 0; i < num_online_cpus(); i++) {
+		if (i == current_thread->cpu)
 			continue;
-		write(cpu_data[i].ipi_pipe[1], "S", 1);
+		os_write_file(cpu_data[i].ipi_pipe[1], "S", 1);
 	}
-	printk("done\n");
+	printk(KERN_CONT "done\n");
 }
 
-static cpumask_t smp_commenced_mask;
-static cpumask_t smp_callin_map = CPU_MASK_NONE;
+static cpumask_t smp_commenced_mask = CPU_MASK_NONE;
+static cpumask_t cpu_callin_map = CPU_MASK_NONE;
 
 static int idle_proc(void *cpup)
 {
 	int cpu = (int) cpup, err;
 
 	err = os_pipe(cpu_data[cpu].ipi_pipe, 1, 1);
-	if(err)
-		panic("CPU#%d failed to create IPI pipe, errno = %d", cpu, 
-		      -err);
+	if (err < 0)
+		panic("CPU#%d failed to create IPI pipe, err = %d", cpu, -err);
 
-	activate_ipi(cpu_data[cpu].ipi_pipe[0], 
-		     current->thread.mode.tt.extern_pid);
- 
+	os_set_fd_async(cpu_data[cpu].ipi_pipe[0]);
+
 	wmb();
-	if (cpu_test_and_set(cpu, &smp_callin_map)) {
-		printk("huh, CPU#%d already present??\n", cpu);
+	if (cpu_test_and_set(cpu, cpu_callin_map)) {
+		printk(KERN_ERR "huh, CPU#%d already present??\n", cpu);
 		BUG();
 	}
 
-	while (!cpu_isset(cpu, &smp_commenced_mask))
+	while (!cpu_isset(cpu, smp_commenced_mask))
 		cpu_relax();
 
+	notify_cpu_starting(cpu);
 	cpu_set(cpu, cpu_online_map);
 	default_idle();
-	return(0);
+	return 0;
 }
 
 static struct task_struct *idle_thread(int cpu)
 {
 	struct task_struct *new_task;
-	unsigned char c;
 
-        current->thread.request.u.thread.proc = idle_proc;
-        current->thread.request.u.thread.arg = (void *) cpu;
-	new_task = do_fork(CLONE_VM | CLONE_IDLETASK, 0, NULL, 0, NULL, NULL);
-	if(IS_ERR(new_task)) panic("do_fork failed in idle_thread");
+	current->thread.request.u.thread.proc = idle_proc;
+	current->thread.request.u.thread.arg = (void *) cpu;
+	new_task = fork_idle(cpu);
+	if (IS_ERR(new_task))
+		panic("copy_process failed in idle_thread, error = %ld",
+		      PTR_ERR(new_task));
 
-	cpu_tasks[cpu] = ((struct cpu_task) 
+	cpu_tasks[cpu] = ((struct cpu_task)
 		          { .pid = 	new_task->thread.mode.tt.extern_pid,
 			    .task = 	new_task } );
 	idle_threads[cpu] = new_task;
-	CHOOSE_MODE(write(new_task->thread.mode.tt.switch_pipe[1], &c, 
-			  sizeof(c)),
-		    ({ panic("skas mode doesn't support SMP"); }));
-	return(new_task);
+	panic("skas mode doesn't support SMP");
+	return new_task;
 }
 
 void smp_prepare_cpus(unsigned int maxcpus)
 {
 	struct task_struct *idle;
 	unsigned long waittime;
-	int err, cpu;
+	int err, cpu, me = smp_processor_id();
+	int i;
 
-	cpu_set(0, cpu_online_map);
-	cpu_set(0, smp_callin_map);
+	for (i = 0; i < ncpus; ++i)
+		set_cpu_possible(i, true);
 
-	err = os_pipe(cpu_data[0].ipi_pipe, 1, 1);
-	if(err)	panic("CPU#0 failed to create IPI pipe, errno = %d", -err);
+	cpu_clear(me, cpu_online_map);
+	cpu_set(me, cpu_online_map);
+	cpu_set(me, cpu_callin_map);
 
-	activate_ipi(cpu_data[0].ipi_pipe[0], 
-		     current->thread.mode.tt.extern_pid);
+	err = os_pipe(cpu_data[me].ipi_pipe, 1, 1);
+	if (err < 0)
+		panic("CPU#0 failed to create IPI pipe, errno = %d", -err);
 
-	for(cpu = 1; cpu < ncpus; cpu++){
-		printk("Booting processor %d...\n", cpu);
-		
+	os_set_fd_async(cpu_data[me].ipi_pipe[0]);
+
+	for (cpu = 1; cpu < ncpus; cpu++) {
+		printk(KERN_INFO "Booting processor %d...\n", cpu);
+
 		idle = idle_thread(cpu);
 
 		init_idle(idle, cpu);
-		unhash_process(idle);
 
 		waittime = 200000000;
-		while (waittime-- && !cpu_isset(cpu, smp_callin_map))
+		while (waittime-- && !cpu_isset(cpu, cpu_callin_map))
 			cpu_relax();
 
-		if (cpu_isset(cpu, smp_callin_map))
-			printk("done\n");
-		else printk("failed\n");
+		printk(KERN_INFO "%s\n",
+		       cpu_isset(cpu, cpu_calling_map) ? "done" : "failed");
 	}
 }
 
@@ -199,13 +149,13 @@ int __cpu_up(unsigned int cpu)
 	cpu_set(cpu, smp_commenced_mask);
 	while (!cpu_isset(cpu, cpu_online_map))
 		mb();
-	return(0);
+	return 0;
 }
 
 int setup_profiling_timer(unsigned int multiplier)
 {
 	printk(KERN_INFO "setup_profiling_timer\n");
-	return(0);
+	return 0;
 }
 
 void smp_call_function_slave(int cpu);
@@ -216,7 +166,7 @@ void IPI_handler(int cpu)
 	int fd;
 
 	fd = cpu_data[cpu].ipi_pipe[0];
-	while (read(fd, &c, 1) == 1) {
+	while (os_read_file(fd, &c, 1) == 1) {
 		switch (c) {
 		case 'C':
 			smp_call_function_slave(cpu);
@@ -227,13 +177,14 @@ void IPI_handler(int cpu)
 			break;
 
 		case 'S':
-			printk("CPU#%d stopping\n", cpu);
-			while(1)
+			printk(KERN_INFO "CPU#%d stopping\n", cpu);
+			while (1)
 				pause();
 			break;
 
 		default:
-			printk("CPU#%d received unknown IPI [%c]!\n", cpu, c);
+			printk(KERN_ERR "CPU#%d received unknown IPI [%c]!\n",
+			       cpu, c);
 			break;
 		}
 	}
@@ -241,10 +192,10 @@ void IPI_handler(int cpu)
 
 int hard_smp_processor_id(void)
 {
-	return(pid_to_processor_id(os_getpid()));
+	return pid_to_processor_id(os_getpid());
 }
 
-static spinlock_t call_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(call_lock);
 static atomic_t scf_started;
 static atomic_t scf_finished;
 static void (*func)(void *info);
@@ -257,8 +208,7 @@ void smp_call_function_slave(int cpu)
 	atomic_inc(&scf_finished);
 }
 
-int smp_call_function(void (*_func)(void *info), void *_info, int nonatomic, 
-		      int wait)
+int smp_call_function(void (*_func)(void *info), void *_info, int wait)
 {
 	int cpus = num_online_cpus() - 1;
 	int i;
@@ -266,16 +216,17 @@ int smp_call_function(void (*_func)(void *info), void *_info, int nonatomic,
 	if (!cpus)
 		return 0;
 
+	/* Can deadlock when called with interrupts disabled */
+	WARN_ON(irqs_disabled());
+
 	spin_lock_bh(&call_lock);
 	atomic_set(&scf_started, 0);
 	atomic_set(&scf_finished, 0);
 	func = _func;
 	info = _info;
 
-	for (i=0;i<NR_CPUS;i++)
-		if((i != current->thread_info->cpu) && 
-		   cpu_isset(i, cpu_online_map))
-			write(cpu_data[i].ipi_pipe[1], "C", 1);
+	for_each_online_cpu(i)
+		os_write_file(cpu_data[i].ipi_pipe[1], "C", 1);
 
 	while (atomic_read(&scf_started) != cpus)
 		barrier();
@@ -289,14 +240,3 @@ int smp_call_function(void (*_func)(void *info), void *_info, int nonatomic,
 }
 
 #endif
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

@@ -1,4 +1,4 @@
-/* 
+/*
  * dmxdev.h
  *
  * Copyright (C) 2000 Ralph Metzler & Marcus Metzler
@@ -30,14 +30,16 @@
 #include <linux/wait.h>
 #include <linux/fs.h>
 #include <linux/string.h>
-#include <asm/semaphore.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
 
 #include <linux/dvb/dmx.h>
 
 #include "dvbdev.h"
 #include "demux.h"
+#include "dvb_ringbuffer.h"
 
-enum dmxdevype {
+enum dmxdev_type {
 	DMXDEV_TYPE_NONE,
 	DMXDEV_TYPE_SEC,
 	DMXDEV_TYPE_PES,
@@ -52,52 +54,39 @@ enum dmxdev_state {
 	DMXDEV_STATE_TIMEDOUT
 };
 
-struct dmxdev_buffer {
-        u8 *data;
-        int size;
-        int pread;
-        int pwrite;
-	wait_queue_head_t queue;
-        int error;
+struct dmxdev_feed {
+	u16 pid;
+	struct dmx_ts_feed *ts;
+	struct list_head next;
 };
 
 struct dmxdev_filter {
-	struct dvb_device *dvbdev;
-
-        union {
-	        struct dmx_section_filter *sec;
+	union {
+		struct dmx_section_filter *sec;
 	} filter;
 
-        union {
-                struct dmx_ts_feed *ts;
-                struct dmx_section_feed *sec;
+	union {
+		/* list of TS and PES feeds (struct dmxdev_feed) */
+		struct list_head ts;
+		struct dmx_section_feed *sec;
 	} feed;
 
-        union {
-	        struct dmx_sct_filter_params sec;
-	        struct dmx_pes_filter_params pes;
+	union {
+		struct dmx_sct_filter_params sec;
+		struct dmx_pes_filter_params pes;
 	} params;
 
-        int type;
-        enum dmxdev_state state;
-        struct dmxdev *dev;
-        struct dmxdev_buffer buffer;
+	enum dmxdev_type type;
+	enum dmxdev_state state;
+	struct dmxdev *dev;
+	struct dvb_ringbuffer buffer;
 
-	struct semaphore mutex;
+	struct mutex mutex;
 
-        /* only for sections */
-        struct timer_list timer;
-        int todo;
-        u8 secheader[3];
-
-        u16 pid;
-};
-
-
-struct dmxdev_dvr {
-        int state;
-        struct dmxdev *dev;
-        struct dmxdev_buffer buffer;
+	/* only for sections */
+	struct timer_list timer;
+	int todo;
+	u8 secheader[3];
 };
 
 
@@ -105,19 +94,20 @@ struct dmxdev {
 	struct dvb_device *dvbdev;
 	struct dvb_device *dvr_dvbdev;
 
-        struct dmxdev_filter *filter;
-        struct dmxdev_dvr *dvr;
-        struct dmx_demux *demux;
+	struct dmxdev_filter *filter;
+	struct dmx_demux *demux;
 
-        int filternum;
-        int capabilities;
+	int filternum;
+	int capabilities;
+
+	unsigned int exit:1;
 #define DMXDEV_CAP_DUPLEX 1
-        struct dmx_frontend *dvr_orig_fe;
+	struct dmx_frontend *dvr_orig_fe;
 
-        struct dmxdev_buffer dvr_buffer;
+	struct dvb_ringbuffer dvr_buffer;
 #define DVR_BUFFER_SIZE (10*188*1024)
 
-	struct semaphore mutex;
+	struct mutex mutex;
 	spinlock_t lock;
 };
 

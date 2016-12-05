@@ -7,8 +7,6 @@
 #ifndef _LINUX_NFS_H
 #define _LINUX_NFS_H
 
-#include <linux/sunrpc/msg_prot.h>
-
 #define NFS_PROGRAM	100003
 #define NFS_PORT	2049
 #define NFS_MAXDATA	8192
@@ -27,8 +25,9 @@
 #define NFSMODE_SOCK	0140000
 #define NFSMODE_FIFO	0010000
 
-#define NFS_MNT_PROGRAM	100005
-#define NFS_MNT_PORT	627
+#define NFS_MNT_PROGRAM		100005
+#define NFS_MNT_VERSION		1
+#define NFS_MNT3_VERSION	3
 
 /*
  * NFS stats. The good thing with these values is that NFSv3 errors are
@@ -92,7 +91,7 @@
 	NFSERR_NOT_SAME = 10027,	/*       v4 */
 	NFSERR_LOCK_RANGE = 10028,	/*       v4 */
 	NFSERR_SYMLINK = 10029,		/*       v4 */
-	NFSERR_READDIR_NOSPC = 10030,	/*       v4 */
+	NFSERR_RESTOREFH = 10030,	/*       v4 */
 	NFSERR_LEASE_MOVED = 10031,	/*       v4 */
 	NFSERR_ATTRNOTSUPP = 10032,	/*       v4 */
 	NFSERR_NO_GRACE = 10033,	/*       v4 */
@@ -111,7 +110,6 @@
 	NFSERR_FILE_OPEN = 10046,      /*       v4 */
 	NFSERR_ADMIN_REVOKED = 10047,  /*       v4 */
 	NFSERR_CB_PATH_DOWN = 10048,   /*       v4 */
-	NFSERR_REPLAY_ME = 10049	/*       v4 */
 };
 
 /* NFSv2 file types - beware, these are not the same in NFSv3 */
@@ -128,7 +126,10 @@ enum nfs_ftype {
 	NFFIFO = 8
 };
 
-#if defined(__KERNEL__)
+#ifdef __KERNEL__
+#include <linux/sunrpc/msg_prot.h>
+#include <linux/string.h>
+
 /*
  * This is the kernel NFS client file handle representation
  */
@@ -137,6 +138,22 @@ struct nfs_fh {
 	unsigned short		size;
 	unsigned char		data[NFS_MAXFHSIZE];
 };
+
+/*
+ * Returns a zero iff the size and data fields match.
+ * Checks only "size" bytes in the data field.
+ */
+static inline int nfs_compare_fh(const struct nfs_fh *a, const struct nfs_fh *b)
+{
+	return a->size != b->size || memcmp(a->data, b->data, a->size) != 0;
+}
+
+static inline void nfs_copy_fh(struct nfs_fh *target, const struct nfs_fh *source)
+{
+	target->size = source->size;
+	memcpy(target->data, source->data, source->size);
+}
+
 
 /*
  * This is really a general kernel constant, but since nothing like

@@ -18,13 +18,13 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
 #include <linux/inet.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -59,7 +59,7 @@ void lapb_frames_acked(struct lapb_cb *lapb, unsigned short nr)
 	 */
 	if (lapb->va != nr)
 		while (skb_peek(&lapb->ack_queue) && lapb->va != nr) {
-		        skb = skb_dequeue(&lapb->ack_queue);
+			skb = skb_dequeue(&lapb->ack_queue);
 			kfree_skb(skb);
 			lapb->va = (lapb->va + 1) % modulus;
 		}
@@ -67,7 +67,7 @@ void lapb_frames_acked(struct lapb_cb *lapb, unsigned short nr)
 
 void lapb_requeue_frames(struct lapb_cb *lapb)
 {
-        struct sk_buff *skb, *skb_prev = NULL;
+	struct sk_buff *skb, *skb_prev = NULL;
 
 	/*
 	 * Requeue all the un-ack-ed frames on the output queue to be picked
@@ -78,7 +78,7 @@ void lapb_requeue_frames(struct lapb_cb *lapb)
 		if (!skb_prev)
 			skb_queue_head(&lapb->write_queue, skb);
 		else
-			skb_append(skb_prev, skb);
+			skb_append(skb_prev, skb, &lapb->write_queue);
 		skb_prev = skb;
 	}
 }
@@ -91,7 +91,7 @@ int lapb_validate_nr(struct lapb_cb *lapb, unsigned short nr)
 {
 	unsigned short vc = lapb->va;
 	int modulus;
-	
+
 	modulus = (lapb->mode & LAPB_EXTENDED) ? LAPB_EMODULUS : LAPB_SMODULUS;
 
 	while (vc != lapb->vs) {
@@ -99,7 +99,7 @@ int lapb_validate_nr(struct lapb_cb *lapb, unsigned short nr)
 			return 1;
 		vc = (vc + 1) % modulus;
 	}
-	
+
 	return nr == lapb->vs;
 }
 
@@ -114,7 +114,7 @@ int lapb_decode(struct lapb_cb *lapb, struct sk_buff *skb,
 
 #if LAPB_DEBUG > 2
 	printk(KERN_DEBUG "lapb: (%p) S%d RX %02X %02X %02X\n",
-	       lapb->token, lapb->state,
+	       lapb->dev, lapb->state,
 	       skb->data[0], skb->data[1], skb->data[2]);
 #endif
 
@@ -149,7 +149,7 @@ int lapb_decode(struct lapb_cb *lapb, struct sk_buff *skb,
 				frame->cr = LAPB_RESPONSE;
 		}
 	}
-		
+
 	skb_pull(skb, 1);
 
 	if (lapb->mode & LAPB_EXTENDED) {
@@ -220,9 +220,9 @@ int lapb_decode(struct lapb_cb *lapb, struct sk_buff *skb,
 	return 0;
 }
 
-/* 
+/*
  *	This routine is called when the HDLC layer internally  generates a
- *	command or  response  for  the remote machine ( eg. RR, UA etc. ). 
+ *	command or  response  for  the remote machine ( eg. RR, UA etc. ).
  *	Only supervisory or unnumbered frames are processed, FRMRs are handled
  *	by lapb_transmit_frmr below.
  */
@@ -259,7 +259,7 @@ void lapb_send_control(struct lapb_cb *lapb, int frametype,
 	lapb_transmit_buffer(lapb, skb, type);
 }
 
-/* 
+/*
  *	This routine generates FRMRs based on information previously stored in
  *	the LAPB control block.
  */
@@ -287,7 +287,7 @@ void lapb_transmit_frmr(struct lapb_cb *lapb)
 
 #if LAPB_DEBUG > 1
 	printk(KERN_DEBUG "lapb: (%p) S%d TX FRMR %02X %02X %02X %02X %02X\n",
-	       lapb->token, lapb->state,
+	       lapb->dev, lapb->state,
 	       skb->data[1], skb->data[2], skb->data[3],
 	       skb->data[4], skb->data[5]);
 #endif
@@ -304,7 +304,7 @@ void lapb_transmit_frmr(struct lapb_cb *lapb)
 
 #if LAPB_DEBUG > 1
 	printk(KERN_DEBUG "lapb: (%p) S%d TX FRMR %02X %02X %02X\n",
-	       lapb->token, lapb->state, skb->data[1],
+	       lapb->dev, lapb->state, skb->data[1],
 	       skb->data[2], skb->data[3]);
 #endif
 	}

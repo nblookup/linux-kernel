@@ -31,33 +31,31 @@
 #define IDI_SYNC_REQ_SET_POSTCALL       0x03
 #define IDI_SYNC_REQ_GET_XLOG           0x04
 #define IDI_SYNC_REQ_GET_FEATURES       0x05
-/* Added for DIVA USB support */
 #define IDI_SYNC_REQ_USB_REGISTER       0x06
 #define IDI_SYNC_REQ_USB_RELEASE        0x07
 #define IDI_SYNC_REQ_USB_ADD_DEVICE     0x08
 #define IDI_SYNC_REQ_USB_START_DEVICE   0x09
 #define IDI_SYNC_REQ_USB_STOP_DEVICE    0x0A
 #define IDI_SYNC_REQ_USB_REMOVE_DEVICE  0x0B
-/* Added for Diva Server Monitor */
 #define IDI_SYNC_REQ_GET_CARDTYPE       0x0C
 #define IDI_SYNC_REQ_GET_DBG_XLOG       0x0D
-#define IDI_SYNC_REQ_GET_LINE_IDX   0x0E
 #define DIVA_USB
 #define DIVA_USB_REQ                    0xAC
 #define DIVA_USB_TEST                   0xAB
 #define DIVA_USB_ADD_ADAPTER            0xAC
 #define DIVA_USB_REMOVE_ADAPTER         0xAD
-/******************************************************************************/
 #define IDI_SYNC_REQ_SERIAL_HOOK        0x80
 #define IDI_SYNC_REQ_XCHANGE_STATUS     0x81
 #define IDI_SYNC_REQ_USB_HOOK           0x82
 #define IDI_SYNC_REQ_PORTDRV_HOOK       0x83
-#define IDI_SYNC_REQ_SLI           (0x84)   /*  SLI request from 3signal modem drivers */
+#define IDI_SYNC_REQ_SLI                0x84   /*  SLI request from 3signal modem drivers */
 #define IDI_SYNC_REQ_RECONFIGURE        0x85
 #define IDI_SYNC_REQ_RESET              0x86
+#define IDI_SYNC_REQ_GET_85X_DEVICE_DATA     0x87
 #define IDI_SYNC_REQ_LOCK_85X                   0x88
+#define IDI_SYNC_REQ_DIVA_85X_USB_DATA_EXCHANGE 0x99
+#define IDI_SYNC_REQ_DIPORT_EXCHANGE_REQ   0x98
 #define IDI_SYNC_REQ_GET_85X_EXT_PORT_TYPE      0xA0
-#define IDI_SYNC_REQ_DIPORT_GET_85X_TX_CTRL_FN  0x98
 /******************************************************************************/
 #define IDI_SYNC_REQ_XDI_GET_EXTENDED_FEATURES  0x92
 /*
@@ -87,6 +85,8 @@ typedef struct _diva_xdi_get_extended_xdi_features {
 #define DIVA_XDI_EXTENDED_FEATURE_CAPI_PRMS       0x08
 #define DIVA_XDI_EXTENDED_FEATURE_NO_CANCEL_RC    0x10
 #define DIVA_XDI_EXTENDED_FEATURE_RX_DMA          0x20
+#define DIVA_XDI_EXTENDED_FEATURE_MANAGEMENT_DMA  0x40
+#define DIVA_XDI_EXTENDED_FEATURE_WIDE_ID         0x80
 #define DIVA_XDI_EXTENDED_FEATURES_MAX_SZ    1
 /******************************************************************************/
 #define IDI_SYNC_REQ_XDI_GET_ADAPTER_SDRAM_BAR   0x93
@@ -115,6 +115,7 @@ typedef struct _diva_xdi_get_capi_parameters {
 typedef struct _diva_xdi_get_logical_adapter_number {
   dword logical_adapter_number;
   dword controller;
+  dword total_controllers;
 } diva_xdi_get_logical_adapter_number_s_t;
 /******************************************************************************/
 #define IDI_SYNC_REQ_UP1DM_OPERATION   0x96
@@ -134,6 +135,7 @@ typedef struct _diva_xdi_dma_descriptor_operation {
 #define IDI_SYNC_REQ_DIDD_ADD_ADAPTER               0x03
 #define IDI_SYNC_REQ_DIDD_REMOVE_ADAPTER            0x04
 #define IDI_SYNC_REQ_DIDD_READ_ADAPTER_ARRAY        0x05
+#define IDI_SYNC_REQ_DIDD_GET_CFG_LIB_IFC           0x10
 typedef struct _diva_didd_adapter_notify {
  dword handle; /* Notification handle */
  void   * callback;
@@ -149,6 +151,9 @@ typedef struct _diva_didd_read_adapter_array {
  void   * buffer;
  dword length;
 } diva_didd_read_adapter_array_t;
+typedef struct _diva_didd_get_cfg_lib_ifc {
+ void* ifc;
+} diva_didd_get_cfg_lib_ifc_t;
 /******************************************************************************/
 #define IDI_SYNC_REQ_XDI_GET_STREAM    0x91
 #define DIVA_XDI_SYNCHRONOUS_SERVICE   0x01
@@ -211,7 +216,7 @@ typedef struct
 #define SERIAL_HOOK_RING 0x85
 #define SERIAL_HOOK_DETACH 0x8f
  unsigned char Flags;           /* function refinements   */
- /* parameters passed by the the ATTACH request      */
+ /* parameters passed by the ATTACH request      */
  SERIAL_INT_CB InterruptHandler; /* called on each interrupt  */
  SERIAL_DPC_CB DeferredHandler; /* called on hook state changes */
  void   *HandlerContext; /* context for both handlers */
@@ -251,7 +256,6 @@ typedef struct
 #define NO_ORDER_CHECK_MASK 0x00000010
 #define LOW_CHANNEL_MASK 0x00000020
 #define NO_HSCX30_MASK  0x00000040
-#define MODE_MASK   0x00000080
 #define SET_BOARD   0x00001000
 #define SET_CRC4   0x00030000
 #define SET_L1_TRISTATE  0x00040000
@@ -466,6 +470,10 @@ typedef union
   ENTITY             e;
   diva_didd_read_adapter_array_t info;
  } didd_read_adapter_array;
+ struct {
+  ENTITY             e;
+  diva_didd_get_cfg_lib_ifc_t     info;
+ } didd_get_cfg_lib_ifc;
   struct {
     unsigned char Req;
     unsigned char Rc;

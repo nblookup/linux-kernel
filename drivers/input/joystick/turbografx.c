@@ -1,6 +1,4 @@
 /*
- * $Id: turbografx.c,v 1.14 2002/01/22 20:30:39 vojtech Exp $
- *
  *  Copyright (c) 1998-2001 Vojtech Pavlik
  *
  *  Based on the work of:
@@ -14,18 +12,18 @@
 /*
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or 
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- * 
+ *
  * Should you need to contact me, the author, you can do so either by
  * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
@@ -36,20 +34,35 @@
 #include <linux/input.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
 MODULE_DESCRIPTION("TurboGraFX parallel port interface driver");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(tgfx, "2-8i");
-MODULE_PARM(tgfx_2, "2-8i");
-MODULE_PARM(tgfx_3, "2-8i");
+#define TGFX_MAX_PORTS		3
+#define TGFX_MAX_DEVICES	7
+
+struct tgfx_config {
+	int args[TGFX_MAX_DEVICES + 1];
+	unsigned int nargs;
+};
+
+static struct tgfx_config tgfx_cfg[TGFX_MAX_PORTS] __initdata;
+
+module_param_array_named(map, tgfx_cfg[0].args, int, &tgfx_cfg[0].nargs, 0);
+MODULE_PARM_DESC(map, "Describes first set of devices (<parport#>,<js1>,<js2>,..<js7>");
+module_param_array_named(map2, tgfx_cfg[1].args, int, &tgfx_cfg[1].nargs, 0);
+MODULE_PARM_DESC(map2, "Describes second set of devices");
+module_param_array_named(map3, tgfx_cfg[2].args, int, &tgfx_cfg[2].nargs, 0);
+MODULE_PARM_DESC(map3, "Describes third set of devices");
 
 #define TGFX_REFRESH_TIME	HZ/100	/* 10 ms */
 
 #define TGFX_TRIGGER		0x08
 #define TGFX_UP			0x10
-#define TGFX_DOWN		0x20	
+#define TGFX_DOWN		0x20
 #define TGFX_LEFT		0x40
 #define TGFX_RIGHT		0x80
 
@@ -58,21 +71,18 @@ MODULE_PARM(tgfx_3, "2-8i");
 #define TGFX_TOP		0x01
 #define TGFX_TOP2		0x08
 
-static int tgfx[] __initdata = { -1, 0, 0, 0, 0, 0, 0, 0 };
-static int tgfx_2[] __initdata = { -1, 0, 0, 0, 0, 0, 0, 0 };
-static int tgfx_3[] __initdata = { -1, 0, 0, 0, 0, 0, 0, 0 };
-
 static int tgfx_buttons[] = { BTN_TRIGGER, BTN_THUMB, BTN_THUMB2, BTN_TOP, BTN_TOP2 };
-static char *tgfx_name = "TurboGraFX Multisystem joystick";
 
-struct tgfx {
+static struct tgfx {
 	struct pardevice *pd;
 	struct timer_list timer;
-	struct input_dev dev[7];
-	char phys[7][32];
+	struct input_dev *dev[TGFX_MAX_DEVICES];
+	char name[TGFX_MAX_DEVICES][64];
+	char phys[TGFX_MAX_DEVICES][32];
 	int sticks;
 	int used;
-} *tgfx_base[3];
+	struct mutex sem;
+} *tgfx_base[TGFX_MAX_PORTS];
 
 /*
  * tgfx_timer() reads and analyzes TurboGraFX joystick data.
@@ -87,7 +97,7 @@ static void tgfx_timer(unsigned long private)
 	for (i = 0; i < 7; i++)
 		if (tgfx->sticks & (1 << i)) {
 
- 			dev = tgfx->dev + i;
+			dev = tgfx->dev[i];
 
 			parport_write_data(tgfx->pd->port, ~(1 << i));
 			data1 = parport_read_status(tgfx->pd->port) ^ 0x7f;
@@ -110,155 +120,205 @@ static void tgfx_timer(unsigned long private)
 
 static int tgfx_open(struct input_dev *dev)
 {
-        struct tgfx *tgfx = dev->private;
-        if (!tgfx->used++) {
+	struct tgfx *tgfx = input_get_drvdata(dev);
+	int err;
+
+	err = mutex_lock_interruptible(&tgfx->sem);
+	if (err)
+		return err;
+
+	if (!tgfx->used++) {
 		parport_claim(tgfx->pd);
 		parport_write_control(tgfx->pd->port, 0x04);
-                mod_timer(&tgfx->timer, jiffies + TGFX_REFRESH_TIME); 
+		mod_timer(&tgfx->timer, jiffies + TGFX_REFRESH_TIME);
 	}
-        return 0;
+
+	mutex_unlock(&tgfx->sem);
+	return 0;
 }
 
 static void tgfx_close(struct input_dev *dev)
 {
-        struct tgfx *tgfx = dev->private;
-        if (!--tgfx->used) {
-                del_timer(&tgfx->timer);
+	struct tgfx *tgfx = input_get_drvdata(dev);
+
+	mutex_lock(&tgfx->sem);
+	if (!--tgfx->used) {
+		del_timer_sync(&tgfx->timer);
 		parport_write_control(tgfx->pd->port, 0x00);
-        	parport_release(tgfx->pd);
+		parport_release(tgfx->pd);
 	}
+	mutex_unlock(&tgfx->sem);
 }
+
+
 
 /*
  * tgfx_probe() probes for tg gamepads.
  */
 
-static struct tgfx __init *tgfx_probe(int *config)
+static struct tgfx __init *tgfx_probe(int parport, int *n_buttons, int n_devs)
 {
 	struct tgfx *tgfx;
+	struct input_dev *input_dev;
 	struct parport *pp;
+	struct pardevice *pd;
 	int i, j;
+	int err;
 
-	if (config[0] < 0)
-		return NULL;
-
-	for (pp = parport_enumerate(); pp && (config[0] > 0); pp = pp->next)
-		config[0]--;
-
+	pp = parport_find_number(parport);
 	if (!pp) {
 		printk(KERN_ERR "turbografx.c: no such parport\n");
-		return NULL;
+		err = -EINVAL;
+		goto err_out;
 	}
 
-	if (!(tgfx = kmalloc(sizeof(struct tgfx), GFP_KERNEL)))
-		return NULL;
-	memset(tgfx, 0, sizeof(struct tgfx));
-
-	tgfx->pd = parport_register_device(pp, "turbografx", NULL, NULL, NULL, PARPORT_DEV_EXCL, NULL);
-
-	if (!tgfx->pd) {
+	pd = parport_register_device(pp, "turbografx", NULL, NULL, NULL, PARPORT_DEV_EXCL, NULL);
+	if (!pd) {
 		printk(KERN_ERR "turbografx.c: parport busy already - lp.o loaded?\n");
-		kfree(tgfx);
-		return NULL;
+		err = -EBUSY;
+		goto err_put_pp;
 	}
 
+	tgfx = kzalloc(sizeof(struct tgfx), GFP_KERNEL);
+	if (!tgfx) {
+		printk(KERN_ERR "turbografx.c: Not enough memory\n");
+		err = -ENOMEM;
+		goto err_unreg_pardev;
+	}
+
+	mutex_init(&tgfx->sem);
+	tgfx->pd = pd;
 	init_timer(&tgfx->timer);
 	tgfx->timer.data = (long) tgfx;
 	tgfx->timer.function = tgfx_timer;
 
-	tgfx->sticks = 0;
+	for (i = 0; i < n_devs; i++) {
+		if (n_buttons[i] < 1)
+			continue;
 
-	for (i = 0; i < 7; i++)
-		if (config[i+1] > 0 && config[i+1] < 6) {
-
-			tgfx->sticks |= (1 << i);
-
-			tgfx->dev[i].private = tgfx;
-			tgfx->dev[i].open = tgfx_open;
-			tgfx->dev[i].close = tgfx_close;
-
-			sprintf(tgfx->phys[i], "%s/input0", tgfx->pd->port->name);
-
-			tgfx->dev[i].name = tgfx_name;
-			tgfx->dev[i].phys = tgfx->phys[i];
-			tgfx->dev[i].id.bustype = BUS_PARPORT;
-			tgfx->dev[i].id.vendor = 0x0003;
-			tgfx->dev[i].id.product = config[i+1];
-			tgfx->dev[i].id.version = 0x0100;
-
-			tgfx->dev[i].evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
-			tgfx->dev[i].absbit[0] = BIT(ABS_X) | BIT(ABS_Y);
-
-			for (j = 0; j < config[i+1]; j++)
-				set_bit(tgfx_buttons[j], tgfx->dev[i].keybit); 
-
-			tgfx->dev[i].absmin[ABS_X] = -1; tgfx->dev[i].absmax[ABS_X] = 1;
-			tgfx->dev[i].absmin[ABS_Y] = -1; tgfx->dev[i].absmax[ABS_Y] = 1;
-
-			input_register_device(tgfx->dev + i);
-			printk(KERN_INFO "input: %d-button Multisystem joystick on %s\n",
-				config[i+1], tgfx->pd->port->name);
+		if (n_buttons[i] > 6) {
+			printk(KERN_ERR "turbografx.c: Invalid number of buttons %d\n", n_buttons[i]);
+			err = -EINVAL;
+			goto err_unreg_devs;
 		}
 
-        if (!tgfx->sticks) {
-		parport_unregister_device(tgfx->pd);
-		kfree(tgfx);
-		return NULL;
-        }
-		
-	return tgfx;
-}
+		tgfx->dev[i] = input_dev = input_allocate_device();
+		if (!input_dev) {
+			printk(KERN_ERR "turbografx.c: Not enough memory for input device\n");
+			err = -ENOMEM;
+			goto err_unreg_devs;
+		}
 
-#ifndef MODULE
-static int __init tgfx_setup(char *str)
-{
-	int i, ints[9];
-	get_options(str, ARRAY_SIZE(ints), ints);
-	for (i = 0; i <= ints[0] && i < 8; i++) tgfx[i] = ints[i + 1];
-	return 1;
-}
-static int __init tgfx_setup_2(char *str)
-{
-	int i, ints[9];
-	get_options(str, ARRAY_SIZE(ints), ints);
-	for (i = 0; i <= ints[0] && i < 8; i++) tgfx_2[i] = ints[i + 1];
-	return 1;
-}
-static int __init tgfx_setup_3(char *str)
-{
-	int i, ints[9];
-	get_options(str, ARRAY_SIZE(ints), ints);
-	for (i = 0; i <= ints[0] && i < 8; i++) tgfx_3[i] = ints[i + 1];
-	return 1;
-}
-__setup("tgfx=", tgfx_setup);
-__setup("tgfx_2=", tgfx_setup_2);
-__setup("tgfx_3=", tgfx_setup_3);
-#endif
+		tgfx->sticks |= (1 << i);
+		snprintf(tgfx->name[i], sizeof(tgfx->name[i]),
+			 "TurboGraFX %d-button Multisystem joystick", n_buttons[i]);
+		snprintf(tgfx->phys[i], sizeof(tgfx->phys[i]),
+			 "%s/input%d", tgfx->pd->port->name, i);
 
-int __init tgfx_init(void)
-{
-	tgfx_base[0] = tgfx_probe(tgfx);
-	tgfx_base[1] = tgfx_probe(tgfx_2);
-	tgfx_base[2] = tgfx_probe(tgfx_3);
+		input_dev->name = tgfx->name[i];
+		input_dev->phys = tgfx->phys[i];
+		input_dev->id.bustype = BUS_PARPORT;
+		input_dev->id.vendor = 0x0003;
+		input_dev->id.product = n_buttons[i];
+		input_dev->id.version = 0x0100;
 
-	if (tgfx_base[0] || tgfx_base[1] || tgfx_base[2])
-		return 0;
+		input_set_drvdata(input_dev, tgfx);
 
-	return -ENODEV;
-}
+		input_dev->open = tgfx_open;
+		input_dev->close = tgfx_close;
 
-void __exit tgfx_exit(void)
-{
-	int i, j;
+		input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
+		input_set_abs_params(input_dev, ABS_X, -1, 1, 0, 0);
+		input_set_abs_params(input_dev, ABS_Y, -1, 1, 0, 0);
 
-	for (i = 0; i < 3; i++) 
-		if (tgfx_base[i]) {
-			for (j = 0; j < 7; j++)
-				if (tgfx_base[i]->sticks & (1 << j))
-					input_unregister_device(tgfx_base[i]->dev + j);
-		parport_unregister_device(tgfx_base[i]->pd);
+		for (j = 0; j < n_buttons[i]; j++)
+			set_bit(tgfx_buttons[j], input_dev->keybit);
+
+		err = input_register_device(tgfx->dev[i]);
+		if (err)
+			goto err_free_dev;
 	}
+
+        if (!tgfx->sticks) {
+		printk(KERN_ERR "turbografx.c: No valid devices specified\n");
+		err = -EINVAL;
+		goto err_free_tgfx;
+        }
+
+	parport_put_port(pp);
+	return tgfx;
+
+ err_free_dev:
+	input_free_device(tgfx->dev[i]);
+ err_unreg_devs:
+	while (--i >= 0)
+		if (tgfx->dev[i])
+			input_unregister_device(tgfx->dev[i]);
+ err_free_tgfx:
+	kfree(tgfx);
+ err_unreg_pardev:
+	parport_unregister_device(pd);
+ err_put_pp:
+	parport_put_port(pp);
+ err_out:
+	return ERR_PTR(err);
+}
+
+static void tgfx_remove(struct tgfx *tgfx)
+{
+	int i;
+
+	for (i = 0; i < TGFX_MAX_DEVICES; i++)
+		if (tgfx->dev[i])
+			input_unregister_device(tgfx->dev[i]);
+	parport_unregister_device(tgfx->pd);
+	kfree(tgfx);
+}
+
+static int __init tgfx_init(void)
+{
+	int i;
+	int have_dev = 0;
+	int err = 0;
+
+	for (i = 0; i < TGFX_MAX_PORTS; i++) {
+		if (tgfx_cfg[i].nargs == 0 || tgfx_cfg[i].args[0] < 0)
+			continue;
+
+		if (tgfx_cfg[i].nargs < 2) {
+			printk(KERN_ERR "turbografx.c: at least one joystick must be specified\n");
+			err = -EINVAL;
+			break;
+		}
+
+		tgfx_base[i] = tgfx_probe(tgfx_cfg[i].args[0],
+					  tgfx_cfg[i].args + 1,
+					  tgfx_cfg[i].nargs - 1);
+		if (IS_ERR(tgfx_base[i])) {
+			err = PTR_ERR(tgfx_base[i]);
+			break;
+		}
+
+		have_dev = 1;
+	}
+
+	if (err) {
+		while (--i >= 0)
+			if (tgfx_base[i])
+				tgfx_remove(tgfx_base[i]);
+		return err;
+	}
+
+	return have_dev ? 0 : -ENODEV;
+}
+
+static void __exit tgfx_exit(void)
+{
+	int i;
+
+	for (i = 0; i < TGFX_MAX_PORTS; i++)
+		if (tgfx_base[i])
+			tgfx_remove(tgfx_base[i]);
 }
 
 module_init(tgfx_init);

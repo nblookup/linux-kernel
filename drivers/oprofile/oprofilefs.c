@@ -21,86 +21,49 @@
 
 #define OPROFILEFS_MAGIC 0x6f70726f
 
-spinlock_t oprofilefs_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(oprofilefs_lock);
 
-static struct inode * oprofilefs_get_inode(struct super_block * sb, int mode)
+static struct inode *oprofilefs_get_inode(struct super_block *sb, int mode)
 {
-	struct inode * inode = new_inode(sb);
+	struct inode *inode = new_inode(sb);
 
 	if (inode) {
+		inode->i_ino = get_next_ino();
 		inode->i_mode = mode;
-		inode->i_uid = 0;
-		inode->i_gid = 0;
-		inode->i_blksize = PAGE_CACHE_SIZE;
-		inode->i_blocks = 0;
 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	}
 	return inode;
 }
 
 
-static struct super_operations s_ops = {
+static const struct super_operations s_ops = {
 	.statfs		= simple_statfs,
 	.drop_inode 	= generic_delete_inode,
 };
 
 
-ssize_t oprofilefs_str_to_user(char const * str, char * buf, size_t count, loff_t * offset)
+ssize_t oprofilefs_str_to_user(char const *str, char __user *buf, size_t count, loff_t *offset)
 {
-	size_t len = strlen(str);
-
-	if (!count)
-		return 0;
-
-	if (*offset > len)
-		return 0;
-
-	if (count > len - *offset)
-		count = len - *offset;
-
-	if (copy_to_user(buf, str + *offset, count))
-		return -EFAULT;
-
-	*offset += count;
-
-	return count;
+	return simple_read_from_buffer(buf, count, offset, str, strlen(str));
 }
 
 
 #define TMPBUFSIZE 50
 
-ssize_t oprofilefs_ulong_to_user(unsigned long val, char * buf, size_t count, loff_t * offset)
+ssize_t oprofilefs_ulong_to_user(unsigned long val, char __user *buf, size_t count, loff_t *offset)
 {
 	char tmpbuf[TMPBUFSIZE];
-	size_t maxlen;
-
-	if (!count)
-		return 0;
-
-	spin_lock(&oprofilefs_lock);
-	maxlen = snprintf(tmpbuf, TMPBUFSIZE, "%lu\n", val);
-	spin_unlock(&oprofilefs_lock);
+	size_t maxlen = snprintf(tmpbuf, TMPBUFSIZE, "%lu\n", val);
 	if (maxlen > TMPBUFSIZE)
 		maxlen = TMPBUFSIZE;
-
-	if (*offset > maxlen)
-		return 0;
-
-	if (count > maxlen - *offset)
-		count = maxlen - *offset;
-
-	if (copy_to_user(buf, tmpbuf + *offset, count))
-		return -EFAULT;
-
-	*offset += count;
-
-	return count;
+	return simple_read_from_buffer(buf, count, offset, tmpbuf, maxlen);
 }
 
 
-int oprofilefs_ulong_from_user(unsigned long * val, char const * buf, size_t count)
+int oprofilefs_ulong_from_user(unsigned long *val, char const __user *buf, size_t count)
 {
 	char tmpbuf[TMPBUFSIZE];
+	unsigned long flags;
 
 	if (!count)
 		return 0;
@@ -113,154 +76,150 @@ int oprofilefs_ulong_from_user(unsigned long * val, char const * buf, size_t cou
 	if (copy_from_user(tmpbuf, buf, count))
 		return -EFAULT;
 
-	spin_lock(&oprofilefs_lock);
+	spin_lock_irqsave(&oprofilefs_lock, flags);
 	*val = simple_strtoul(tmpbuf, NULL, 0);
-	spin_unlock(&oprofilefs_lock);
+	spin_unlock_irqrestore(&oprofilefs_lock, flags);
 	return 0;
 }
 
 
-static ssize_t ulong_read_file(struct file * file, char * buf, size_t count, loff_t * offset)
+static ssize_t ulong_read_file(struct file *file, char __user *buf, size_t count, loff_t *offset)
 {
-	unsigned long * val = file->private_data;
+	unsigned long *val = file->private_data;
 	return oprofilefs_ulong_to_user(*val, buf, count, offset);
 }
 
 
-static ssize_t ulong_write_file(struct file * file, char const * buf, size_t count, loff_t * offset)
+static ssize_t ulong_write_file(struct file *file, char const __user *buf, size_t count, loff_t *offset)
 {
-	unsigned long * value = file->private_data;
+	unsigned long value;
 	int retval;
 
 	if (*offset)
 		return -EINVAL;
 
-	retval = oprofilefs_ulong_from_user(value, buf, count);
-
+	retval = oprofilefs_ulong_from_user(&value, buf, count);
 	if (retval)
 		return retval;
+
+	retval = oprofile_set_ulong(file->private_data, value);
+	if (retval)
+		return retval;
+
 	return count;
 }
 
 
-static int default_open(struct inode * inode, struct file * filp)
+static int default_open(struct inode *inode, struct file *filp)
 {
-	if (inode->u.generic_ip)
-		filp->private_data = inode->u.generic_ip;
+	if (inode->i_private)
+		filp->private_data = inode->i_private;
 	return 0;
 }
 
 
-static struct file_operations ulong_fops = {
+static const struct file_operations ulong_fops = {
 	.read		= ulong_read_file,
 	.write		= ulong_write_file,
 	.open		= default_open,
+	.llseek		= default_llseek,
 };
 
 
-static struct file_operations ulong_ro_fops = {
+static const struct file_operations ulong_ro_fops = {
 	.read		= ulong_read_file,
 	.open		= default_open,
+	.llseek		= default_llseek,
 };
 
 
-static struct dentry * __oprofilefs_create_file(struct super_block * sb,
-	struct dentry * root, char const * name, struct file_operations * fops)
+static int __oprofilefs_create_file(struct super_block *sb,
+	struct dentry *root, char const *name, const struct file_operations *fops,
+	int perm, void *priv)
 {
-	struct dentry * dentry;
-	struct inode * inode;
-	struct qstr qname;
-	qname.name = name;
-	qname.len = strlen(name);
-	qname.hash = full_name_hash(qname.name, qname.len);
-	dentry = d_alloc(root, &qname);
+	struct dentry *dentry;
+	struct inode *inode;
+
+	dentry = d_alloc_name(root, name);
 	if (!dentry)
-		return 0;
-	inode = oprofilefs_get_inode(sb, S_IFREG | 0644);
+		return -ENOMEM;
+	inode = oprofilefs_get_inode(sb, S_IFREG | perm);
 	if (!inode) {
 		dput(dentry);
-		return 0;
+		return -ENOMEM;
 	}
 	inode->i_fop = fops;
 	d_add(dentry, inode);
-	return dentry;
-}
-
-
-int oprofilefs_create_ulong(struct super_block * sb, struct dentry * root,
-	char const * name, unsigned long * val)
-{
-	struct dentry * d = __oprofilefs_create_file(sb, root, name, &ulong_fops);
-	if (!d)
-		return -EFAULT;
-
-	d->d_inode->u.generic_ip = val;
+	dentry->d_inode->i_private = priv;
 	return 0;
 }
 
 
-int oprofilefs_create_ro_ulong(struct super_block * sb, struct dentry * root,
-	char const * name, unsigned long * val)
+int oprofilefs_create_ulong(struct super_block *sb, struct dentry *root,
+	char const *name, unsigned long *val)
 {
-	struct dentry * d = __oprofilefs_create_file(sb, root, name, &ulong_ro_fops);
-	if (!d)
-		return -EFAULT;
-
-	d->d_inode->u.generic_ip = val;
-	return 0;
+	return __oprofilefs_create_file(sb, root, name,
+					&ulong_fops, 0644, val);
 }
 
 
-static ssize_t atomic_read_file(struct file * file, char * buf, size_t count, loff_t * offset)
+int oprofilefs_create_ro_ulong(struct super_block *sb, struct dentry *root,
+	char const *name, unsigned long *val)
 {
-	atomic_t * val = file->private_data;
+	return __oprofilefs_create_file(sb, root, name,
+					&ulong_ro_fops, 0444, val);
+}
+
+
+static ssize_t atomic_read_file(struct file *file, char __user *buf, size_t count, loff_t *offset)
+{
+	atomic_t *val = file->private_data;
 	return oprofilefs_ulong_to_user(atomic_read(val), buf, count, offset);
 }
- 
 
-static struct file_operations atomic_ro_fops = {
+
+static const struct file_operations atomic_ro_fops = {
 	.read		= atomic_read_file,
 	.open		= default_open,
+	.llseek		= default_llseek,
 };
- 
 
-int oprofilefs_create_ro_atomic(struct super_block * sb, struct dentry * root,
-	char const * name, atomic_t * val)
+
+int oprofilefs_create_ro_atomic(struct super_block *sb, struct dentry *root,
+	char const *name, atomic_t *val)
 {
-	struct dentry * d = __oprofilefs_create_file(sb, root, name, &atomic_ro_fops);
-	if (!d)
-		return -EFAULT;
-
-	d->d_inode->u.generic_ip = val;
-	return 0;
-}
-
- 
-int oprofilefs_create_file(struct super_block * sb, struct dentry * root,
-	char const * name, struct file_operations * fops)
-{
-	if (!__oprofilefs_create_file(sb, root, name, fops))
-		return -EFAULT;
-	return 0;
+	return __oprofilefs_create_file(sb, root, name,
+					&atomic_ro_fops, 0444, val);
 }
 
 
-struct dentry * oprofilefs_mkdir(struct super_block * sb,
-	struct dentry * root, char const * name)
+int oprofilefs_create_file(struct super_block *sb, struct dentry *root,
+	char const *name, const struct file_operations *fops)
 {
-	struct dentry * dentry;
-	struct inode * inode;
-	struct qstr qname;
-	qname.name = name;
-	qname.len = strlen(name);
-	qname.hash = full_name_hash(qname.name, qname.len);
-	dentry = d_alloc(root, &qname);
+	return __oprofilefs_create_file(sb, root, name, fops, 0644, NULL);
+}
+
+
+int oprofilefs_create_file_perm(struct super_block *sb, struct dentry *root,
+	char const *name, const struct file_operations *fops, int perm)
+{
+	return __oprofilefs_create_file(sb, root, name, fops, perm, NULL);
+}
+
+
+struct dentry *oprofilefs_mkdir(struct super_block *sb,
+	struct dentry *root, char const *name)
+{
+	struct dentry *dentry;
+	struct inode *inode;
+
+	dentry = d_alloc_name(root, name);
 	if (!dentry)
-		return 0;
+		return NULL;
 	inode = oprofilefs_get_inode(sb, S_IFDIR | 0755);
 	if (!inode) {
 		dput(dentry);
-		return 0;
+		return NULL;
 	}
 	inode->i_op = &simple_dir_inode_operations;
 	inode->i_fop = &simple_dir_operations;
@@ -269,15 +228,16 @@ struct dentry * oprofilefs_mkdir(struct super_block * sb,
 }
 
 
-static int oprofilefs_fill_super(struct super_block * sb, void * data, int silent)
+static int oprofilefs_fill_super(struct super_block *sb, void *data, int silent)
 {
-	struct inode * root_inode;
-	struct dentry * root_dentry;
+	struct inode *root_inode;
+	struct dentry *root_dentry;
 
 	sb->s_blocksize = PAGE_CACHE_SIZE;
 	sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
 	sb->s_magic = OPROFILEFS_MAGIC;
 	sb->s_op = &s_ops;
+	sb->s_time_gran = 1;
 
 	root_inode = oprofilefs_get_inode(sb, S_IFDIR | 0755);
 	if (!root_inode)
@@ -299,17 +259,17 @@ static int oprofilefs_fill_super(struct super_block * sb, void * data, int silen
 }
 
 
-static struct super_block *oprofilefs_get_sb(struct file_system_type *fs_type,
+static struct dentry *oprofilefs_mount(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data)
 {
-	return get_sb_single(fs_type, flags, data, oprofilefs_fill_super);
+	return mount_single(fs_type, flags, data, oprofilefs_fill_super);
 }
 
 
 static struct file_system_type oprofilefs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "oprofilefs",
-	.get_sb		= oprofilefs_get_sb,
+	.mount		= oprofilefs_mount,
 	.kill_sb	= kill_litter_super,
 };
 

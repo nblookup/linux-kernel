@@ -62,11 +62,7 @@ static const char version[] =
 
 #include "8390.h"
 
-int es_probe(struct net_device *dev);
 static int es_probe1(struct net_device *dev, int ioaddr);
-
-static int es_open(struct net_device *dev);
-static int es_close(struct net_device *dev);
 
 static void es_reset_8390(struct net_device *dev);
 
@@ -125,11 +121,11 @@ static unsigned char hi_irq_map[] __initdata = {11, 12, 0, 14, 0, 0, 0, 15};
  *	PROM for a match against the Racal-Interlan assigned value.
  */
 
-int __init es_probe(struct net_device *dev)
+static int __init do_es_probe(struct net_device *dev)
 {
 	unsigned short ioaddr = dev->base_addr;
-
-	SET_MODULE_OWNER(dev);
+	int irq = dev->irq;
+	int mem_start = dev->mem_start;
 
 	if (ioaddr > 0x1ff)		/* Check a single specified location. */
 		return es_probe1(dev, ioaddr);
@@ -144,12 +140,37 @@ int __init es_probe(struct net_device *dev)
 	}
 
 	/* EISA spec allows for up to 16 slots, but 8 is typical. */
-	for (ioaddr = 0x1000; ioaddr < 0x9000; ioaddr += 0x1000)
+	for (ioaddr = 0x1000; ioaddr < 0x9000; ioaddr += 0x1000) {
 		if (es_probe1(dev, ioaddr) == 0)
 			return 0;
+		dev->irq = irq;
+		dev->mem_start = mem_start;
+	}
 
 	return -ENODEV;
 }
+
+#ifndef MODULE
+struct net_device * __init es_probe(int unit)
+{
+	struct net_device *dev = alloc_ei_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_es_probe(dev);
+	if (err)
+		goto out;
+	return dev;
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
 
 static int __init es_probe1(struct net_device *dev, int ioaddr)
 {
@@ -166,7 +187,6 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 		inb(ioaddr + ES_CFG4), inb(ioaddr + ES_CFG5), inb(ioaddr + ES_CFG6));
 #endif
 
-
 /*	Check the EISA ID of the card. */
 	eisa_id = inl(ioaddr + ES_ID_PORT);
 	if ((eisa_id != ES_EISA_ID1) && (eisa_id != ES_EISA_ID2)) {
@@ -174,21 +194,21 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 		goto out;
 	}
 
+	for (i = 0; i < ETHER_ADDR_LEN ; i++)
+		dev->dev_addr[i] = inb(ioaddr + ES_SA_PROM + i);
+
 /*	Check the Racal vendor ID as well. */
-	if (inb(ioaddr + ES_SA_PROM + 0) != ES_ADDR0
-		|| inb(ioaddr + ES_SA_PROM + 1) != ES_ADDR1
-		|| inb(ioaddr + ES_SA_PROM + 2) != ES_ADDR2 ) {
-		printk("es3210.c: card not found");
-		for(i = 0; i < ETHER_ADDR_LEN; i++)
-			printk(" %02x", inb(ioaddr + ES_SA_PROM + i));
-		printk(" (invalid prefix).\n");
+	if (dev->dev_addr[0] != ES_ADDR0 ||
+	    dev->dev_addr[1] != ES_ADDR1 ||
+	    dev->dev_addr[2] != ES_ADDR2) {
+		printk("es3210.c: card not found %pM (invalid_prefix).\n",
+		       dev->dev_addr);
 		retval = -ENODEV;
 		goto out;
 	}
 
-	printk("es3210.c: ES3210 rev. %ld at %#x, node", eisa_id>>24, ioaddr);
-	for(i = 0; i < ETHER_ADDR_LEN; i++)
-		printk(" %02x", (dev->dev_addr[i] = inb(ioaddr + ES_SA_PROM + i)));
+	printk("es3210.c: ES3210 rev. %ld at %#x, node %pM",
+	       eisa_id>>24, ioaddr, dev->dev_addr);
 
 	/* Snarf the interrupt now. */
 	if (dev->irq == 0) {
@@ -234,18 +254,16 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 		printk(" assigning ");
 	}
 
-	dev->mem_end = ei_status.rmem_end = dev->mem_start
-		+ (ES_STOP_PG - ES_START_PG)*256;
-	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
-
-	printk("mem %#lx-%#lx\n", dev->mem_start, dev->mem_end-1);
-
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk (" unable to allocate memory for dev->priv.\n");
-		retval = -ENOMEM;
+	ei_status.mem = ioremap(dev->mem_start, (ES_STOP_PG - ES_START_PG)*256);
+	if (!ei_status.mem) {
+		printk("ioremap failed - giving up\n");
+		retval = -ENXIO;
 		goto out1;
 	}
+
+	dev->mem_end = dev->mem_start + (ES_STOP_PG - ES_START_PG)*256;
+
+	printk("mem %#lx-%#lx\n", dev->mem_start, dev->mem_end-1);
 
 #if ES_DEBUG & ES_D_PROBE
 	if (inb(ioaddr + ES_CFG5))
@@ -268,9 +286,12 @@ static int __init es_probe1(struct net_device *dev, int ioaddr)
 	ei_status.block_output = &es_block_output;
 	ei_status.get_8390_hdr = &es_get_8390_hdr;
 
-	dev->open = &es_open;
-	dev->stop = &es_close;
+	dev->netdev_ops = &ei_netdev_ops;
 	NS8390_init(dev, 0);
+
+	retval = register_netdev(dev);
+	if (retval)
+		goto out1;
 	return 0;
 out1:
 	free_irq(dev->irq, dev);
@@ -298,8 +319,6 @@ static void es_reset_8390(struct net_device *dev)
 	ei_status.txing = 0;
 	outb(0x01, ioaddr + ES_RESET_PORT);
 	if (ei_debug > 1) printk("reset done\n");
-
-	return;
 }
 
 /*
@@ -320,8 +339,8 @@ static void es_reset_8390(struct net_device *dev)
 static void
 es_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
-	unsigned long hdr_start = dev->mem_start + ((ring_page - ES_START_PG)<<8);
-	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	void __iomem *hdr_start = ei_status.mem + ((ring_page - ES_START_PG)<<8);
+	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	hdr->count = (hdr->count + 3) & ~3;     /* Round up allocation. */
 }
 
@@ -334,100 +353,91 @@ es_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page
 static void es_block_input(struct net_device *dev, int count, struct sk_buff *skb,
 						  int ring_offset)
 {
-	unsigned long xfer_start = dev->mem_start + ring_offset - (ES_START_PG<<8);
+	void __iomem *xfer_start = ei_status.mem + ring_offset - ES_START_PG*256;
 
-	if (xfer_start + count > ei_status.rmem_end) {
+	if (ring_offset + count > ES_STOP_PG*256) {
 		/* Packet wraps over end of ring buffer. */
-		int semi_count = ei_status.rmem_end - xfer_start;
-		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
+		int semi_count = ES_STOP_PG*256 - ring_offset;
+		memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
+		memcpy_fromio(skb->data + semi_count, ei_status.mem, count);
 	} else {
 		/* Packet is in one chunk. */
-		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		memcpy_fromio(skb->data, xfer_start, count);
 	}
 }
 
 static void es_block_output(struct net_device *dev, int count,
 				const unsigned char *buf, int start_page)
 {
-	unsigned long shmem = dev->mem_start + ((start_page - ES_START_PG)<<8);
+	void __iomem *shmem = ei_status.mem + ((start_page - ES_START_PG)<<8);
 
 	count = (count + 3) & ~3;     /* Round up to doubleword */
-	isa_memcpy_toio(shmem, buf, count);
-}
-
-static int es_open(struct net_device *dev)
-{
-	ei_open(dev);
-	return 0;
-}
-
-static int es_close(struct net_device *dev)
-{
-
-	if (ei_debug > 1)
-		printk("%s: Shutting down ethercard.\n", dev->name);
-
-	ei_close(dev);
-	return 0;
+	memcpy_toio(shmem, buf, count);
 }
 
 #ifdef MODULE
 #define MAX_ES_CARDS	4	/* Max number of ES3210 cards per module */
 #define NAMELEN		8	/* # of chars for storing dev->name */
-static struct net_device dev_es3210[MAX_ES_CARDS];
+static struct net_device *dev_es3210[MAX_ES_CARDS];
 static int io[MAX_ES_CARDS];
 static int irq[MAX_ES_CARDS];
 static int mem[MAX_ES_CARDS];
 
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_ES_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_ES_CARDS) "i");
-MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_ES_CARDS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(mem, int, NULL, 0);
 MODULE_PARM_DESC(io, "I/O base address(es)");
 MODULE_PARM_DESC(irq, "IRQ number(s)");
 MODULE_PARM_DESC(mem, "memory base address(es)");
 MODULE_DESCRIPTION("Racal-Interlan ES3210 EISA ethernet driver");
 MODULE_LICENSE("GPL");
 
-int
-init_module(void)
+int __init init_module(void)
 {
+	struct net_device *dev;
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_ES_CARDS; this_dev++) {
-		struct net_device *dev = &dev_es3210[this_dev];
+		if (io[this_dev] == 0 && this_dev != 0)
+			break;
+		dev = alloc_ei_netdev();
+		if (!dev)
+			break;
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
-		dev->mem_start = mem[this_dev];		/* Currently ignored by driver */
-		dev->init = es_probe;
-		/* Default is to only install one card. */
-		if (io[this_dev] == 0 && this_dev != 0) break;
-		if (register_netdev(dev) != 0) {
-			printk(KERN_WARNING "es3210.c: No es3210 card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) {	/* Got at least one. */
-				return 0;
-			}
-			return -ENXIO;
+		dev->mem_start = mem[this_dev];
+		if (do_es_probe(dev) == 0) {
+			dev_es3210[found++] = dev;
+			continue;
 		}
-		found++;
+		free_netdev(dev);
+		printk(KERN_WARNING "es3210.c: No es3210 card found (i/o = 0x%x).\n", io[this_dev]);
+		break;
 	}
-	return 0;
+	if (found)
+		return 0;
+	return -ENXIO;
 }
 
-void
+static void cleanup_card(struct net_device *dev)
+{
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, ES_IO_EXTENT);
+	iounmap(ei_status.mem);
+}
+
+void __exit
 cleanup_module(void)
 {
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_ES_CARDS; this_dev++) {
-		struct net_device *dev = &dev_es3210[this_dev];
-		if (dev->priv != NULL) {
-			void *priv = dev->priv;
-			free_irq(dev->irq, dev);
-			release_region(dev->base_addr, ES_IO_EXTENT);
+		struct net_device *dev = dev_es3210[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
-			kfree(priv);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }

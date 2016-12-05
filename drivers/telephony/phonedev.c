@@ -8,7 +8,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Author:      Alan Cox, <alan@redhat.com>
+ * Author:      Alan Cox, <alan@lxorguk.ukuu.org.uk>
  *
  * Fixes:       Mar 01 2000 Thomas Sparr, <thomas.l.sparr@telia.com>
  *              phone_register_device now works with unit!=PHONE_UNIT_ANY
@@ -28,7 +28,7 @@
 
 #include <linux/kmod.h>
 #include <linux/sem.h>
-
+#include <linux/mutex.h>
 
 #define PHONE_NUM_DEVICES	256
 
@@ -37,7 +37,7 @@
  */
 
 static struct phone_device *phone_device[PHONE_NUM_DEVICES];
-static DECLARE_MUTEX(phone_lock);
+static DEFINE_MUTEX(phone_lock);
 
 /*
  *    Open a phone device.
@@ -48,19 +48,19 @@ static int phone_open(struct inode *inode, struct file *file)
 	unsigned int minor = iminor(inode);
 	int err = 0;
 	struct phone_device *p;
-	struct file_operations *old_fops, *new_fops = NULL;
+	const struct file_operations *old_fops, *new_fops = NULL;
 
 	if (minor >= PHONE_NUM_DEVICES)
 		return -ENODEV;
 
-	down(&phone_lock);
+	mutex_lock(&phone_lock);
 	p = phone_device[minor];
 	if (p)
 		new_fops = fops_get(p->f_op);
 	if (!new_fops) {
-		up(&phone_lock);
+		mutex_unlock(&phone_lock);
 		request_module("char-major-%d-%d", PHONE_MAJOR, minor);
-		down(&phone_lock);
+		mutex_lock(&phone_lock);
 		p = phone_device[minor];
 		if (p == NULL || (new_fops = fops_get(p->f_op)) == NULL)
 		{
@@ -78,7 +78,7 @@ static int phone_open(struct inode *inode, struct file *file)
 	}
 	fops_put(old_fops);
 end:
-	up(&phone_lock);
+	mutex_unlock(&phone_lock);
 	return err;
 }
 
@@ -100,16 +100,16 @@ int phone_register_device(struct phone_device *p, int unit)
 		end = unit + 1;  /* enter the loop at least one time */
 	}
 	
-	down(&phone_lock);
+	mutex_lock(&phone_lock);
 	for (i = base; i < end; i++) {
 		if (phone_device[i] == NULL) {
 			phone_device[i] = p;
 			p->minor = i;
-			up(&phone_lock);
+			mutex_unlock(&phone_lock);
 			return 0;
 		}
 	}
-	up(&phone_lock);
+	mutex_unlock(&phone_lock);
 	return -ENFILE;
 }
 
@@ -119,18 +119,18 @@ int phone_register_device(struct phone_device *p, int unit)
 
 void phone_unregister_device(struct phone_device *pfd)
 {
-	down(&phone_lock);
-	if (phone_device[pfd->minor] != pfd)
-		panic("phone: bad unregister");
-	phone_device[pfd->minor] = NULL;
-	up(&phone_lock);
+	mutex_lock(&phone_lock);
+	if (likely(phone_device[pfd->minor] == pfd))
+		phone_device[pfd->minor] = NULL;
+	mutex_unlock(&phone_lock);
 }
 
 
-static struct file_operations phone_fops =
+static const struct file_operations phone_fops =
 {
 	.owner		= THIS_MODULE,
 	.open		= phone_open,
+	.llseek		= noop_llseek,
 };
 
 /*

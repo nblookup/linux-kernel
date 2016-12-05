@@ -2,8 +2,8 @@
 # Makefile for s390-specific library files..
 #
 
-EXTRA_AFLAGS := -traditional
-
-lib-y += delay.o 
-lib-$(CONFIG_ARCH_S390_31) += memset.o strcmp.o strncpy.o uaccess.o
-lib-$(CONFIG_ARCH_S390X) += memset64.o strcmp64.o strncpy64.o uaccess64.o
+lib-y += delay.o string.o uaccess_std.o uaccess_pt.o
+obj-y += usercopy.o
+obj-$(CONFIG_32BIT) += div64.o qrnnd.o ucmpdi2.o
+lib-$(CONFIG_64BIT) += uaccess_mvcos.o
+lib-$(CONFIG_SMP) += spinlock.o

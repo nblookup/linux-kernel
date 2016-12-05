@@ -1,5 +1,5 @@
 /*
- * linux/include/linux/auth_gss.h
+ * linux/include/linux/sunrpc/auth_gss.h
  *
  * Declarations for RPCSEC_GSS
  *
@@ -7,19 +7,15 @@
  * Andy Adamson <andros@umich.edu>
  * Bruce Fields <bfields@umich.edu>
  * Copyright (c) 2000 The Regents of the University of Michigan
- *
- * $Id$
  */
 
 #ifndef _LINUX_SUNRPC_AUTH_GSS_H
 #define _LINUX_SUNRPC_AUTH_GSS_H
 
 #ifdef __KERNEL__
-#ifdef __linux__
 #include <linux/sunrpc/auth.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/gss_api.h>
-#endif
 
 #define RPC_GSS_VERSION		1
 
@@ -62,8 +58,6 @@ struct rpc_gss_init_res {
 	struct xdr_netobj	gr_token;	/* token */
 };
 
-#define GSS_SEQ_WIN	5
-
 /* The gss_cl_ctx struct holds all the information the rpcsec_gss client
  * code needs to know about a single security context.  In particular,
  * gc_gss_ctx is the context handle that is used to do gss-api calls, while
@@ -72,26 +66,25 @@ struct rpc_gss_init_res {
 
 struct gss_cl_ctx {
 	atomic_t		count;
-	u32			gc_proc;
+	enum rpc_gss_proc	gc_proc;
 	u32			gc_seq;
 	spinlock_t		gc_seq_lock;
-	struct gss_ctx		*gc_gss_ctx;
+	struct gss_ctx __rcu	*gc_gss_ctx;
 	struct xdr_netobj	gc_wire_ctx;
 	u32			gc_win;
+	unsigned long		gc_expiry;
+	struct rcu_head		gc_rcu;
 };
 
+struct gss_upcall_msg;
 struct gss_cred {
 	struct rpc_cred		gc_base;
-	u32			gc_flavor;
-	struct gss_cl_ctx	*gc_ctx;
+	enum rpc_gss_svc	gc_service;
+	struct gss_cl_ctx __rcu	*gc_ctx;
+	struct gss_upcall_msg	*gc_upcall;
+	unsigned long		gc_upcall_timestamp;
+	unsigned char		gc_machine_cred : 1;
 };
-
-#define gc_uid			gc_base.cr_uid
-#define gc_count		gc_base.cr_count
-#define gc_flags		gc_base.cr_flags
-#define gc_expire		gc_base.cr_expire
-
-void print_hexl(u32 *p, u_int length, u_int offset);
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SUNRPC_AUTH_GSS_H */

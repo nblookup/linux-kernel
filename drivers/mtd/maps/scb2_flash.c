@@ -1,6 +1,5 @@
 /*
  * MTD map driver for BIOS Flash on Intel SCB2 boards
- * $Id: scb2_flash.c,v 1.6 2003/05/21 12:45:20 dwmw2 Exp $
  * Copyright (C) 2002 Sun Microsystems, Inc.
  * Tim Hockin <thockin@sun.com>
  *
@@ -53,7 +52,6 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/cfi.h>
-#include <linux/config.h>
 #include <linux/pci.h>
 #include <linux/pci_ids.h>
 
@@ -62,12 +60,12 @@
 #define SCB2_WINDOW	0x00100000
 
 
-static void *scb2_ioaddr;
+static void __iomem *scb2_ioaddr;
 static struct mtd_info *scb2_mtd;
-struct map_info scb2_map = {
+static struct map_info scb2_map = {
 	.name =      "SCB2 BIOS Flash",
 	.size =      0,
-	.buswidth =  1,
+	.bankwidth =  1,
 };
 static int region_fail;
 
@@ -80,7 +78,7 @@ scb2_fixup_mtd(struct mtd_info *mtd)
 	struct cfi_private *cfi = map->fldrv_priv;
 
 	/* barf if this doesn't look right */
-	if (cfi->cfiq->InterfaceDesc != 1) {
+	if (cfi->cfiq->InterfaceDesc != CFI_INTERFACE_X16_ASYNC) {
 		printk(KERN_ERR MODNAME ": unsupported InterfaceDesc: %#x\n",
 		    cfi->cfiq->InterfaceDesc);
 		return -1;
@@ -120,7 +118,8 @@ scb2_fixup_mtd(struct mtd_info *mtd)
 		struct mtd_erase_region_info *region = &mtd->eraseregions[i];
 
 		if (region->numblocks * region->erasesize > mtd->size) {
-			region->numblocks = (mtd->size / region->erasesize);
+			region->numblocks = ((unsigned long)mtd->size /
+						region->erasesize);
 			done = 1;
 		} else {
 			region->numblocks = 0;
@@ -163,7 +162,7 @@ scb2_flash_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 	}
 
 	scb2_map.phys = SCB2_ADDR;
-	scb2_map.virt = (unsigned long)scb2_ioaddr;
+	scb2_map.virt = scb2_ioaddr;
 	scb2_map.size = SCB2_WINDOW;
 
 	simple_map_init(&scb2_map);
@@ -189,8 +188,9 @@ scb2_flash_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 		return -ENODEV;
 	}
 
-	printk(KERN_NOTICE MODNAME ": chip size 0x%x at offset 0x%x\n",
-	       scb2_mtd->size, SCB2_WINDOW - scb2_mtd->size);
+	printk(KERN_NOTICE MODNAME ": chip size 0x%llx at offset 0x%llx\n",
+	       (unsigned long long)scb2_mtd->size,
+	       (unsigned long long)(SCB2_WINDOW - scb2_mtd->size));
 
 	add_mtd_device(scb2_mtd);
 
@@ -238,7 +238,7 @@ static struct pci_driver scb2_flash_driver = {
 static int __init
 scb2_flash_init(void)
 {
-	return pci_module_init(&scb2_flash_driver);
+	return pci_register_driver(&scb2_flash_driver);
 }
 
 static void __exit

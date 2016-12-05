@@ -1,8 +1,6 @@
 /*
- * NV-RAM memory access on autcpu12 
+ * NV-RAM memory access on autcpu12
  * (C) 2002 Thomas Gleixner (gleixner@autronix.de)
- *
- * $Id: autcpu12-nvram.c,v 1.5 2003/05/21 12:45:18 dwmw2 Exp $ 
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,8 +25,8 @@
 #include <linux/init.h>
 #include <asm/io.h>
 #include <asm/sizes.h>
-#include <asm/hardware.h>
-#include <asm/arch/autcpu12.h>
+#include <mach/hardware.h>
+#include <mach/autcpu12.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
@@ -39,7 +37,7 @@ static struct mtd_info *sram_mtd;
 struct map_info autcpu12_sram_map = {
 	.name = "SRAM",
 	.size = 32768,
-	.buswidth = 4,
+	.bankwidth = 4,
 	.phys = 0x12000000,
 };
 
@@ -47,7 +45,7 @@ static int __init init_autcpu12_sram (void)
 {
 	int err, save0, save1;
 
-	autcpu12_sram_map.virt = (unsigned long)ioremap(0x12000000, SZ_128K);
+	autcpu12_sram_map.virt = ioremap(0x12000000, SZ_128K);
 	if (!autcpu12_sram_map.virt) {
 		printk("Failed to ioremap autcpu12 NV-RAM space\n");
 		err = -EIO;
@@ -55,10 +53,10 @@ static int __init init_autcpu12_sram (void)
 	}
 	simple_map_init(&autcpu_sram_map);
 
-	/* 
-	 * Check for 32K/128K 
-	 * read ofs 0 
-	 * read ofs 0x10000 
+	/*
+	 * Check for 32K/128K
+	 * read ofs 0
+	 * read ofs 0x10000
 	 * Write complement to ofs 0x100000
 	 * Read	and check result on ofs 0x0
 	 * Restore contents
@@ -66,7 +64,7 @@ static int __init init_autcpu12_sram (void)
 	save0 = map_read32(&autcpu12_sram_map,0);
 	save1 = map_read32(&autcpu12_sram_map,0x10000);
 	map_write32(&autcpu12_sram_map,~save0,0x10000);
-	/* if we find this pattern on 0x0, we have 32K size 
+	/* if we find this pattern on 0x0, we have 32K size
 	 * restore contents and exit
 	 */
 	if ( map_read32(&autcpu12_sram_map,0) != save0) {
@@ -76,7 +74,7 @@ static int __init init_autcpu12_sram (void)
 	/* We have a 128K found, restore 0x10000 and set size
 	 * to 128K
 	 */
-	ma[_write32(&autcpu12_sram_map,save1,0x10000);
+	map_write32(&autcpu12_sram_map,save1,0x10000);
 	autcpu12_sram_map.size = SZ_128K;
 
 map:
@@ -89,7 +87,7 @@ map:
 
 	sram_mtd->owner = THIS_MODULE;
 	sram_mtd->erasesize = 16;
-	
+
 	if (add_mtd_device(sram_mtd)) {
 		printk("NV-RAM device addition failed\n");
 		err = -ENOMEM;
@@ -97,7 +95,7 @@ map:
 	}
 
 	printk("NV-RAM device size %ldKiB registered on AUTCPU12\n",autcpu12_sram_map.size/SZ_1K);
-		
+
 	return 0;
 
 out_probe:

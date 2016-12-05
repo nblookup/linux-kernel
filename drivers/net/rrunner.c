@@ -28,7 +28,6 @@
 #define RX_DMA_SKBUFF 1
 #define PKT_COPY_THRESHOLD 512
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -41,6 +40,7 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 
 #include <asm/system.h>
@@ -62,7 +62,17 @@ MODULE_AUTHOR("Jes Sorensen <jes@wildopensource.com>");
 MODULE_DESCRIPTION("Essential RoadRunner HIPPI driver");
 MODULE_LICENSE("GPL");
 
-static char version[] __initdata = "rrunner.c: v0.50 11/11/2002  Jes Sorensen (jes@wildopensource.com)\n";
+static char version[] __devinitdata = "rrunner.c: v0.50 11/11/2002  Jes Sorensen (jes@wildopensource.com)\n";
+
+
+static const struct net_device_ops rr_netdev_ops = {
+	.ndo_open 		= rr_open,
+	.ndo_stop		= rr_close,
+	.ndo_do_ioctl		= rr_ioctl,
+	.ndo_start_xmit		= rr_start_xmit,
+	.ndo_change_mtu		= hippi_change_mtu,
+	.ndo_set_mac_address	= hippi_mac_addr,
+};
 
 /*
  * Implementation notes:
@@ -78,14 +88,6 @@ static char version[] __initdata = "rrunner.c: v0.50 11/11/2002  Jes Sorensen (j
  * chunks of memory is not feasible and the skb handling code and the
  * stack will need to know about I/O vectors or something similar.
  */
-
-/*
- * These are checked at init time to see if they are at least 256KB
- * and increased to 256KB if they are not. This is done to avoid ending
- * up with socket buffers smaller than the MTU size,
- */
-extern __u32 sysctl_wmem_max;
-extern __u32 sysctl_rmem_max;
 
 static int __devinit rr_init_one(struct pci_dev *pdev,
 	const struct pci_device_id *ent)
@@ -108,9 +110,8 @@ static int __devinit rr_init_one(struct pci_dev *pdev,
 		goto out2;
 	}
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 
-	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	if (pci_request_regions(pdev, "rrunner")) {
@@ -125,11 +126,7 @@ static int __devinit rr_init_one(struct pci_dev *pdev,
 	spin_lock_init(&rrpriv->lock);
 
 	dev->irq = pdev->irq;
-	dev->open = &rr_open;
-	dev->hard_start_xmit = &rr_start_xmit;
-	dev->stop = &rr_close;
-	dev->get_stats = &rr_get_stats;
-	dev->do_ioctl = &rr_ioctl;
+	dev->netdev_ops = &rr_netdev_ops;
 
 	dev->base_addr = pci_resource_start(pdev, 0);
 
@@ -157,7 +154,7 @@ static int __devinit rr_init_one(struct pci_dev *pdev,
 	 * Remap the regs into kernel space.
 	 */
 
-	rrpriv->regs = (struct rr_regs *)ioremap(dev->base_addr, 0x1000);
+	rrpriv->regs = ioremap(dev->base_addr, 0x1000);
 
 	if (!rrpriv->regs){
 		printk(KERN_ERR "%s:  Unable to map I/O register, "
@@ -197,7 +194,8 @@ static int __devinit rr_init_one(struct pci_dev *pdev,
 	 * Don't access any register before this point!
 	 */
 #ifdef __BIG_ENDIAN
-	writel(readl(&regs->HostCtrl) | NO_SWAP, &regs->HostCtrl);
+	writel(readl(&rrpriv->regs->HostCtrl) | NO_SWAP,
+		&rrpriv->regs->HostCtrl);
 #endif
 	/*
 	 * Need to add a case for little-endian 64-bit hosts here.
@@ -214,13 +212,13 @@ static int __devinit rr_init_one(struct pci_dev *pdev,
 
  out:
 	if (rrpriv->rx_ring)
-		pci_free_consistent(pdev, RX_TOTAL_SIZE, rrpriv->rx_ring, 
+		pci_free_consistent(pdev, RX_TOTAL_SIZE, rrpriv->rx_ring,
 				    rrpriv->rx_ring_dma);
 	if (rrpriv->tx_ring)
 		pci_free_consistent(pdev, TX_TOTAL_SIZE, rrpriv->tx_ring,
 				    rrpriv->tx_ring_dma);
 	if (rrpriv->regs)
-		iounmap(rrpriv->regs);	
+		iounmap(rrpriv->regs);
 	if (pdev) {
 		pci_release_regions(pdev);
 		pci_set_drvdata(pdev, NULL);
@@ -236,7 +234,7 @@ static void __devexit rr_remove_one (struct pci_dev *pdev)
 	struct net_device *dev = pci_get_drvdata(pdev);
 
 	if (dev) {
-		struct rr_private *rr = dev->priv;
+		struct rr_private *rr = netdev_priv(dev);
 
 		if (!(readl(&rr->regs->HostCtrl) & NIC_HALTED)){
 			printk(KERN_ERR "%s: trying to unload running NIC\n",
@@ -266,7 +264,7 @@ static void __devexit rr_remove_one (struct pci_dev *pdev)
  */
 static void rr_issue_cmd(struct rr_private *rrpriv, struct cmd *cmd)
 {
-	struct rr_regs *regs;
+	struct rr_regs __iomem *regs;
 	u32 idx;
 
 	regs = rrpriv->regs;
@@ -303,12 +301,11 @@ static void rr_issue_cmd(struct rr_private *rrpriv, struct cmd *cmd)
 static int rr_reset(struct net_device *dev)
 {
 	struct rr_private *rrpriv;
-	struct rr_regs *regs;
-	struct eeprom *hw = NULL;
+	struct rr_regs __iomem *regs;
 	u32 start_pc;
 	int i;
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
 
 	rr_load_firmware(dev);
@@ -391,7 +388,8 @@ static int rr_reset(struct net_device *dev)
 	writel(RBURST_64|WBURST_64, &regs->PciState);
 	wmb();
 
-	start_pc = rr_read_eeprom_word(rrpriv, &hw->rncd_info.FwStart);
+	start_pc = rr_read_eeprom_word(rrpriv,
+			offsetof(struct eeprom, rncd_info.FwStart));
 
 #if (DEBUG > 1)
 	printk("%s: Executing firmware at address 0x%06x\n",
@@ -417,7 +415,7 @@ static unsigned int rr_read_eeprom(struct rr_private *rrpriv,
 				unsigned char *buf,
 				unsigned long length)
 {
-	struct rr_regs *regs = rrpriv->regs;
+	struct rr_regs __iomem *regs = rrpriv->regs;
 	u32 misc, io, host, i;
 
 	io = readl(&regs->ExtIo);
@@ -448,12 +446,12 @@ static unsigned int rr_read_eeprom(struct rr_private *rrpriv,
  * it to our CPU byte-order.
  */
 static u32 rr_read_eeprom_word(struct rr_private *rrpriv,
-			    void * offset)
+			    size_t offset)
 {
-	u32 word;
+	__be32 word;
 
-	if ((rr_read_eeprom(rrpriv, (unsigned long)offset,
-			    (char *)&word, 4) == 4))
+	if ((rr_read_eeprom(rrpriv, offset,
+			    (unsigned char *)&word, 4) == 4))
 		return be32_to_cpu(word);
 	return 0;
 }
@@ -469,7 +467,7 @@ static unsigned int write_eeprom(struct rr_private *rrpriv,
 				 unsigned char *buf,
 				 unsigned long length)
 {
-	struct rr_regs *regs = rrpriv->regs;
+	struct rr_regs __iomem *regs = rrpriv->regs;
 	u32 misc, io, data, i, j, ready, error = 0;
 
 	io = readl(&regs->ExtIo);
@@ -516,15 +514,13 @@ static unsigned int write_eeprom(struct rr_private *rrpriv,
 }
 
 
-static int __init rr_init(struct net_device *dev)
+static int __devinit rr_init(struct net_device *dev)
 {
 	struct rr_private *rrpriv;
-	struct rr_regs *regs;
-	struct eeprom *hw = NULL;
+	struct rr_regs __iomem *regs;
 	u32 sram_size, rev;
-	int i;
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
 
 	rev = readl(&regs->FwRev);
@@ -555,31 +551,15 @@ static int __init rr_init(struct net_device *dev)
 	 * other method I've seen.  -VAL
 	 */
 
-	*(u16 *)(dev->dev_addr) =
-	  htons(rr_read_eeprom_word(rrpriv, &hw->manf.BoardULA));
-	*(u32 *)(dev->dev_addr+2) =
-	  htonl(rr_read_eeprom_word(rrpriv, &hw->manf.BoardULA[4]));
-	
-	printk("  MAC: ");
+	*(__be16 *)(dev->dev_addr) =
+	  htons(rr_read_eeprom_word(rrpriv, offsetof(struct eeprom, manf.BoardULA)));
+	*(__be32 *)(dev->dev_addr+2) =
+	  htonl(rr_read_eeprom_word(rrpriv, offsetof(struct eeprom, manf.BoardULA[4])));
 
-	for (i = 0; i < 5; i++)
-		printk("%2.2x:", dev->dev_addr[i]);
-	printk("%2.2x\n", dev->dev_addr[i]);
+	printk("  MAC: %pM\n", dev->dev_addr);
 
-	sram_size = rr_read_eeprom_word(rrpriv, (void *)8);
+	sram_size = rr_read_eeprom_word(rrpriv, 8);
 	printk("  SRAM size 0x%06x\n", sram_size);
-
-	if (sysctl_rmem_max < 262144){
-		printk("  Receive socket buffer limit too low (%i), "
-		       "setting to 262144\n", sysctl_rmem_max);
-		sysctl_rmem_max = 262144;
-	}
-
-	if (sysctl_wmem_max < 262144){
-		printk("  Transmit socket buffer limit too low (%i), "
-		       "setting to 262144\n", sysctl_wmem_max);
-		sysctl_wmem_max = 262144;
-	}
 
 	return 0;
 }
@@ -588,14 +568,14 @@ static int __init rr_init(struct net_device *dev)
 static int rr_init1(struct net_device *dev)
 {
 	struct rr_private *rrpriv;
-	struct rr_regs *regs;
+	struct rr_regs __iomem *regs;
 	unsigned long myjif, flags;
 	struct cmd cmd;
 	u32 hostctrl;
 	int ecode = 0;
 	short i;
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
 
 	spin_lock_irqsave(&rrpriv->lock, flags);
@@ -633,7 +613,7 @@ static int rr_init1(struct net_device *dev)
 	for (i = 0; i < TX_RING_ENTRIES; i++) {
 		rrpriv->tx_ring[i].size = 0;
 		set_rraddr(&rrpriv->tx_ring[i].addr, 0);
-		rrpriv->tx_skbuff[i] = 0;
+		rrpriv->tx_skbuff[i] = NULL;
 	}
 	rrpriv->info->tx_ctrl.entry_size = sizeof(struct tx_desc);
 	rrpriv->info->tx_ctrl.entries = TX_RING_ENTRIES;
@@ -736,14 +716,14 @@ static int rr_init1(struct net_device *dev)
 		struct sk_buff *skb = rrpriv->rx_skbuff[i];
 
 		if (skb) {
-	        	pci_unmap_single(rrpriv->pci_dev, 
-					 rrpriv->rx_ring[i].addr.addrlo, 
+	        	pci_unmap_single(rrpriv->pci_dev,
+					 rrpriv->rx_ring[i].addr.addrlo,
 					 dev->mtu + HIPPI_HLEN,
 					 PCI_DMA_FROMDEVICE);
 			rrpriv->rx_ring[i].size = 0;
 			set_rraddr(&rrpriv->rx_ring[i].addr, 0);
 			dev_kfree_skb(skb);
-			rrpriv->rx_skbuff[i] = 0;
+			rrpriv->rx_skbuff[i] = NULL;
 		}
 	}
 	return ecode;
@@ -758,10 +738,10 @@ static int rr_init1(struct net_device *dev)
 static u32 rr_handle_event(struct net_device *dev, u32 prodidx, u32 eidx)
 {
 	struct rr_private *rrpriv;
-	struct rr_regs *regs;
+	struct rr_regs __iomem *regs;
 	u32 tmp;
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
 
 	while (prodidx != eidx){
@@ -792,14 +772,14 @@ static u32 rr_handle_event(struct net_device *dev, u32 prodidx, u32 eidx)
 		case E_INTERN_ERR:
 			printk(KERN_ERR "%s: HIPPI Internal NIC error\n",
 			       dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
 		case E_HOST_ERR:
 			printk(KERN_ERR "%s: Host software error\n",
 			       dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
@@ -809,7 +789,7 @@ static u32 rr_handle_event(struct net_device *dev, u32 prodidx, u32 eidx)
 		case E_CON_REJ:
 			printk(KERN_WARNING "%s: Connection rejected\n",
 			       dev->name);
-			rrpriv->stats.tx_aborted_errors++;
+			dev->stats.tx_aborted_errors++;
 			break;
 		case E_CON_TMOUT:
 			printk(KERN_WARNING "%s: Connection timeout\n",
@@ -818,12 +798,12 @@ static u32 rr_handle_event(struct net_device *dev, u32 prodidx, u32 eidx)
 		case E_DISC_ERR:
 			printk(KERN_WARNING "%s: HIPPI disconnect error\n",
 			       dev->name);
-			rrpriv->stats.tx_aborted_errors++;
+			dev->stats.tx_aborted_errors++;
 			break;
 		case E_INT_PRTY:
 			printk(KERN_ERR "%s: HIPPI Internal Parity error\n",
 			       dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
@@ -834,29 +814,29 @@ static u32 rr_handle_event(struct net_device *dev, u32 prodidx, u32 eidx)
 		case E_TX_LINK_DROP:
 			printk(KERN_WARNING "%s: Link lost during transmit\n",
 			       dev->name);
-			rrpriv->stats.tx_aborted_errors++;
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			dev->stats.tx_aborted_errors++;
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
 		case E_TX_INV_RNG:
 			printk(KERN_ERR "%s: Invalid send ring block\n",
 			       dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
 		case E_TX_INV_BUF:
 			printk(KERN_ERR "%s: Invalid send buffer address\n",
 			       dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
 		case E_TX_INV_DSC:
 			printk(KERN_ERR "%s: Invalid descriptor address\n",
 			       dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
@@ -904,27 +884,27 @@ static u32 rr_handle_event(struct net_device *dev, u32 prodidx, u32 eidx)
 			       dev->name);
 			goto drop;
 		case E_FLG_SYN_ERR:
-			printk(KERN_WARNING "%s: Flag sync. lost during"
+			printk(KERN_WARNING "%s: Flag sync. lost during "
 			       "packet\n", dev->name);
 			goto drop;
 		case E_RX_INV_BUF:
 			printk(KERN_ERR "%s: Invalid receive buffer "
 			       "address\n", dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
 		case E_RX_INV_DSC:
 			printk(KERN_ERR "%s: Invalid receive descriptor "
 			       "address\n", dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
 		case E_RNG_BLK:
 			printk(KERN_ERR "%s: Invalid ring block\n",
 			       dev->name);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			wmb();
 			break;
@@ -960,8 +940,8 @@ static u32 rr_handle_event(struct net_device *dev, u32 prodidx, u32 eidx)
 
 static void rx_int(struct net_device *dev, u32 rxlimit, u32 index)
 {
-	struct rr_private *rrpriv = (struct rr_private *)dev->priv;
-	struct rr_regs *regs = rrpriv->regs;
+	struct rr_private *rrpriv = netdev_priv(dev);
+	struct rr_regs __iomem *regs = rrpriv->regs;
 
 	do {
 		struct rx_desc *desc;
@@ -974,7 +954,7 @@ static void rx_int(struct net_device *dev, u32 rxlimit, u32 index)
 		printk("len %x, mode %x\n", pkt_len, desc->mode);
 #endif
 		if ( (rrpriv->rx_ring[index].mode & PACKET_BAD) == PACKET_BAD){
-			rrpriv->stats.rx_dropped++;
+			dev->stats.rx_dropped++;
 			goto defer;
 		}
 
@@ -983,18 +963,26 @@ static void rx_int(struct net_device *dev, u32 rxlimit, u32 index)
 
 			rx_skb = rrpriv->rx_skbuff[index];
 
-	        	pci_dma_sync_single(rrpriv->pci_dev, desc->addr.addrlo,
-				pkt_len, PCI_DMA_FROMDEVICE);
-
 			if (pkt_len < PKT_COPY_THRESHOLD) {
 				skb = alloc_skb(pkt_len, GFP_ATOMIC);
 				if (skb == NULL){
 					printk(KERN_WARNING "%s: Unable to allocate skb (%i bytes), deferring packet\n", dev->name, pkt_len);
-					rrpriv->stats.rx_dropped++;
+					dev->stats.rx_dropped++;
 					goto defer;
-				}else
+				} else {
+					pci_dma_sync_single_for_cpu(rrpriv->pci_dev,
+								    desc->addr.addrlo,
+								    pkt_len,
+								    PCI_DMA_FROMDEVICE);
+
 					memcpy(skb_put(skb, pkt_len),
 					       rx_skb->data, pkt_len);
+
+					pci_dma_sync_single_for_device(rrpriv->pci_dev,
+								       desc->addr.addrlo,
+								       pkt_len,
+								       PCI_DMA_FROMDEVICE);
+				}
 			}else{
 				struct sk_buff *newskb;
 
@@ -1003,32 +991,30 @@ static void rx_int(struct net_device *dev, u32 rxlimit, u32 index)
 				if (newskb){
 					dma_addr_t addr;
 
-	        			pci_unmap_single(rrpriv->pci_dev, 
-						desc->addr.addrlo, dev->mtu + 
+	        			pci_unmap_single(rrpriv->pci_dev,
+						desc->addr.addrlo, dev->mtu +
 						HIPPI_HLEN, PCI_DMA_FROMDEVICE);
 					skb = rx_skb;
 					skb_put(skb, pkt_len);
 					rrpriv->rx_skbuff[index] = newskb;
-	        			addr = pci_map_single(rrpriv->pci_dev, 
-						newskb->data, 
-						dev->mtu + HIPPI_HLEN, 
+	        			addr = pci_map_single(rrpriv->pci_dev,
+						newskb->data,
+						dev->mtu + HIPPI_HLEN,
 						PCI_DMA_FROMDEVICE);
 					set_rraddr(&desc->addr, addr);
 				} else {
 					printk("%s: Out of memory, deferring "
 					       "packet\n", dev->name);
-					rrpriv->stats.rx_dropped++;
+					dev->stats.rx_dropped++;
 					goto defer;
 				}
 			}
-			skb->dev = dev;
 			skb->protocol = hippi_type_trans(skb, dev);
 
 			netif_rx(skb);		/* send it up */
 
-			dev->last_rx = jiffies;
-			rrpriv->stats.rx_packets++;
-			rrpriv->stats.rx_bytes += pkt_len;
+			dev->stats.rx_packets++;
+			dev->stats.rx_bytes += pkt_len;
 		}
 	defer:
 		desc->mode = 0;
@@ -1045,14 +1031,14 @@ static void rx_int(struct net_device *dev, u32 rxlimit, u32 index)
 }
 
 
-static irqreturn_t rr_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
+static irqreturn_t rr_interrupt(int irq, void *dev_id)
 {
 	struct rr_private *rrpriv;
-	struct rr_regs *regs;
+	struct rr_regs __iomem *regs;
 	struct net_device *dev = (struct net_device *)dev_id;
 	u32 prodidx, rxindex, eidx, txcsmr, rxlimit, txcon;
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
 
 	if (!(readl(&regs->HostCtrl) & RR_INT))
@@ -1096,8 +1082,8 @@ static irqreturn_t rr_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 				desc = &(rrpriv->tx_ring[txcon]);
 				skb = rrpriv->tx_skbuff[txcon];
 
-				rrpriv->stats.tx_packets++;
-				rrpriv->stats.tx_bytes += skb->len;
+				dev->stats.tx_packets++;
+				dev->stats.tx_bytes += skb->len;
 
 				pci_unmap_single(rrpriv->pci_dev,
 						 desc->addr.addrlo, skb->len,
@@ -1130,11 +1116,54 @@ static irqreturn_t rr_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 	return IRQ_HANDLED;
 }
 
+static inline void rr_raz_tx(struct rr_private *rrpriv,
+			     struct net_device *dev)
+{
+	int i;
+
+	for (i = 0; i < TX_RING_ENTRIES; i++) {
+		struct sk_buff *skb = rrpriv->tx_skbuff[i];
+
+		if (skb) {
+			struct tx_desc *desc = &(rrpriv->tx_ring[i]);
+
+	        	pci_unmap_single(rrpriv->pci_dev, desc->addr.addrlo,
+				skb->len, PCI_DMA_TODEVICE);
+			desc->size = 0;
+			set_rraddr(&desc->addr, 0);
+			dev_kfree_skb(skb);
+			rrpriv->tx_skbuff[i] = NULL;
+		}
+	}
+}
+
+
+static inline void rr_raz_rx(struct rr_private *rrpriv,
+			     struct net_device *dev)
+{
+	int i;
+
+	for (i = 0; i < RX_RING_ENTRIES; i++) {
+		struct sk_buff *skb = rrpriv->rx_skbuff[i];
+
+		if (skb) {
+			struct rx_desc *desc = &(rrpriv->rx_ring[i]);
+
+	        	pci_unmap_single(rrpriv->pci_dev, desc->addr.addrlo,
+				dev->mtu + HIPPI_HLEN, PCI_DMA_FROMDEVICE);
+			desc->size = 0;
+			set_rraddr(&desc->addr, 0);
+			dev_kfree_skb(skb);
+			rrpriv->rx_skbuff[i] = NULL;
+		}
+	}
+}
+
 static void rr_timer(unsigned long data)
 {
 	struct net_device *dev = (struct net_device *)data;
-	struct rr_private *rrpriv = (struct rr_private *)dev->priv;
-	struct rr_regs *regs = rrpriv->regs;
+	struct rr_private *rrpriv = netdev_priv(dev);
+	struct rr_regs __iomem *regs = rrpriv->regs;
 	unsigned long flags;
 
 	if (readl(&regs->HostCtrl) & NIC_HALTED){
@@ -1148,7 +1177,7 @@ static void rr_timer(unsigned long data)
 
 		if (rr_init1(dev)) {
 			spin_lock_irqsave(&rrpriv->lock, flags);
-			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT, 
+			writel(readl(&regs->HostCtrl)|HALT_NIC|RR_CLEAR_INT,
 			       &regs->HostCtrl);
 			spin_unlock_irqrestore(&rrpriv->lock, flags);
 		}
@@ -1160,9 +1189,9 @@ static void rr_timer(unsigned long data)
 
 static int rr_open(struct net_device *dev)
 {
-	struct rr_private *rrpriv = (struct rr_private *)dev->priv;
+	struct rr_private *rrpriv = netdev_priv(dev);
 	struct pci_dev *pdev = rrpriv->pci_dev;
-	struct rr_regs *regs;
+	struct rr_regs __iomem *regs;
 	int ecode = 0;
 	unsigned long flags;
 	dma_addr_t dma_addr;
@@ -1201,7 +1230,7 @@ static int rr_open(struct net_device *dev)
 	readl(&regs->HostCtrl);
 	spin_unlock_irqrestore(&rrpriv->lock, flags);
 
-	if (request_irq(dev->irq, rr_interrupt, SA_SHIRQ, dev->name, dev)) {
+	if (request_irq(dev->irq, rr_interrupt, IRQF_SHARED, dev->name, dev)) {
 		printk(KERN_WARNING "%s: Requested IRQ %d is busy\n",
 		       dev->name, dev->irq);
 		ecode = -EAGAIN;
@@ -1216,7 +1245,7 @@ static int rr_open(struct net_device *dev)
 	init_timer(&rrpriv->timer);
 	rrpriv->timer.expires = RUN_AT(5*HZ);           /* 5 sec. watchdog */
 	rrpriv->timer.data = (unsigned long)dev;
-	rrpriv->timer.function = &rr_timer;               /* timer handler */
+	rrpriv->timer.function = rr_timer;               /* timer handler */
 	add_timer(&rrpriv->timer);
 
 	netif_start_queue(dev);
@@ -1240,63 +1269,20 @@ static int rr_open(struct net_device *dev)
 	}
 
 	netif_stop_queue(dev);
-	
+
 	return ecode;
 }
 
 
-static inline void rr_raz_tx(struct rr_private *rrpriv, 
-			     struct net_device *dev)
-{
-	int i;
-
-	for (i = 0; i < TX_RING_ENTRIES; i++) {
-		struct sk_buff *skb = rrpriv->tx_skbuff[i];
-
-		if (skb) {
-			struct tx_desc *desc = &(rrpriv->tx_ring[i]);
-
-	        	pci_unmap_single(rrpriv->pci_dev, desc->addr.addrlo, 
-				skb->len, PCI_DMA_TODEVICE);
-			desc->size = 0;
-			set_rraddr(&desc->addr, 0);
-			dev_kfree_skb(skb);
-			rrpriv->tx_skbuff[i] = NULL;
-		}
-	}
-}
-
-
-static inline void rr_raz_rx(struct rr_private *rrpriv, 
-			     struct net_device *dev)
-{
-	int i;
-
-	for (i = 0; i < RX_RING_ENTRIES; i++) {
-		struct sk_buff *skb = rrpriv->rx_skbuff[i];
-
-		if (skb) {
-			struct rx_desc *desc = &(rrpriv->rx_ring[i]);
-
-	        	pci_unmap_single(rrpriv->pci_dev, desc->addr.addrlo, 
-				dev->mtu + HIPPI_HLEN, PCI_DMA_FROMDEVICE);
-			desc->size = 0;
-			set_rraddr(&desc->addr, 0);
-			dev_kfree_skb(skb);
-			rrpriv->rx_skbuff[i] = NULL;
-		}
-	}
-}
-
 static void rr_dump(struct net_device *dev)
 {
 	struct rr_private *rrpriv;
-	struct rr_regs *regs;
+	struct rr_regs __iomem *regs;
 	u32 index, cons;
 	short i;
 	int len;
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
 
 	printk("%s: dumping NIC TX rings\n", dev->name);
@@ -1308,7 +1294,7 @@ static void rr_dump(struct net_device *dev)
 
 	printk("Error code 0x%x\n", readl(&regs->Fail1));
 
-	index = (((readl(&regs->EvtPrd) >> 8) & 0xff ) - 1) % EVT_RING_ENTRIES;
+	index = (((readl(&regs->EvtPrd) >> 8) & 0xff) - 1) % TX_RING_ENTRIES;
 	cons = rrpriv->dirty_tx;
 	printk("TX ring index %i, TX consumer %i\n",
 	       index, cons);
@@ -1327,10 +1313,10 @@ static void rr_dump(struct net_device *dev)
 	if (rrpriv->tx_skbuff[cons]){
 		len = min_t(int, 0x80, rrpriv->tx_skbuff[cons]->len);
 		printk("skbuff for cons %i is valid - dumping data (0x%x bytes - skbuff len 0x%x)\n", cons, len, rrpriv->tx_skbuff[cons]->len);
-		printk("mode 0x%x, size 0x%x,\n phys %08x, skbuff-addr %08lx, truesize 0x%x\n",
+		printk("mode 0x%x, size 0x%x,\n phys %08Lx, skbuff-addr %08lx, truesize 0x%x\n",
 		       rrpriv->tx_ring[cons].mode,
 		       rrpriv->tx_ring[cons].size,
-		       rrpriv->tx_ring[cons].addr.addrlo,
+		       (unsigned long long) rrpriv->tx_ring[cons].addr.addrlo,
 		       (unsigned long)rrpriv->tx_skbuff[cons]->data,
 		       (unsigned int)rrpriv->tx_skbuff[cons]->truesize);
 		for (i = 0; i < len; i++){
@@ -1343,10 +1329,10 @@ static void rr_dump(struct net_device *dev)
 
 	printk("dumping TX ring info:\n");
 	for (i = 0; i < TX_RING_ENTRIES; i++)
-		printk("mode 0x%x, size 0x%x, phys-addr %08x\n",
+		printk("mode 0x%x, size 0x%x, phys-addr %08Lx\n",
 		       rrpriv->tx_ring[i].mode,
 		       rrpriv->tx_ring[i].size,
-		       rrpriv->tx_ring[i].addr.addrlo);
+		       (unsigned long long) rrpriv->tx_ring[i].addr.addrlo);
 
 }
 
@@ -1354,14 +1340,14 @@ static void rr_dump(struct net_device *dev)
 static int rr_close(struct net_device *dev)
 {
 	struct rr_private *rrpriv;
-	struct rr_regs *regs;
+	struct rr_regs __iomem *regs;
 	unsigned long flags;
 	u32 tmp;
 	short i;
 
 	netif_stop_queue(dev);
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
 
 	/*
@@ -1416,10 +1402,12 @@ static int rr_close(struct net_device *dev)
 }
 
 
-static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t rr_start_xmit(struct sk_buff *skb,
+				 struct net_device *dev)
 {
-	struct rr_private *rrpriv = (struct rr_private *)dev->priv;
-	struct rr_regs *regs = rrpriv->regs;
+	struct rr_private *rrpriv = netdev_priv(dev);
+	struct rr_regs __iomem *regs = rrpriv->regs;
+	struct hippi_cb *hcb = (struct hippi_cb *) skb->cb;
 	struct ring_ctrl *txctrl;
 	unsigned long flags;
 	u32 index, len = skb->len;
@@ -1439,11 +1427,11 @@ static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		if (!(new_skb = dev_alloc_skb(len + 8))) {
 			dev_kfree_skb(skb);
 			netif_wake_queue(dev);
-			return -EBUSY;
+			return NETDEV_TX_OK;
 		}
 		skb_reserve(new_skb, 8);
 		skb_put(new_skb, len);
-		memcpy(new_skb->data, skb->data, len);
+		skb_copy_from_linear_data(skb, new_skb->data, len);
 		dev_kfree_skb(skb);
 		skb = new_skb;
 	}
@@ -1451,7 +1439,7 @@ static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	ifield = (u32 *)skb_push(skb, 8);
 
 	ifield[0] = 0;
-	ifield[1] = skb->private.ifield;
+	ifield[1] = hcb->ifield;
 
 	/*
 	 * We don't need the lock before we are actually going to start
@@ -1479,18 +1467,7 @@ static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	spin_unlock_irqrestore(&rrpriv->lock, flags);
 
-	dev->trans_start = jiffies;
-	return 0;
-}
-
-
-static struct net_device_stats *rr_get_stats(struct net_device *dev)
-{
-	struct rr_private *rrpriv;
-
-	rrpriv = (struct rr_private *)dev->priv;
-
-	return(&rrpriv->stats);
+	return NETDEV_TX_OK;
 }
 
 
@@ -1504,21 +1481,20 @@ static struct net_device_stats *rr_get_stats(struct net_device *dev)
 static int rr_load_firmware(struct net_device *dev)
 {
 	struct rr_private *rrpriv;
-	struct rr_regs *regs;
-	unsigned long eptr, segptr;
+	struct rr_regs __iomem *regs;
+	size_t eptr, segptr;
 	int i, j;
 	u32 localctrl, sptr, len, tmp;
 	u32 p2len, p2size, nr_seg, revision, io, sram_size;
-	struct eeprom *hw = NULL;
 
-	rrpriv = (struct rr_private *)dev->priv;
+	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
 
 	if (dev->flags & IFF_UP)
 		return -EBUSY;
 
 	if (!(readl(&regs->HostCtrl) & NIC_HALTED)){
-		printk("%s: Trying to load firmware to a running NIC.\n", 
+		printk("%s: Trying to load firmware to a running NIC.\n",
 		       dev->name);
 		return -EBUSY;
 	}
@@ -1537,7 +1513,7 @@ static int rr_load_firmware(struct net_device *dev)
 	 */
 	io = readl(&regs->ExtIo);
 	writel(0, &regs->ExtIo);
-	sram_size = rr_read_eeprom_word(rrpriv, (void *)8);
+	sram_size = rr_read_eeprom_word(rrpriv, 8);
 
 	for (i = 200; i < sram_size / 4; i++){
 		writel(i * 4, &regs->WinBase);
@@ -1548,13 +1524,13 @@ static int rr_load_firmware(struct net_device *dev)
 	writel(io, &regs->ExtIo);
 	mb();
 
-	eptr = (unsigned long)rr_read_eeprom_word(rrpriv,
-					       &hw->rncd_info.AddrRunCodeSegs);
+	eptr = rr_read_eeprom_word(rrpriv,
+		       offsetof(struct eeprom, rncd_info.AddrRunCodeSegs));
 	eptr = ((eptr & 0x1fffff) >> 3);
 
-	p2len = rr_read_eeprom_word(rrpriv, (void *)(0x83*4));
+	p2len = rr_read_eeprom_word(rrpriv, 0x83*4);
 	p2len = (p2len << 2);
-	p2size = rr_read_eeprom_word(rrpriv, (void *)(0x84*4));
+	p2size = rr_read_eeprom_word(rrpriv, 0x84*4);
 	p2size = ((p2size & 0x1fffff) >> 3);
 
 	if ((eptr < p2size) || (eptr > (p2size + p2len))){
@@ -1562,7 +1538,8 @@ static int rr_load_firmware(struct net_device *dev)
 		goto out;
 	}
 
-	revision = rr_read_eeprom_word(rrpriv, &hw->manf.HeaderFmt);
+	revision = rr_read_eeprom_word(rrpriv,
+			offsetof(struct eeprom, manf.HeaderFmt));
 
 	if (revision != 1){
 		printk("%s: invalid firmware format (%i)\n",
@@ -1570,18 +1547,18 @@ static int rr_load_firmware(struct net_device *dev)
 		goto out;
 	}
 
-	nr_seg = rr_read_eeprom_word(rrpriv, (void *)eptr);
+	nr_seg = rr_read_eeprom_word(rrpriv, eptr);
 	eptr +=4;
 #if (DEBUG > 1)
 	printk("%s: nr_seg %i\n", dev->name, nr_seg);
 #endif
 
 	for (i = 0; i < nr_seg; i++){
-		sptr = rr_read_eeprom_word(rrpriv, (void *)eptr);
+		sptr = rr_read_eeprom_word(rrpriv, eptr);
 		eptr += 4;
-		len = rr_read_eeprom_word(rrpriv, (void *)eptr);
+		len = rr_read_eeprom_word(rrpriv, eptr);
 		eptr += 4;
-		segptr = (unsigned long)rr_read_eeprom_word(rrpriv, (void *)eptr);
+		segptr = rr_read_eeprom_word(rrpriv, eptr);
 		segptr = ((segptr & 0x1fffff) >> 3);
 		eptr += 4;
 #if (DEBUG > 1)
@@ -1589,7 +1566,7 @@ static int rr_load_firmware(struct net_device *dev)
 		       dev->name, i, sptr, len, segptr);
 #endif
 		for (j = 0; j < len; j++){
-			tmp = rr_read_eeprom_word(rrpriv, (void *)segptr);
+			tmp = rr_read_eeprom_word(rrpriv, segptr);
 			writel(sptr, &regs->WinBase);
 			mb();
 			writel(tmp, &regs->WinData);
@@ -1614,7 +1591,7 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	unsigned int i;
 	int error = -EOPNOTSUPP;
 
-	rrpriv = dev->priv;
+	rrpriv = netdev_priv(dev);
 
 	switch(cmd){
 	case SIOCRRGFW:
@@ -1651,7 +1628,7 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	gf_out:
 		kfree(image);
 		return error;
-		
+
 	case SIOCRRPFW:
 		if (!capable(CAP_SYS_RAWIO)){
 			return -EPERM;
@@ -1700,20 +1677,18 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			error = -EFAULT;
 		}
 	wf_out:
-		if (oldimage)
-			kfree(oldimage);
-		if (image)
-			kfree(image);
+		kfree(oldimage);
+		kfree(image);
 		return error;
-		
+
 	case SIOCRRID:
-		return put_user(0x52523032, (int *)(&rq->ifr_data[0]));
+		return put_user(0x52523032, (int __user *)rq->ifr_data);
 	default:
 		return error;
 	}
 }
 
-static struct pci_device_id rr_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(rr_pci_tbl) = {
 	{ PCI_VENDOR_ID_ESSENTIAL, PCI_DEVICE_ID_ESSENTIAL_ROADRUNNER,
 		PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0,}
@@ -1729,7 +1704,7 @@ static struct pci_driver rr_driver = {
 
 static int __init rr_init_module(void)
 {
-	return pci_module_init(&rr_driver);
+	return pci_register_driver(&rr_driver);
 }
 
 static void __exit rr_cleanup_module(void)
@@ -1739,9 +1714,3 @@ static void __exit rr_cleanup_module(void)
 
 module_init(rr_init_module);
 module_exit(rr_cleanup_module);
-
-/*
- * Local variables:
- * compile-command: "gcc -D__KERNEL__ -I../../include -Wall -Wstrict-prototypes -O2 -pipe -fomit-frame-pointer -fno-strength-reduce -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DMODULE -DMODVERSIONS -include ../../include/linux/modversions.h -c rrunner.c"
- * End:
- */

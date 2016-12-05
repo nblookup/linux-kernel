@@ -22,7 +22,6 @@
 #ifndef _LINUX_SLIP_H
 #define _LINUX_SLIP_H
 
-#include <linux/config.h>
 
 #if defined(CONFIG_INET) && defined(CONFIG_SLIP_COMPRESSED)
 # define SL_INCLUDE_CSLIP
@@ -68,15 +67,6 @@ struct slip {
   int                   xleft;          /* bytes left in XMIT queue     */
 
   /* SLIP interface statistics. */
-  unsigned long		rx_packets;	/* inbound frames counter	*/
-  unsigned long         tx_packets;     /* outbound frames counter      */
-  unsigned long		rx_bytes;	/* inbound byte counte		*/
-  unsigned long         tx_bytes;       /* outbound byte counter	*/
-  unsigned long         rx_errors;      /* Parity, etc. errors          */
-  unsigned long         tx_errors;      /* Planned stuff                */
-  unsigned long         rx_dropped;     /* No memory for skb            */
-  unsigned long         tx_dropped;     /* When MTU change              */
-  unsigned long         rx_over_errors; /* Frame bigger then SLIP buf.  */
 #ifdef SL_INCLUDE_CSLIP
   unsigned long		tx_compressed;
   unsigned long		rx_compressed;
@@ -108,12 +98,12 @@ struct slip {
 #define SL_MODE_CSLIP6	(SL_MODE_SLIP6|SL_MODE_CSLIP)
 #define SL_MODE_AX25	4
 #define SL_MODE_ADAPTIVE 8
-#ifdef CONFIG_SLIP_SMART  
+#ifdef CONFIG_SLIP_SMART
   unsigned char		outfill;	/* # of sec between outfill packet */
   unsigned char		keepalive;	/* keepalive seconds		*/
   struct timer_list	outfill_timer;
   struct timer_list	keepalive_timer;
-#endif  
+#endif
 };
 
 #define SLIP_MAGIC 0x5302

@@ -36,15 +36,8 @@
  * as an rpc_task, not a real kernel thread, so it always runs in rpciod's
  * context.  There is one renewd per nfs_server.
  *
- * TODO: If the send queue gets backlogged (e.g., if the server goes down),
- * we will keep filling the queue with periodic RENEW requests.  We need a
- * mechanism for ensuring that if renewd successfully sends off a request,
- * then it only wakes up when the request is finished.  Maybe use the
- * child task framework of the RPC layer?
  */
 
-#include <linux/sched.h>
-#include <linux/smp_lock.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/sunrpc/sched.h>
@@ -53,54 +46,81 @@
 #include <linux/nfs.h>
 #include <linux/nfs4.h>
 #include <linux/nfs_fs.h>
+#include "nfs4_fs.h"
+#include "delegation.h"
 
-static RPC_WAITQ(nfs4_renewd_queue, "nfs4_renewd_queue");
+#define NFSDBG_FACILITY	NFSDBG_PROC
 
-static void
-renewd(struct rpc_task *task)
+void
+nfs4_renew_state(struct work_struct *work)
 {
-	struct nfs_server *server = (struct nfs_server *)task->tk_calldata;
-	unsigned long lease = server->lease_time;
-	unsigned long last = server->last_renewal;
-	unsigned long timeout;
+	const struct nfs4_state_maintenance_ops *ops;
+	struct nfs_client *clp =
+		container_of(work, struct nfs_client, cl_renewd.work);
+	struct rpc_cred *cred;
+	long lease;
+	unsigned long last, now;
 
-	if (!server->nfs4_state)
-		timeout = (2 * lease) / 3;
-	else if (jiffies < last + lease/3)
-		timeout = (2 * lease) / 3 + last - jiffies;
-	else {
-		/* Queue an asynchronous RENEW. */
-		nfs4_proc_renew(server);
-		timeout = (2 * lease) / 3;
+	ops = clp->cl_mvops->state_renewal_ops;
+	dprintk("%s: start\n", __func__);
+
+	if (test_bit(NFS_CS_STOP_RENEW, &clp->cl_res_state))
+		goto out;
+
+	spin_lock(&clp->cl_lock);
+	lease = clp->cl_lease_time;
+	last = clp->cl_last_renewal;
+	now = jiffies;
+	/* Are we close to a lease timeout? */
+	if (time_after(now, last + lease/3)) {
+		cred = ops->get_state_renewal_cred_locked(clp);
+		spin_unlock(&clp->cl_lock);
+		if (cred == NULL) {
+			if (!nfs_delegations_present(clp)) {
+				set_bit(NFS4CLNT_LEASE_EXPIRED, &clp->cl_state);
+				goto out;
+			}
+			nfs_expire_all_delegations(clp);
+		} else {
+			/* Queue an asynchronous RENEW. */
+			ops->sched_state_renewal(clp, cred);
+			put_rpccred(cred);
+			goto out_exp;
+		}
+	} else {
+		dprintk("%s: failed to call renewd. Reason: lease not expired \n",
+				__func__);
+		spin_unlock(&clp->cl_lock);
 	}
-
-	if (timeout < 5 * HZ)    /* safeguard */
-		timeout = 5 * HZ;
-	task->tk_timeout = timeout;
-	task->tk_action = renewd;
-	task->tk_exit = NULL;
-	rpc_sleep_on(&nfs4_renewd_queue, task, NULL, NULL);
-	return;
+	nfs4_schedule_state_renewal(clp);
+out_exp:
+	nfs_expire_unreferenced_delegations(clp);
+out:
+	dprintk("%s: done\n", __func__);
 }
 
-int
-nfs4_init_renewd(struct nfs_server *server)
+void
+nfs4_schedule_state_renewal(struct nfs_client *clp)
 {
-	struct rpc_task *task;
-	int status;
+	long timeout;
 
-	lock_kernel();
-	status = -ENOMEM;
-	task = rpc_new_task(server->client, NULL, RPC_TASK_ASYNC);
-	if (!task)
-		goto out;
-	task->tk_calldata = server;
-	task->tk_action = renewd;
-	status = rpc_execute(task);
+	spin_lock(&clp->cl_lock);
+	timeout = (2 * clp->cl_lease_time) / 3 + (long)clp->cl_last_renewal
+		- (long)jiffies;
+	if (timeout < 5 * HZ)
+		timeout = 5 * HZ;
+	dprintk("%s: requeueing work. Lease period = %ld\n",
+			__func__, (timeout + HZ - 1) / HZ);
+	cancel_delayed_work(&clp->cl_renewd);
+	schedule_delayed_work(&clp->cl_renewd, timeout);
+	set_bit(NFS_CS_RENEWD, &clp->cl_res_state);
+	spin_unlock(&clp->cl_lock);
+}
 
-out:
-	unlock_kernel();
-	return status;
+void
+nfs4_kill_renewd(struct nfs_client *clp)
+{
+	cancel_delayed_work_sync(&clp->cl_renewd);
 }
 
 /*

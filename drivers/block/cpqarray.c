@@ -16,12 +16,10 @@
  *    along with this program; if not, write to the Free Software
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- *    Questions/Comments/Bugfixes to arrays@compaq.com
+ *    Questions/Comments/Bugfixes to iss_storagedev@hp.com
  *
  */
-#include <linux/config.h>	/* CONFIG_PROC_FS */
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/bio.h>
@@ -34,25 +32,27 @@
 #include <linux/blkpg.h>
 #include <linux/timer.h>
 #include <linux/proc_fs.h>
-#include <linux/devfs_fs_kernel.h>
+#include <linux/seq_file.h>
 #include <linux/init.h>
 #include <linux/hdreg.h>
+#include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/blkdev.h>
 #include <linux/genhd.h>
+#include <linux/scatterlist.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
 
 #define SMART2_DRIVER_VERSION(maj,min,submin) ((maj<<16)|(min<<8)|(submin))
 
-#define DRIVER_NAME "Compaq SMART2 Driver (v 2.4.5)"
-#define DRIVER_VERSION SMART2_DRIVER_VERSION(2,4,5)
+#define DRIVER_NAME "Compaq SMART2 Driver (v 2.6.0)"
+#define DRIVER_VERSION SMART2_DRIVER_VERSION(2,6,0)
 
 /* Embedded module documentation macros - see modules.h */
 /* Original author Chris Frantz - Compaq Computer Corporation */
 MODULE_AUTHOR("Compaq Computer Corporation");
-MODULE_DESCRIPTION("Driver for Compaq Smart2 Array Controllers");
+MODULE_DESCRIPTION("Driver for Compaq Smart2 Array Controllers version 2.6.0");
 MODULE_LICENSE("GPL");
 
 #include "cpqarray.h"
@@ -68,16 +68,17 @@ MODULE_LICENSE("GPL");
 
 #define CPQARRAY_DMA_MASK	0xFFFFFFFF	/* 32 bit DMA */
 
+static DEFINE_MUTEX(cpqarray_mutex);
 static int nr_ctlr;
 static ctlr_info_t *hba[MAX_CTLR];
 
 static int eisa[8];
 
-#define NR_PRODUCTS (sizeof(products)/sizeof(struct board_type))
+#define NR_PRODUCTS ARRAY_SIZE(products)
 
 /*  board_id = Subsystem Device ID & Vendor ID
  *  product = Marketing Name for the board
- *  access = Address of the struct of function pointers 
+ *  access = Address of the struct of function pointers
  */
 static struct board_type products[] = {
 	{ 0x0040110E, "IDA",			&smart1_access },
@@ -97,6 +98,34 @@ static struct board_type products[] = {
 	{ 0x40580E11, "Smart Array 431",	&smart4_access },
 };
 
+/* define the PCI info for the PCI cards this driver can control */
+static const struct pci_device_id cpqarray_pci_device_id[] =
+{
+	{ PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_COMPAQ_42XX,
+		0x0E11, 0x4058, 0, 0, 0},       /* SA431 */
+	{ PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_COMPAQ_42XX,
+		0x0E11, 0x4051, 0, 0, 0},      /* SA4250ES */
+	{ PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_COMPAQ_42XX,
+		0x0E11, 0x4050, 0, 0, 0},      /* SA4200 */
+	{ PCI_VENDOR_ID_NCR, PCI_DEVICE_ID_NCR_53C1510,
+		0x0E11, 0x4048, 0, 0, 0},       /* LC2 */
+	{ PCI_VENDOR_ID_NCR, PCI_DEVICE_ID_NCR_53C1510,
+		0x0E11, 0x4040, 0, 0, 0},      /* Integrated Array */
+	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_SMART2P,
+		0x0E11, 0x4034, 0, 0, 0},       /* SA 221 */
+	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_SMART2P,
+		0x0E11, 0x4033, 0, 0, 0},       /* SA 3100ES*/
+	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_SMART2P,
+		0x0E11, 0x4032, 0, 0, 0},       /* SA 3200*/
+	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_SMART2P,
+		0x0E11, 0x4031, 0, 0, 0},       /* SA 2SL*/
+	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_SMART2P,
+		0x0E11, 0x4030, 0, 0, 0},       /* SA 2P */
+	{ 0 }
+};
+
+MODULE_DEVICE_TABLE(pci, cpqarray_pci_device_id);
+
 static struct gendisk *ida_gendisk[MAX_CTLR][NWD];
 
 /* Debug... */
@@ -108,9 +137,8 @@ static struct gendisk *ida_gendisk[MAX_CTLR][NWD];
 /* Debug Extra Paranoid... */
 #define DBGPX(s) do { } while(0)
 
-static int cpqarray_pci_detect(void);
 static int cpqarray_pci_init(ctlr_info_t *c, struct pci_dev *pdev);
-static void *remap_pci_mem(ulong base, ulong size);
+static void __iomem *remap_pci_mem(ulong base, ulong size);
 static int cpqarray_eisa_detect(void);
 static int pollcomplete(int ctlr);
 static void getgeometry(int ctlr);
@@ -118,6 +146,9 @@ static void start_fwbk(int ctlr);
 
 static cmdlist_t * cmd_alloc(ctlr_info_t *h, int get_from_pool);
 static void cmd_free(ctlr_info_t *h, cmdlist_t *c, int got_from_pool);
+
+static void free_hba(int i);
+static int alloc_cpqarray_hba(void);
 
 static int sendcmd(
 	__u8	cmd,
@@ -128,27 +159,27 @@ static int sendcmd(
 	unsigned int blkcnt,
 	unsigned int log_unit );
 
-static int ida_open(struct inode *inode, struct file *filep);
-static int ida_release(struct inode *inode, struct file *filep);
-static int ida_ioctl(struct inode *inode, struct file *filep, unsigned int cmd, unsigned long arg);
+static int ida_unlocked_open(struct block_device *bdev, fmode_t mode);
+static int ida_release(struct gendisk *disk, fmode_t mode);
+static int ida_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg);
+static int ida_getgeo(struct block_device *bdev, struct hd_geometry *geo);
 static int ida_ctlr_ioctl(ctlr_info_t *h, int dsk, ida_ioctl_t *io);
 
-static void do_ida_request(request_queue_t *q);
+static void do_ida_request(struct request_queue *q);
 static void start_io(ctlr_info_t *h);
 
 static inline void addQ(cmdlist_t **Qptr, cmdlist_t *c);
 static inline cmdlist_t *removeQ(cmdlist_t **Qptr, cmdlist_t *c);
-static inline void complete_buffers(struct bio *bio, int ok);
 static inline void complete_command(cmdlist_t *cmd, int timeout);
 
-static irqreturn_t do_ida_intr(int irq, void *dev_id, struct pt_regs * regs);
+static irqreturn_t do_ida_intr(int irq, void *dev_id);
 static void ida_timer(unsigned long tdata);
 static int ida_revalidate(struct gendisk *disk);
 static int revalidate_allvol(ctlr_info_t *host);
+static int cpqarray_register_ctlr(int ctlr, struct pci_dev *pdev);
 
 #ifdef CONFIG_PROC_FS
 static void ida_procinit(int i);
-static int ida_proc_get_info(char *buffer, char **start, off_t offset, int length, int *eof, void *data);
 #else
 static void ida_procinit(int i) {}
 #endif
@@ -164,11 +195,12 @@ static inline ctlr_info_t *get_host(struct gendisk *disk)
 }
 
 
-static struct block_device_operations ida_fops  = {
+static const struct block_device_operations ida_fops  = {
 	.owner		= THIS_MODULE,
-	.open		= ida_open,
+	.open		= ida_unlocked_open,
 	.release	= ida_release,
 	.ioctl		= ida_ioctl,
+	.getgeo		= ida_getgeo,
 	.revalidate_disk= ida_revalidate,
 };
 
@@ -176,6 +208,7 @@ static struct block_device_operations ida_fops  = {
 #ifdef CONFIG_PROC_FS
 
 static struct proc_dir_entry *proc_array;
+static const struct file_operations ida_proc_fops;
 
 /*
  * Get us a file in /proc/array that says something about each controller.
@@ -184,23 +217,20 @@ static struct proc_dir_entry *proc_array;
 static void __init ida_procinit(int i)
 {
 	if (proc_array == NULL) {
-		proc_array = proc_mkdir("cpqarray", proc_root_driver);
+		proc_array = proc_mkdir("driver/cpqarray", NULL);
 		if (!proc_array) return;
 	}
 
-	create_proc_read_entry(hba[i]->devname, 0, proc_array,
-			       ida_proc_get_info, hba[i]);
+	proc_create_data(hba[i]->devname, 0, proc_array, &ida_proc_fops, hba[i]);
 }
 
 /*
  * Report information about this controller.
  */
-static int ida_proc_get_info(char *buffer, char **start, off_t offset, int length, int *eof, void *data)
+static int ida_proc_show(struct seq_file *m, void *v)
 {
-	off_t pos = 0;
-	off_t len = 0;
-	int size, i, ctlr;
-	ctlr_info_t *h = (ctlr_info_t*)data;
+	int i, ctlr;
+	ctlr_info_t *h = (ctlr_info_t*)m->private;
 	drv_info_t *drv;
 #ifdef CPQ_PROC_PRINT_QUEUES
 	cmdlist_t *c;
@@ -208,7 +238,7 @@ static int ida_proc_get_info(char *buffer, char **start, off_t offset, int lengt
 #endif
 
 	ctlr = h->ctlr;
-	size = sprintf(buffer, "%s:  Compaq %s Controller\n"
+	seq_printf(m, "%s:  Compaq %s Controller\n"
 		"       Board ID: 0x%08lx\n"
 		"       Firmware Revision: %c%c%c%c\n"
 		"       Controller Sig: 0x%08lx\n"
@@ -224,207 +254,231 @@ static int ida_proc_get_info(char *buffer, char **start, off_t offset, int lengt
 		(unsigned long)h->board_id,
 		h->firm_rev[0], h->firm_rev[1], h->firm_rev[2], h->firm_rev[3],
 		(unsigned long)h->ctlr_sig, (unsigned long)h->vaddr,
-		(unsigned int) h->ioaddr, (unsigned int)h->intr,
+		(unsigned int) h->io_mem_addr, (unsigned int)h->intr,
 		h->log_drives, h->phys_drives,
 		h->Qdepth, h->maxQsinceinit);
 
-	pos += size; len += size;
-	
-	size = sprintf(buffer+len, "Logical Drive Info:\n");
-	pos += size; len += size;
+	seq_puts(m, "Logical Drive Info:\n");
 
 	for(i=0; i<h->log_drives; i++) {
 		drv = &h->drv[i];
-		size = sprintf(buffer+len, "ida/c%dd%d: blksz=%d nr_blks=%d\n",
+		seq_printf(m, "ida/c%dd%d: blksz=%d nr_blks=%d\n",
 				ctlr, i, drv->blk_size, drv->nr_blks);
-		pos += size; len += size;
 	}
 
 #ifdef CPQ_PROC_PRINT_QUEUES
 	spin_lock_irqsave(IDA_LOCK(h->ctlr), flags); 
-	size = sprintf(buffer+len, "\nCurrent Queues:\n");
-	pos += size; len += size;
+	seq_puts(m, "\nCurrent Queues:\n");
 
 	c = h->reqQ;
-	size = sprintf(buffer+len, "reqQ = %p", c); pos += size; len += size;
+	seq_printf(m, "reqQ = %p", c);
 	if (c) c=c->next;
 	while(c && c != h->reqQ) {
-		size = sprintf(buffer+len, "->%p", c);
-		pos += size; len += size;
+		seq_printf(m, "->%p", c);
 		c=c->next;
 	}
 
 	c = h->cmpQ;
-	size = sprintf(buffer+len, "\ncmpQ = %p", c); pos += size; len += size;
+	seq_printf(m, "\ncmpQ = %p", c);
 	if (c) c=c->next;
 	while(c && c != h->cmpQ) {
-		size = sprintf(buffer+len, "->%p", c);
-		pos += size; len += size;
+		seq_printf(m, "->%p", c);
 		c=c->next;
 	}
 
-	size = sprintf(buffer+len, "\n"); pos += size; len += size;
+	seq_putc(m, '\n');
 	spin_unlock_irqrestore(IDA_LOCK(h->ctlr), flags); 
 #endif
-	size = sprintf(buffer+len, "nr_allocs = %d\nnr_frees = %d\n",
+	seq_printf(m, "nr_allocs = %d\nnr_frees = %d\n",
 			h->nr_allocs, h->nr_frees);
-	pos += size; len += size;
-
-	*eof = 1;
-	*start = buffer+offset;
-	len -= offset;
-	if (len>length)
-		len = length;
-	return len;
+	return 0;
 }
+
+static int ida_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ida_proc_show, PDE(inode)->data);
+}
+
+static const struct file_operations ida_proc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= ida_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 #endif /* CONFIG_PROC_FS */
 
-MODULE_PARM(eisa, "1-8i");
+module_param_array(eisa, int, NULL, 0);
 
-static void __exit cpqarray_exit(void)
+static void release_io_mem(ctlr_info_t *c)
 {
-	int i, j;
-	char buff[4]; 
-
-	for(i=0; i<nr_ctlr; i++) {
-
-		/* sendcmd will turn off interrupt, and send the flush... 
-		 * To write all data in the battery backed cache to disks    
-		 * no data returned, but don't want to send NULL to sendcmd */	
-		if( sendcmd(FLUSH_CACHE, i, buff, 4, 0, 0, 0))
-		{
-			printk(KERN_WARNING "Unable to flush cache on "
-				"controller %d\n", i);	
-		}
-		free_irq(hba[i]->intr, hba[i]);
-		iounmap(hba[i]->vaddr);
-		unregister_blkdev(COMPAQ_SMART2_MAJOR+i, hba[i]->devname);
-		del_timer(&hba[i]->timer);
-		blk_cleanup_queue(hba[i]->queue);
-		remove_proc_entry(hba[i]->devname, proc_array);
-		pci_free_consistent(hba[i]->pci_dev, 
-			NR_CMDS * sizeof(cmdlist_t), (hba[i]->cmd_pool), 
-			hba[i]->cmd_pool_dhandle);
-		kfree(hba[i]->cmd_pool_bits);
-
-		for (j = 0; j < NWD; j++) {
-			if (ida_gendisk[i][j]->flags & GENHD_FL_UP)
-				del_gendisk(ida_gendisk[i][j]);
-			devfs_remove("ida/c%dd%d",i,j);
-			put_disk(ida_gendisk[i][j]);
-		}
-	}
-	devfs_remove("ida");
-	remove_proc_entry("cpqarray", proc_root_driver);
+	/* if IO mem was not protected do nothing */
+	if( c->io_mem_addr == 0)
+		return;
+	release_region(c->io_mem_addr, c->io_mem_length);
+	c->io_mem_addr = 0;
+	c->io_mem_length = 0;
 }
 
-/*
- *  This is it.  Find all the controllers and register them.  I really hate
- *  stealing all these major device numbers.
- *  returns the number of block devices registered.
- */
-static int __init cpqarray_init(void)
+static void __devexit cpqarray_remove_one(int i)
 {
-	request_queue_t *q;
-	int i,j;
-	int num_cntlrs_reg = 0;
-	/* detect controllers */
-	cpqarray_pci_detect();
-	cpqarray_eisa_detect();
-	
-	if (nr_ctlr == 0)
-		return -ENODEV;
+	int j;
+	char buff[4];
 
-	printk(DRIVER_NAME "\n");
-	printk("Found %d controller(s)\n", nr_ctlr);
+	/* sendcmd will turn off interrupt, and send the flush...
+	 * To write all data in the battery backed cache to disks
+	 * no data returned, but don't want to send NULL to sendcmd */
+	if( sendcmd(FLUSH_CACHE, i, buff, 4, 0, 0, 0))
+	{
+		printk(KERN_WARNING "Unable to flush cache on controller %d\n",
+				i);
+	}
+	free_irq(hba[i]->intr, hba[i]);
+	iounmap(hba[i]->vaddr);
+	unregister_blkdev(COMPAQ_SMART2_MAJOR+i, hba[i]->devname);
+	del_timer(&hba[i]->timer);
+	remove_proc_entry(hba[i]->devname, proc_array);
+	pci_free_consistent(hba[i]->pci_dev,
+			NR_CMDS * sizeof(cmdlist_t), (hba[i]->cmd_pool),
+			hba[i]->cmd_pool_dhandle);
+	kfree(hba[i]->cmd_pool_bits);
+	for(j = 0; j < NWD; j++) {
+		if (ida_gendisk[i][j]->flags & GENHD_FL_UP)
+			del_gendisk(ida_gendisk[i][j]);
+		put_disk(ida_gendisk[i][j]);
+	}
+	blk_cleanup_queue(hba[i]->queue);
+	release_io_mem(hba[i]);
+	free_hba(i);
+}
 
-	/* allocate space for disk structs */
+static void __devexit cpqarray_remove_one_pci (struct pci_dev *pdev)
+{
+	int i;
+	ctlr_info_t *tmp_ptr;
+
+	if (pci_get_drvdata(pdev) == NULL) {
+		printk( KERN_ERR "cpqarray: Unable to remove device \n");
+		return;
+	}
+
+	tmp_ptr = pci_get_drvdata(pdev);
+	i = tmp_ptr->ctlr;
+	if (hba[i] == NULL) {
+		printk(KERN_ERR "cpqarray: controller %d appears to have"
+			"already been removed \n", i);
+		return;
+        }
+	pci_set_drvdata(pdev, NULL);
+
+	cpqarray_remove_one(i);
+}
+
+/* removing an instance that was not removed automatically..
+ * must be an eisa card.
+ */
+static void __devexit cpqarray_remove_one_eisa (int i)
+{
+	if (hba[i] == NULL) {
+		printk(KERN_ERR "cpqarray: controller %d appears to have"
+			"already been removed \n", i);
+		return;
+        }
+	cpqarray_remove_one(i);
+}
+
+/* pdev is NULL for eisa */
+static int __devinit cpqarray_register_ctlr( int i, struct pci_dev *pdev)
+{
+	struct request_queue *q;
+	int j;
+
 	/* 
 	 * register block devices
 	 * Find disks and fill in structs
 	 * Get an interrupt, set the Q depth and get into /proc
 	 */
-	for(i=0; i < nr_ctlr; i++) {
-	  	/* If this successful it should insure that we are the only */
-		/* instance of the driver */	
-		if (register_blkdev(COMPAQ_SMART2_MAJOR+i, hba[i]->devname))
-                        continue;
 
-		hba[i]->access.set_intr_mask(hba[i], 0);
-		if (request_irq(hba[i]->intr, do_ida_intr,
-			SA_INTERRUPT|SA_SHIRQ, hba[i]->devname, hba[i])) {
-
-			printk(KERN_ERR "cpqarray: Unable to get irq %d for %s\n", 
+	/* If this successful it should insure that we are the only */
+	/* instance of the driver */
+	if (register_blkdev(COMPAQ_SMART2_MAJOR+i, hba[i]->devname)) {
+		goto Enomem4;
+	}
+	hba[i]->access.set_intr_mask(hba[i], 0);
+	if (request_irq(hba[i]->intr, do_ida_intr,
+		IRQF_DISABLED|IRQF_SHARED, hba[i]->devname, hba[i]))
+	{
+		printk(KERN_ERR "cpqarray: Unable to get irq %d for %s\n",
 				hba[i]->intr, hba[i]->devname);
-			unregister_blkdev(COMPAQ_SMART2_MAJOR+i, hba[i]->devname);
-			continue;
-		}
-		num_cntlrs_reg++;
-		for (j=0; j<NWD; j++) {
-			ida_gendisk[i][j] = alloc_disk(1 << NWD_SHIFT);
-			if (!ida_gendisk[i][j])
-				goto Enomem2;
-		}
-		hba[i]->cmd_pool = (cmdlist_t *)pci_alloc_consistent(
-				hba[i]->pci_dev, NR_CMDS * sizeof(cmdlist_t), 
-				&(hba[i]->cmd_pool_dhandle));
-		hba[i]->cmd_pool_bits = kmalloc(((NR_CMDS+BITS_PER_LONG-1)/BITS_PER_LONG)*sizeof(unsigned long), GFP_KERNEL);
+		goto Enomem3;
+	}
 		
-		if (!hba[i]->cmd_pool_bits || !hba[i]->cmd_pool)
+	for (j=0; j<NWD; j++) {
+		ida_gendisk[i][j] = alloc_disk(1 << NWD_SHIFT);
+		if (!ida_gendisk[i][j])
+			goto Enomem2;
+	}
+
+	hba[i]->cmd_pool = pci_alloc_consistent(
+		hba[i]->pci_dev, NR_CMDS * sizeof(cmdlist_t),
+		&(hba[i]->cmd_pool_dhandle));
+	hba[i]->cmd_pool_bits = kcalloc(
+		DIV_ROUND_UP(NR_CMDS, BITS_PER_LONG), sizeof(unsigned long),
+		GFP_KERNEL);
+
+	if (!hba[i]->cmd_pool_bits || !hba[i]->cmd_pool)
 			goto Enomem1;
-		memset(hba[i]->cmd_pool, 0, NR_CMDS * sizeof(cmdlist_t));
-		memset(hba[i]->cmd_pool_bits, 0, ((NR_CMDS+BITS_PER_LONG-1)/BITS_PER_LONG)*sizeof(unsigned long));
-		printk(KERN_INFO "cpqarray: Finding drives on %s", 
-			hba[i]->devname);
 
-		spin_lock_init(&hba[i]->lock);
-		q = blk_init_queue(do_ida_request, &hba[i]->lock);
-		if (!q)
-			goto Enomem1;
+	memset(hba[i]->cmd_pool, 0, NR_CMDS * sizeof(cmdlist_t));
+	printk(KERN_INFO "cpqarray: Finding drives on %s",
+		hba[i]->devname);
 
-		hba[i]->queue = q;
-		q->queuedata = hba[i];
+	spin_lock_init(&hba[i]->lock);
+	q = blk_init_queue(do_ida_request, &hba[i]->lock);
+	if (!q)
+		goto Enomem1;
 
-		getgeometry(i);
-		start_fwbk(i); 
+	hba[i]->queue = q;
+	q->queuedata = hba[i];
 
-		ida_procinit(i);
+	getgeometry(i);
+	start_fwbk(i);
 
+	ida_procinit(i);
+
+	if (pdev)
 		blk_queue_bounce_limit(q, hba[i]->pci_dev->dma_mask);
 
-		/* This is a hardware imposed limit. */
-		blk_queue_max_hw_segments(q, SG_MAX);
+	/* This is a hardware imposed limit. */
+	blk_queue_max_segments(q, SG_MAX);
 
-		/* This is a driver limit and could be eliminated. */
-		blk_queue_max_phys_segments(q, SG_MAX);
-	
-		init_timer(&hba[i]->timer);
-		hba[i]->timer.expires = jiffies + IDA_TIMER;
-		hba[i]->timer.data = (unsigned long)hba[i];
-		hba[i]->timer.function = ida_timer;
-		add_timer(&hba[i]->timer);
+	init_timer(&hba[i]->timer);
+	hba[i]->timer.expires = jiffies + IDA_TIMER;
+	hba[i]->timer.data = (unsigned long)hba[i];
+	hba[i]->timer.function = ida_timer;
+	add_timer(&hba[i]->timer);
 
-		/* Enable IRQ now that spinlock and rate limit timer are set up */
-		hba[i]->access.set_intr_mask(hba[i], FIFO_NOT_EMPTY);
+	/* Enable IRQ now that spinlock and rate limit timer are set up */
+	hba[i]->access.set_intr_mask(hba[i], FIFO_NOT_EMPTY);
 
-		for(j=0; j<NWD; j++) {
-			struct gendisk *disk = ida_gendisk[i][j];
-			drv_info_t *drv = &hba[i]->drv[j];
-			sprintf(disk->disk_name, "ida/c%dd%d", i, j);
-			disk->major = COMPAQ_SMART2_MAJOR + i;
-			disk->first_minor = j<<NWD_SHIFT;
-			disk->fops = &ida_fops; 
-			if (j && !drv->nr_blks)
-				continue;
-			blk_queue_hardsect_size(hba[i]->queue, drv->blk_size);
-			set_capacity(disk, drv->nr_blks);
-			disk->queue = hba[i]->queue;
-			disk->private_data = drv;
-			add_disk(disk);
-		}
+	for(j=0; j<NWD; j++) {
+		struct gendisk *disk = ida_gendisk[i][j];
+		drv_info_t *drv = &hba[i]->drv[j];
+		sprintf(disk->disk_name, "ida/c%dd%d", i, j);
+		disk->major = COMPAQ_SMART2_MAJOR + i;
+		disk->first_minor = j<<NWD_SHIFT;
+		disk->fops = &ida_fops;
+		if (j && !drv->nr_blks)
+			continue;
+		blk_queue_logical_block_size(hba[i]->queue, drv->blk_size);
+		set_capacity(disk, drv->nr_blks);
+		disk->queue = hba[i]->queue;
+		disk->private_data = drv;
+		add_disk(disk);
 	}
+
 	/* done ! */
-	return num_cntlrs_reg ? 0 : -ENODEV;
+	return(i);
 
 Enomem1:
 	nr_ctlr = i; 
@@ -438,83 +492,110 @@ Enomem2:
 		ida_gendisk[i][j] = NULL;
 	}
 	free_irq(hba[i]->intr, hba[i]);
+Enomem3:
 	unregister_blkdev(COMPAQ_SMART2_MAJOR+i, hba[i]->devname);
-	num_cntlrs_reg--;
+Enomem4:
+	if (pdev)
+		pci_set_drvdata(pdev, NULL);
+	release_io_mem(hba[i]);
+	free_hba(i);
+
 	printk( KERN_ERR "cpqarray: out of memory");
 
-	if (!num_cntlrs_reg) {
-		remove_proc_entry("cpqarray", proc_root_driver);
-		return -ENODEV;
-	}
-	return 0;
+	return -1;
 }
 
-/*
- * Find the controller and initialize it
- *  Cannot use the class code to search, because older array controllers use
- *    0x018000 and new ones use 0x010400.  So I might as well search for each
- *    each device IDs, being there are only going to be three of them. 
- */
-static int cpqarray_pci_detect(void)
+static int __devinit cpqarray_init_one( struct pci_dev *pdev,
+	const struct pci_device_id *ent)
 {
-	struct pci_dev *pdev;
+	int i;
 
-#define IDA_BOARD_TYPES 3
-	static int ida_vendor_id[IDA_BOARD_TYPES] = { PCI_VENDOR_ID_DEC, 
-		PCI_VENDOR_ID_NCR, PCI_VENDOR_ID_COMPAQ };
-	static int ida_device_id[IDA_BOARD_TYPES] = { PCI_DEVICE_ID_COMPAQ_42XX,		PCI_DEVICE_ID_NCR_53C1510, PCI_DEVICE_ID_COMPAQ_SMART2P };
-	int brdtype;
-	
-	/* search for all PCI board types that could be for this driver */
-	for(brdtype=0; brdtype<IDA_BOARD_TYPES; brdtype++)
-	{
-		pdev = pci_find_device(ida_vendor_id[brdtype],
-				       ida_device_id[brdtype], NULL);
-		while (pdev) {
-			printk(KERN_DEBUG "cpqarray: Device 0x%x has"
-				" been found at bus %d dev %d func %d\n",
-				ida_vendor_id[brdtype],
-				pdev->bus->number, PCI_SLOT(pdev->devfn),
-				PCI_FUNC(pdev->devfn));
-			if (nr_ctlr == 8) {
-				printk(KERN_WARNING "cpqarray: This driver"
-				" supports a maximum of 8 controllers.\n");
-				break;
-			}
-			
-/* if it is a PCI_DEVICE_ID_NCR_53C1510, make sure it's 				the Compaq version of the chip */ 
+	printk(KERN_DEBUG "cpqarray: Device 0x%x has been found at"
+			" bus %d dev %d func %d\n",
+			pdev->device, pdev->bus->number, PCI_SLOT(pdev->devfn),
+			PCI_FUNC(pdev->devfn));
+	i = alloc_cpqarray_hba();
+	if( i < 0 )
+		return (-1);
+	memset(hba[i], 0, sizeof(ctlr_info_t));
+	sprintf(hba[i]->devname, "ida%d", i);
+	hba[i]->ctlr = i;
+	/* Initialize the pdev driver private data */
+	pci_set_drvdata(pdev, hba[i]);
 
-			if (ida_device_id[brdtype] == PCI_DEVICE_ID_NCR_53C1510)			{	
-				unsigned short subvendor=pdev->subsystem_vendor;
-				if(subvendor !=  PCI_VENDOR_ID_COMPAQ)
-				{
-					printk(KERN_DEBUG 
-						"cpqarray: not a Compaq integrated array controller\n");
-					continue;
-				}
-			}
-
-			hba[nr_ctlr] = kmalloc(sizeof(ctlr_info_t), GFP_KERNEL);			if(hba[nr_ctlr]==NULL)
-			{
-				printk(KERN_ERR "cpqarray: out of memory.\n");
-				continue;
-			}
-			memset(hba[nr_ctlr], 0, sizeof(ctlr_info_t));
-			if (cpqarray_pci_init(hba[nr_ctlr], pdev) != 0)
-			{
-				kfree(hba[nr_ctlr]);
-				continue;
-			}
-			sprintf(hba[nr_ctlr]->devname, "ida%d", nr_ctlr);
-			hba[nr_ctlr]->ctlr = nr_ctlr;
-			nr_ctlr++;
-
-			pdev = pci_find_device(ida_vendor_id[brdtype],
-					       ida_device_id[brdtype], pdev);
-		}
+	if (cpqarray_pci_init(hba[i], pdev) != 0) {
+		pci_set_drvdata(pdev, NULL);
+		release_io_mem(hba[i]);
+		free_hba(i);
+		return -1;
 	}
 
-	return nr_ctlr;
+	return (cpqarray_register_ctlr(i, pdev));
+}
+
+static struct pci_driver cpqarray_pci_driver = {
+	.name = "cpqarray",
+	.probe = cpqarray_init_one,
+	.remove = __devexit_p(cpqarray_remove_one_pci),
+	.id_table = cpqarray_pci_device_id,
+};
+
+/*
+ *  This is it.  Find all the controllers and register them.
+ *  returns the number of block devices registered.
+ */
+static int __init cpqarray_init(void)
+{
+	int num_cntlrs_reg = 0;
+	int i;
+	int rc = 0;
+
+	/* detect controllers */
+	printk(DRIVER_NAME "\n");
+
+	rc = pci_register_driver(&cpqarray_pci_driver);
+	if (rc)
+		return rc;
+	cpqarray_eisa_detect();
+	
+	for (i=0; i < MAX_CTLR; i++) {
+		if (hba[i] != NULL)
+			num_cntlrs_reg++;
+	}
+
+	if (num_cntlrs_reg)
+		return 0;
+	else {
+		pci_unregister_driver(&cpqarray_pci_driver);
+		return -ENODEV;
+	}
+}
+
+/* Function to find the first free pointer into our hba[] array */
+/* Returns -1 if no free entries are left.  */
+static int alloc_cpqarray_hba(void)
+{
+	int i;
+
+	for(i=0; i< MAX_CTLR; i++) {
+		if (hba[i] == NULL) {
+			hba[i] = kmalloc(sizeof(ctlr_info_t), GFP_KERNEL);
+			if(hba[i]==NULL) {
+				printk(KERN_ERR "cpqarray: out of memory.\n");
+				return (-1);
+			}
+			return (i);
+		}
+	}
+	printk(KERN_WARNING "cpqarray: This driver supports a maximum"
+		" of 8 controllers.\n");
+	return(-1);
+}
+
+static void free_hba(int i)
+{
+	kfree(hba[i]);
+	hba[i]=NULL;
 }
 
 /*
@@ -532,6 +613,7 @@ static int cpqarray_pci_init(ctlr_info_t *c, struct pci_dev *pdev)
 	int i;
 
 	c->pci_dev = pdev;
+	pci_set_master(pdev);
 	if (pci_enable_device(pdev)) {
 		printk(KERN_ERR "cpqarray: Unable to Enable PCI device\n");
 		return -1;
@@ -556,6 +638,13 @@ static int cpqarray_pci_init(ctlr_info_t *c, struct pci_dev *pdev)
 
 	pci_read_config_dword(pdev, 0x2c, &board_id);
 
+	/* check to see if controller has been disabled */
+	if(!(command & 0x02)) {
+		printk(KERN_WARNING
+			"cpqarray: controller appears to be disabled\n");
+		return(-1);
+	}
+
 DBGINFO(
 	printk("vendor_id = %x\n", vendor_id);
 	printk("device_id = %x\n", device_id);
@@ -570,11 +659,28 @@ DBGINFO(
 );
 
 	c->intr = irq;
-	c->ioaddr = addr[0];
+
+	for(i=0; i<6; i++) {
+		if (pci_resource_flags(pdev, i) & PCI_BASE_ADDRESS_SPACE_IO)
+		{ /* IO space */
+			c->io_mem_addr = addr[i];
+			c->io_mem_length = pci_resource_end(pdev, i)
+				- pci_resource_start(pdev, i) + 1;
+			if(!request_region( c->io_mem_addr, c->io_mem_length,
+				"cpqarray"))
+			{
+				printk( KERN_WARNING "cpqarray I/O memory range already in use addr %lx length = %ld\n", c->io_mem_addr, c->io_mem_length);
+				c->io_mem_addr = 0;
+				c->io_mem_length = 0;
+			}
+			break;
+		}
+	}
 
 	c->paddr = 0;
 	for(i=0; i<6; i++)
-		if (pci_resource_flags(pdev, i) & IORESOURCE_MEM) {
+		if (!(pci_resource_flags(pdev, i) &
+				PCI_BASE_ADDRESS_SPACE_IO)) {
 			c->paddr = pci_resource_start (pdev, i);
 			break;
 		}
@@ -605,17 +711,16 @@ DBGINFO(
 /*
  * Map (physical) PCI mem into (virtual) kernel space
  */
-static void *remap_pci_mem(ulong base, ulong size)
+static void __iomem *remap_pci_mem(ulong base, ulong size)
 {
         ulong page_base        = ((ulong) base) & PAGE_MASK;
         ulong page_offs        = ((ulong) base) - page_base;
-        void *page_remapped    = ioremap(page_base, page_offs+size);
+        void __iomem *page_remapped    = ioremap(page_base, page_offs+size);
 
         return (page_remapped ? (page_remapped + page_offs) : NULL);
 }
 
 #ifndef MODULE
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,13)
 /*
  * Config string is a comma separated set of i/o addresses of EISA cards.
  */
@@ -632,35 +737,23 @@ static int cpqarray_setup(char *str)
 
 __setup("smart2=", cpqarray_setup);
 
-#else
-
-/*
- * Copy the contents of the ints[] array passed to us by init.
- */
-void cpqarray_setup(char *str, int *ints)
-{
-	int i;
-	for(i=0; i<ints[0] && i<8; i++)
-		eisa[i] = ints[i+1];
-}
-#endif
 #endif
 
 /*
  * Find an EISA controller's signature.  Set up an hba if we find it.
  */
-static int cpqarray_eisa_detect(void)
+static int __devinit cpqarray_eisa_detect(void)
 {
 	int i=0, j;
 	__u32 board_id;
 	int intr;
+	int ctlr;
+	int num_ctlr = 0;
 
 	while(i<8 && eisa[i]) {
-		if (nr_ctlr == 8) {
-			printk(KERN_WARNING "cpqarray: This driver supports"
-				" a maximum of 8 controllers.\n");
+		ctlr = alloc_cpqarray_hba();
+		if(ctlr == -1)
 			break;
-		}
 		board_id = inl(eisa[i]+0xC80);
 		for(j=0; j < NR_PRODUCTS; j++)
 			if (board_id == products[j].board_id) 
@@ -671,14 +764,21 @@ static int cpqarray_eisa_detect(void)
 				" to access the SMART Array controller %08lx\n",				 (unsigned long)board_id);
 			continue;
 		}
-		hba[nr_ctlr] = (ctlr_info_t *) kmalloc(sizeof(ctlr_info_t), GFP_KERNEL);
-		if(hba[nr_ctlr]==NULL)
+
+		memset(hba[ctlr], 0, sizeof(ctlr_info_t));
+		hba[ctlr]->io_mem_addr = eisa[i];
+		hba[ctlr]->io_mem_length = 0x7FF;
+		if(!request_region(hba[ctlr]->io_mem_addr,
+				hba[ctlr]->io_mem_length,
+				"cpqarray"))
 		{
-			printk(KERN_ERR "cpqarray: out of memory.\n");
+			printk(KERN_WARNING "cpqarray: I/O range already in "
+					"use addr = %lx length = %ld\n",
+					hba[ctlr]->io_mem_addr,
+					hba[ctlr]->io_mem_length);
+			free_hba(ctlr);
 			continue;
 		}
-		memset(hba[nr_ctlr], 0, sizeof(ctlr_info_t));
-		hba[nr_ctlr]->ioaddr = eisa[i];
 
 		/*
 		 * Read the config register to find our interrupt
@@ -689,13 +789,13 @@ static int cpqarray_eisa_detect(void)
 		else if (intr & 4) intr = 14;
 		else if (intr & 8) intr = 15;
 		
-		hba[nr_ctlr]->intr = intr;
-		sprintf(hba[nr_ctlr]->devname, "ida%d", nr_ctlr);
-		hba[nr_ctlr]->product_name = products[j].product_name;
-		hba[nr_ctlr]->access = *(products[j].access);
-		hba[nr_ctlr]->ctlr = nr_ctlr;
-		hba[nr_ctlr]->board_id = board_id;
-		hba[nr_ctlr]->pci_dev = NULL; /* not PCI */
+		hba[ctlr]->intr = intr;
+		sprintf(hba[ctlr]->devname, "ida%d", nr_ctlr);
+		hba[ctlr]->product_name = products[j].product_name;
+		hba[ctlr]->access = *(products[j].access);
+		hba[ctlr]->ctlr = ctlr;
+		hba[ctlr]->board_id = board_id;
+		hba[ctlr]->pci_dev = NULL; /* not PCI */
 
 DBGINFO(
 	printk("i = %d, j = %d\n", i, j);
@@ -704,23 +804,28 @@ DBGINFO(
 	printk("board_id = %x\n", board_id);
 );
 
-		nr_ctlr++;
+		num_ctlr++;
 		i++;
+
+		if (cpqarray_register_ctlr(ctlr, NULL) == -1)
+			printk(KERN_WARNING
+				"cpqarray: Can't register EISA controller %d\n",
+				ctlr);
+
 	}
 
-	return nr_ctlr;
+	return num_ctlr;
 }
-
 
 /*
  * Open.  Make sure the device is really there.
  */
-static int ida_open(struct inode *inode, struct file *filep)
+static int ida_open(struct block_device *bdev, fmode_t mode)
 {
-	drv_info_t *drv = get_drv(inode->i_bdev->bd_disk);
-	ctlr_info_t *host = get_host(inode->i_bdev->bd_disk);
+	drv_info_t *drv = get_drv(bdev->bd_disk);
+	ctlr_info_t *host = get_host(bdev->bd_disk);
 
-	DBGINFO(printk("ida_open %s\n", inode->i_bdev->bd_disk->disk_name));
+	DBGINFO(printk("ida_open %s\n", bdev->bd_disk->disk_name));
 	/*
 	 * Root is allowed to open raw volume zero even if it's not configured
 	 * so array config can still work.  I don't think I really like this,
@@ -737,13 +842,29 @@ static int ida_open(struct inode *inode, struct file *filep)
 	return 0;
 }
 
+static int ida_unlocked_open(struct block_device *bdev, fmode_t mode)
+{
+	int ret;
+
+	mutex_lock(&cpqarray_mutex);
+	ret = ida_open(bdev, mode);
+	mutex_unlock(&cpqarray_mutex);
+
+	return ret;
+}
+
 /*
  * Close.  Sync first.
  */
-static int ida_release(struct inode *inode, struct file *filep)
+static int ida_release(struct gendisk *disk, fmode_t mode)
 {
-	ctlr_info_t *host = get_host(inode->i_bdev->bd_disk);
+	ctlr_info_t *host;
+
+	mutex_lock(&cpqarray_mutex);
+	host = get_host(disk);
 	host->usage_count--;
+	mutex_unlock(&cpqarray_mutex);
+
 	return 0;
 }
 
@@ -782,7 +903,7 @@ static inline cmdlist_t *removeQ(cmdlist_t **Qptr, cmdlist_t *c)
  * are in here (either via the dummy do_ida_request functions or by being
  * called from the interrupt handler
  */
-static void do_ida_request(request_queue_t *q)
+static void do_ida_request(struct request_queue *q)
 {
 	ctlr_info_t *h = q->queuedata;
 	cmdlist_t *c;
@@ -790,32 +911,30 @@ static void do_ida_request(request_queue_t *q)
 	struct scatterlist tmp_sg[SG_MAX];
 	int i, dir, seg;
 
-	if (blk_queue_plugged(q))
-		goto startio;
-
 queue_next:
-	creq = elv_next_request(q);
+	creq = blk_peek_request(q);
 	if (!creq)
 		goto startio;
 
-	if (creq->nr_phys_segments > SG_MAX)
-		BUG();
+	BUG_ON(creq->nr_phys_segments > SG_MAX);
 
 	if ((c = cmd_alloc(h,1)) == NULL)
 		goto startio;
 
-	blkdev_dequeue_request(creq);
+	blk_start_request(creq);
 
 	c->ctlr = h->ctlr;
 	c->hdr.unit = (drv_info_t *)(creq->rq_disk->private_data) - h->drv;
 	c->hdr.size = sizeof(rblk_t) >> 2;
 	c->size += sizeof(rblk_t);
 
-	c->req.hdr.blk = creq->sector;
+	c->req.hdr.blk = blk_rq_pos(creq);
 	c->rq = creq;
 DBGPX(
-	printk("sector=%d, nr_sectors=%d\n", creq->sector, creq->nr_sectors);
+	printk("sector=%d, nr_sectors=%u\n",
+	       blk_rq_pos(creq), blk_rq_sectors(creq));
 );
+	sg_init_table(tmp_sg, SG_MAX);
 	seg = blk_rq_map_sg(q, creq, tmp_sg);
 
 	/* Now do all the DMA Mappings */
@@ -827,13 +946,13 @@ DBGPX(
 	{
 		c->req.sg[i].size = tmp_sg[i].length;
 		c->req.sg[i].addr = (__u32) pci_map_page(h->pci_dev,
-						 tmp_sg[i].page,
+						 sg_page(&tmp_sg[i]),
 						 tmp_sg[i].offset,
 						 tmp_sg[i].length, dir);
 	}
-DBGPX(	printk("Submitting %d sectors in %d segments\n", creq->nr_sectors, seg); );
+DBGPX(	printk("Submitting %u sectors in %d segments\n", blk_rq_sectors(creq), seg); );
 	c->req.hdr.sg_cnt = seg;
-	c->req.hdr.blk_cnt = creq->nr_sectors;
+	c->req.hdr.blk_cnt = blk_rq_sectors(creq);
 	c->req.hdr.cmd = (rq_data_dir(creq) == READ) ? IDA_READ : IDA_WRITE;
 	c->type = CMD_RWREQ;
 
@@ -876,27 +995,13 @@ static void start_io(ctlr_info_t *h)
 	}
 }
 
-static inline void complete_buffers(struct bio *bio, int ok)
-{
-	struct bio *xbh;
-	while(bio) {
-		int nr_sectors = bio_sectors(bio);
-
-		xbh = bio->bi_next;
-		bio->bi_next = NULL;
-		
-		blk_finished_io(nr_sectors);
-		bio_endio(bio, nr_sectors << 9, ok ? 0 : -EIO);
-
-		bio = xbh;
-	}
-}
 /*
  * Mark all buffers that cmd was responsible for
  */
 static inline void complete_command(cmdlist_t *cmd, int timeout)
 {
-	int ok=1;
+	struct request *rq = cmd->rq;
+	int error = 0;
 	int i, ddir;
 
 	if (cmd->req.hdr.rcode & RCODE_NONFATAL &&
@@ -908,16 +1013,17 @@ static inline void complete_command(cmdlist_t *cmd, int timeout)
 	if (cmd->req.hdr.rcode & RCODE_FATAL) {
 		printk(KERN_WARNING "Fatal error on ida/c%dd%d\n",
 				cmd->ctlr, cmd->hdr.unit);
-		ok = 0;
+		error = -EIO;
 	}
 	if (cmd->req.hdr.rcode & RCODE_INVREQ) {
 				printk(KERN_WARNING "Invalid request on ida/c%dd%d = (cmd=%x sect=%d cnt=%d sg=%d ret=%x)\n",
 				cmd->ctlr, cmd->hdr.unit, cmd->req.hdr.cmd,
 				cmd->req.hdr.blk, cmd->req.hdr.blk_cnt,
 				cmd->req.hdr.sg_cnt, cmd->req.hdr.rcode);
-		ok = 0;	
+		error = -EIO;
 	}
-	if (timeout) ok = 0;
+	if (timeout)
+		error = -EIO;
 	/* unmap the DMA mapping for all the scatter gather elements */
 	if (cmd->req.hdr.cmd == IDA_READ)
 		ddir = PCI_DMA_FROMDEVICE;
@@ -927,10 +1033,8 @@ static inline void complete_command(cmdlist_t *cmd, int timeout)
                 pci_unmap_page(hba[cmd->ctlr]->pci_dev, cmd->req.sg[i].addr,
 				cmd->req.sg[i].size, ddir);
 
-	complete_buffers(cmd->rq->bio, ok);
-
-        DBGPX(printk("Done with %p\n", cmd->rq););
-	end_that_request_last(cmd->rq);
+	DBGPX(printk("Done with %p\n", rq););
+	__blk_end_request_all(rq, error);
 }
 
 /*
@@ -938,7 +1042,7 @@ static inline void complete_command(cmdlist_t *cmd, int timeout)
  *  Find the command on the completion queue, remove it, tell the OS and
  *  try to queue up more IO
  */
-static irqreturn_t do_ida_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t do_ida_intr(int irq, void *dev_id)
 {
 	ctlr_info_t *h = dev_id;
 	cmdlist_t *c;
@@ -1018,36 +1122,36 @@ static void ida_timer(unsigned long tdata)
 	h->misc_tflags = 0;
 }
 
+static int ida_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+{
+	drv_info_t *drv = get_drv(bdev->bd_disk);
+
+	if (drv->cylinders) {
+		geo->heads = drv->heads;
+		geo->sectors = drv->sectors;
+		geo->cylinders = drv->cylinders;
+	} else {
+		geo->heads = 0xff;
+		geo->sectors = 0x3f;
+		geo->cylinders = drv->nr_blks / (0xff*0x3f);
+	}
+
+	return 0;
+}
+
 /*
  *  ida_ioctl does some miscellaneous stuff like reporting drive geometry,
  *  setting readahead and submitting commands from userspace to the controller.
  */
-static int ida_ioctl(struct inode *inode, struct file *filep, unsigned int cmd, unsigned long arg)
+static int ida_locked_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
 {
-	drv_info_t *drv = get_drv(inode->i_bdev->bd_disk);
-	ctlr_info_t *host = get_host(inode->i_bdev->bd_disk);
+	drv_info_t *drv = get_drv(bdev->bd_disk);
+	ctlr_info_t *host = get_host(bdev->bd_disk);
 	int error;
-	int diskinfo[4];
-	struct hd_geometry *geo = (struct hd_geometry *)arg;
-	ida_ioctl_t *io = (ida_ioctl_t*)arg;
+	ida_ioctl_t __user *io = (ida_ioctl_t __user *)arg;
 	ida_ioctl_t *my_io;
 
 	switch(cmd) {
-	case HDIO_GETGEO:
-		if (drv->cylinders) {
-			diskinfo[0] = drv->heads;
-			diskinfo[1] = drv->sectors;
-			diskinfo[2] = drv->cylinders;
-		} else {
-			diskinfo[0] = 0xff;
-			diskinfo[1] = 0x3f;
-			diskinfo[2] = drv->nr_blks / (0xff*0x3f);
-		}
-		put_user(diskinfo[0], &geo->heads);
-		put_user(diskinfo[1], &geo->sectors);
-		put_user(diskinfo[2], &geo->cylinders);
-		put_user(get_start_sect(inode->i_bdev), &geo->start);
-		return 0;
 	case IDAGETDRVINFO:
 		if (copy_to_user(&io->c.drv, drv, sizeof(drv_info_t)))
 			return -EFAULT;
@@ -1065,7 +1169,7 @@ static int ida_ioctl(struct inode *inode, struct file *filep, unsigned int cmd, 
 		if (error)
 			goto out_passthru;
 		error = -EFAULT;
-		if (copy_to_user(io, &my_io, sizeof(*my_io)))
+		if (copy_to_user(io, my_io, sizeof(*my_io)))
 			goto out_passthru;
 		error = 0;
 out_passthru:
@@ -1073,15 +1177,17 @@ out_passthru:
 		return error;
 	case IDAGETCTLRSIG:
 		if (!arg) return -EINVAL;
-		put_user(host->ctlr_sig, (int*)arg);
+		if (put_user(host->ctlr_sig, (int __user *)arg))
+			return -EFAULT;
 		return 0;
 	case IDAREVALIDATEVOLS:
-		if (iminor(inode) != 0)
+		if (MINOR(bdev->bd_dev) != 0)
 			return -ENXIO;
 		return revalidate_allvol(host);
 	case IDADRIVERVERSION:
 		if (!arg) return -EINVAL;
-		put_user(DRIVER_VERSION, (unsigned long*)arg);
+		if (put_user(DRIVER_VERSION, (unsigned long __user *)arg))
+			return -EFAULT;
 		return 0;
 	case IDAGETPCIINFO:
 	{
@@ -1092,7 +1198,7 @@ out_passthru:
 		pciinfo.bus = host->pci_dev->bus->number;
 		pciinfo.dev_fn = host->pci_dev->devfn;
 		pciinfo.board_id = host->board_id;
-		if(copy_to_user((void *) arg, &pciinfo,  
+		if(copy_to_user((void __user *) arg, &pciinfo,  
 			sizeof( ida_pci_info_struct)))
 				return -EFAULT;
 		return(0);
@@ -1103,6 +1209,19 @@ out_passthru:
 	}
 		
 }
+
+static int ida_ioctl(struct block_device *bdev, fmode_t mode,
+			     unsigned int cmd, unsigned long param)
+{
+	int ret;
+
+	mutex_lock(&cpqarray_mutex);
+	ret = ida_locked_ioctl(bdev, mode, cmd, param);
+	mutex_unlock(&cpqarray_mutex);
+
+	return ret;
+}
+
 /*
  * ida_ctlr_ioctl is for passing commands to the controller from userspace.
  * The command block (io) has already been copied to kernel space for us,
@@ -1136,17 +1255,11 @@ static int ida_ctlr_ioctl(ctlr_info_t *h, int dsk, ida_ioctl_t *io)
 	/* Pre submit processing */
 	switch(io->cmd) {
 	case PASSTHRU_A:
-		p = kmalloc(io->sg[0].size, GFP_KERNEL);
-		if (!p) 
-		{ 
-			error = -ENOMEM; 
-			cmd_free(h, c, 0); 
-			return(error);
-		}
-		if (copy_from_user(p, (void*)io->sg[0].addr, io->sg[0].size)) {
-			kfree(p);
-			cmd_free(h, c, 0); 
-			return -EFAULT;
+		p = memdup_user(io->sg[0].addr, io->sg[0].size);
+		if (IS_ERR(p)) {
+			error = PTR_ERR(p);
+			cmd_free(h, c, 0);
+			return error;
 		}
 		c->req.hdr.blk = pci_map_single(h->pci_dev, &(io->c), 
 				sizeof(ida_ioctl_t), 
@@ -1177,18 +1290,12 @@ static int ida_ctlr_ioctl(ctlr_info_t *h, int dsk, ida_ioctl_t *io)
 	case DIAG_PASS_THRU:
 	case COLLECT_BUFFER:
 	case WRITE_FLASH_ROM:
-		p = kmalloc(io->sg[0].size, GFP_KERNEL);
-		if (!p) 
- 		{ 
-                        error = -ENOMEM; 
-                        cmd_free(h, c, 0);
-                        return(error);
+		p = memdup_user(io->sg[0].addr, io->sg[0].size);
+		if (IS_ERR(p)) {
+			error = PTR_ERR(p);
+			cmd_free(h, c, 0);
+			return error;
                 }
-		if (copy_from_user(p, (void*)io->sg[0].addr, io->sg[0].size)) {
-			kfree(p);
-                        cmd_free(h, c, 0);
-			return -EFAULT;
-		}
 		c->req.sg[0].size = io->sg[0].size;
 		c->req.sg[0].addr = pci_map_single(h->pci_dev, p, 
 			c->req.sg[0].size, PCI_DMA_BIDIRECTIONAL); 
@@ -1225,7 +1332,7 @@ static int ida_ctlr_ioctl(ctlr_info_t *h, int dsk, ida_ioctl_t *io)
 	case DIAG_PASS_THRU:
 	case SENSE_CONTROLLER_PERFORMANCE:
 	case READ_FLASH_ROM:
-		if (copy_to_user((void*)io->sg[0].addr, p, io->sg[0].size)) {
+		if (copy_to_user(io->sg[0].addr, p, io->sg[0].size)) {
 			kfree(p);
 			return -EFAULT;
 		}
@@ -1451,7 +1558,7 @@ static int revalidate_allvol(ctlr_info_t *host)
 		drv_info_t *drv = &host->drv[i];
 		if (i && !drv->nr_blks)
 			continue;
-		blk_queue_hardsect_size(host->queue, drv->blk_size);
+		blk_queue_logical_block_size(host->queue, drv->blk_size);
 		set_capacity(disk, drv->nr_blks);
 		disk->queue = host->queue;
 		disk->private_data = drv;
@@ -1514,7 +1621,7 @@ static void start_fwbk(int ctlr)
 		" processing\n");
 	/* Command does not return anything, but idasend command needs a 
 		buffer */
-	id_ctlr_buf = (id_ctlr_t *)kmalloc(sizeof(id_ctlr_t), GFP_KERNEL);
+	id_ctlr_buf = kmalloc(sizeof(id_ctlr_t), GFP_KERNEL);
 	if(id_ctlr_buf==NULL)
 	{
 		printk(KERN_WARNING "cpqarray: Out of memory. "
@@ -1549,44 +1656,29 @@ static void getgeometry(int ctlr)
 
 	info_p->log_drv_map = 0;	
 	
-	id_ldrive = (id_log_drv_t *)kmalloc(sizeof(id_log_drv_t), GFP_KERNEL);
-	if(id_ldrive == NULL)
-	{
+	id_ldrive = kzalloc(sizeof(id_log_drv_t), GFP_KERNEL);
+	if (!id_ldrive)	{
 		printk( KERN_ERR "cpqarray:  out of memory.\n");
-		return;
+		goto err_0;
 	}
 
-	id_ctlr_buf = (id_ctlr_t *)kmalloc(sizeof(id_ctlr_t), GFP_KERNEL);
-	if(id_ctlr_buf == NULL)
-	{
-		kfree(id_ldrive);
+	id_ctlr_buf = kzalloc(sizeof(id_ctlr_t), GFP_KERNEL);
+	if (!id_ctlr_buf) {
 		printk( KERN_ERR "cpqarray:  out of memory.\n");
-		return;
+		goto err_1;
 	}
 
-	id_lstatus_buf = (sense_log_drv_stat_t *)kmalloc(sizeof(sense_log_drv_stat_t), GFP_KERNEL);
-	if(id_lstatus_buf == NULL)
-	{
-		kfree(id_ctlr_buf);
-		kfree(id_ldrive);
+	id_lstatus_buf = kzalloc(sizeof(sense_log_drv_stat_t), GFP_KERNEL);
+	if (!id_lstatus_buf) {
 		printk( KERN_ERR "cpqarray:  out of memory.\n");
-		return;
+		goto err_2;
 	}
 
-	sense_config_buf = (config_t *)kmalloc(sizeof(config_t), GFP_KERNEL);
-	if(sense_config_buf == NULL)
-	{
-		kfree(id_lstatus_buf);
-		kfree(id_ctlr_buf);
-		kfree(id_ldrive);
+	sense_config_buf = kzalloc(sizeof(config_t), GFP_KERNEL);
+	if (!sense_config_buf) {
 		printk( KERN_ERR "cpqarray:  out of memory.\n");
-		return;
+		goto err_3;
 	}
-
-	memset(id_ldrive, 0, sizeof(id_log_drv_t));
-	memset(id_ctlr_buf, 0, sizeof(id_ctlr_t));
-	memset(id_lstatus_buf, 0, sizeof(sense_log_drv_stat_t));
-	memset(sense_config_buf, 0, sizeof(config_t));
 
 	info_p->phys_drives = 0;
 	info_p->log_drv_map = 0;
@@ -1601,16 +1693,11 @@ static void getgeometry(int ctlr)
 		 * so the idastubopen will fail on all logical drives
 		 * on the controller.
 		 */
-		 /* Free all the buffers and return */ 
 		printk(KERN_ERR "cpqarray: error sending ID controller\n");
-		kfree(sense_config_buf);
-                kfree(id_lstatus_buf);
-                kfree(id_ctlr_buf);
-                kfree(id_ldrive);
-                return;
+                goto err_4;
         }
 
-	info_p->log_drives = id_ctlr_buf->nr_drvs;;
+	info_p->log_drives = id_ctlr_buf->nr_drvs;
 	for(i=0;i<4;i++)
 		info_p->firm_rev[i] = id_ctlr_buf->firm_rev[i];
 	info_p->ctlr_sig = id_ctlr_buf->cfg_sig;
@@ -1633,8 +1720,6 @@ static void getgeometry(int ctlr)
 	     (log_index < id_ctlr_buf->nr_drvs)
 	     && (log_unit < NWD);
 	     log_unit++) {
-		struct gendisk *disk = ida_gendisk[ctlr][log_unit];
-
 		size = sizeof(sense_log_drv_stat_t);
 
 		/*
@@ -1655,12 +1740,7 @@ static void getgeometry(int ctlr)
 				" failed to report status of logical drive %d\n"
 			 "Access to this controller has been disabled\n",
 				ctlr, log_unit);
-			/* Free all the buffers and return */
-                	kfree(sense_config_buf);
-                	kfree(id_lstatus_buf);
-                	kfree(id_ctlr_buf);
-                	kfree(id_ldrive);
-                	return;
+                	goto err_4;
 		}
 		/*
 		   Make sure the logical drive is configured
@@ -1689,17 +1769,9 @@ static void getgeometry(int ctlr)
 				 sizeof(config_t), 0, 0, log_unit);
 				if (ret_code == IO_ERROR) {
 					info_p->log_drv_map = 0;
-					/* Free all the buffers and return */
                 			printk(KERN_ERR "cpqarray: error sending sense config\n");
-                			kfree(sense_config_buf);
-                			kfree(id_lstatus_buf);
-                			kfree(id_ctlr_buf);
-                			kfree(id_ldrive);
-                			return;
-
+                			goto err_4;
 				}
-
-				sprintf(disk->devfs_name, "ida/c%dd%d", ctlr, log_unit);
 
 				info_p->phys_drives =
 				    sense_config_buf->ctlr_phys_drv;
@@ -1713,12 +1785,36 @@ static void getgeometry(int ctlr)
 			log_index = log_index + 1;
 		}		/* end of if logical drive configured */
 	}			/* end of for log_unit */
-	kfree(sense_config_buf);
-  	kfree(id_ldrive);
-  	kfree(id_lstatus_buf);
-	kfree(id_ctlr_buf);
-	return;
 
+	/* Free all the buffers and return */
+err_4:
+	kfree(sense_config_buf);
+err_3:
+  	kfree(id_lstatus_buf);
+err_2:
+	kfree(id_ctlr_buf);
+err_1:
+  	kfree(id_ldrive);
+err_0:
+	return;
+}
+
+static void __exit cpqarray_exit(void)
+{
+	int i;
+
+	pci_unregister_driver(&cpqarray_pci_driver);
+
+	/* Double check that all controller entries have been removed */
+	for(i=0; i<MAX_CTLR; i++) {
+		if (hba[i] != NULL) {
+			printk(KERN_WARNING "cpqarray: Removing EISA "
+					"controller %d\n", i);
+			cpqarray_remove_one_eisa(i);
+		}
+	}
+
+	remove_proc_entry("driver/cpqarray", NULL);
 }
 
 module_init(cpqarray_init)

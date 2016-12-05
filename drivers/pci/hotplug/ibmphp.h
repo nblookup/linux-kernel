@@ -30,11 +30,11 @@
  *
  */
 
-#include "pci_hotplug.h"
+#include <linux/pci_hotplug.h>
 
 extern int ibmphp_debug;
 
-#if !defined(CONFIG_HOTPLUG_PCI_IBM_MODULE)
+#if !defined(MODULE)
 	#define MY_NAME "ibmphpd"
 #else
 	#define MY_NAME THIS_MODULE->name
@@ -196,7 +196,7 @@ struct ebda_hpc_bus {
 
 
 /********************************************************************
-*   THREE TYPE OF HOT PLUG CONTROLER                                *
+*   THREE TYPE OF HOT PLUG CONTROLLER                                *
 ********************************************************************/
 
 struct isa_ctlr_access {
@@ -271,7 +271,6 @@ struct bus_info {
 ***********************************************************/
 extern struct list_head ibmphp_ebda_pci_rsrc_head;
 extern struct list_head ibmphp_slot_head;
-extern struct list_head ibmphp_res_head;
 /***********************************************************
 * FUNCTION PROTOTYPES                                      *
 ***********************************************************/
@@ -407,8 +406,6 @@ extern void ibmphp_hpc_stop_poll_thread (void);
 //----------------------------------------------------------------------------
 // HPC return codes
 //----------------------------------------------------------------------------
-#define FALSE				0x00
-#define TRUE				0x01
 #define HPC_ERROR			0xFF
 
 //-----------------------------------------------------------------------------
@@ -710,17 +707,16 @@ struct slot {
 	u8 device;
 	u8 number;
 	u8 real_physical_slot_num;
-	char name[100];
 	u32 capabilities;
 	u8 supported_speed;
 	u8 supported_bus_mode;
+	u8 flag;		/* this is for disable slot and polling */
+	u8 ctlr_index;
 	struct hotplug_slot *hotplug_slot;
 	struct controller *ctrl;
 	struct pci_func *func;
 	u8 irq[4];
-	u8 flag;		/* this is for disable slot and polling */
 	int bit_mode;		/* 0 = 32, 1 = 64 */
-	u8 ctlr_index;
 	struct bus_info *bus_on;
 	struct list_head ibm_slot_list;
 	u8 status;
@@ -754,18 +750,11 @@ struct controller {
 /* Functions */
 
 extern int ibmphp_init_devno (struct slot **);	/* This function is called from EBDA, so we need it not be static */
-extern int ibmphp_disable_slot (struct hotplug_slot *);	/* This function is called from HPC, so we need it to not be static */
 extern int ibmphp_do_disable_slot (struct slot *slot_cur);
 extern int ibmphp_update_slot_info (struct slot *);	/* This function is called from HPC, so we need it to not be be static */
 extern int ibmphp_configure_card (struct pci_func *, u8);
 extern int ibmphp_unconfigure_card (struct slot **, int);
 extern struct hotplug_slot_ops ibmphp_hotplug_slot_ops;
-
-static inline void long_delay (int delay)
-{
-	set_current_state (TASK_INTERRUPTIBLE);
-	schedule_timeout (delay);
-}
 
 #endif				//__IBMPHP_H
 

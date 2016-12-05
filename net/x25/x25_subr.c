@@ -19,27 +19,16 @@
  *	mar/20/00	Daniela Squassoni Disabling/enabling of facilities
  *					  negotiation.
  *	jun/24/01	Arnaldo C. Melo	  use skb_queue_purge, cleanups
+ *	apr/04/15	Shaun Pereira		Fast select with no
+ *						restriction on response.
  */
 
-#include <linux/errno.h>
-#include <linux/types.h>
-#include <linux/socket.h>
-#include <linux/in.h>
+#include <linux/slab.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/timer.h>
 #include <linux/string.h>
-#include <linux/sockios.h>
-#include <linux/net.h>
-#include <linux/inet.h>
-#include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/tcp.h>
-#include <asm/system.h>
-#include <linux/fcntl.h>
-#include <linux/mm.h>
-#include <linux/interrupt.h>
+#include <net/tcp_states.h>
 #include <net/x25.h>
 
 /*
@@ -47,7 +36,7 @@
  */
 void x25_clear_queues(struct sock *sk)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 
 	skb_queue_purge(&sk->sk_write_queue);
 	skb_queue_purge(&x25->ack_queue);
@@ -65,7 +54,7 @@ void x25_clear_queues(struct sock *sk)
 void x25_frames_acked(struct sock *sk, unsigned short nr)
 {
 	struct sk_buff *skb;
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 	int modulus = x25->neighbour->extended ? X25_EMODULUS : X25_SMODULUS;
 
 	/*
@@ -92,7 +81,7 @@ void x25_requeue_frames(struct sock *sk)
 		if (!skb_prev)
 			skb_queue_head(&sk->sk_write_queue, skb);
 		else
-			skb_append(skb_prev, skb);
+			skb_append(skb_prev, skb, &sk->sk_write_queue);
 		skb_prev = skb;
 	}
 }
@@ -103,7 +92,7 @@ void x25_requeue_frames(struct sock *sk)
  */
 int x25_validate_nr(struct sock *sk, unsigned short nr)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 	unsigned short vc = x25->va;
 	int modulus = x25->neighbour->extended ? X25_EMODULUS : X25_SMODULUS;
 
@@ -122,7 +111,7 @@ int x25_validate_nr(struct sock *sk, unsigned short nr)
  */
 void x25_write_internal(struct sock *sk, int frametype)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 	struct sk_buff *skb;
 	unsigned char  *dptr;
 	unsigned char  facilities[X25_MAX_FAC_LEN];
@@ -141,8 +130,12 @@ void x25_write_internal(struct sock *sk, int frametype)
 			len += 1 + X25_ADDR_LEN + X25_MAX_FAC_LEN +
 			       X25_MAX_CUD_LEN;
 			break;
-		case X25_CALL_ACCEPTED:
-			len += 1 + X25_MAX_FAC_LEN + X25_MAX_CUD_LEN;
+		case X25_CALL_ACCEPTED: /* fast sel with no restr on resp */
+			if(x25->facilities.reverse & 0x80) {
+				len += 1 + X25_MAX_FAC_LEN + X25_MAX_CUD_LEN;
+			} else {
+				len += 1 + X25_MAX_FAC_LEN;
+			}
 			break;
 		case X25_CLEAR_REQUEST:
 		case X25_RESET_REQUEST:
@@ -198,8 +191,9 @@ void x25_write_internal(struct sock *sk, int frametype)
 			dptr    = skb_put(skb, len);
 			memcpy(dptr, addresses, len);
 			len     = x25_create_facilities(facilities,
-							&x25->facilities,
-					     x25->neighbour->global_facil_mask);
+					&x25->facilities,
+					&x25->dte_facilities,
+					x25->neighbour->global_facil_mask);
 			dptr    = skb_put(skb, len);
 			memcpy(dptr, facilities, len);
 			dptr = skb_put(skb, x25->calluserdata.cudlength);
@@ -214,16 +208,30 @@ void x25_write_internal(struct sock *sk, int frametype)
 			*dptr++ = 0x00;		/* Address lengths */
 			len     = x25_create_facilities(facilities,
 							&x25->facilities,
+							&x25->dte_facilities,
 							x25->vc_facil_mask);
 			dptr    = skb_put(skb, len);
 			memcpy(dptr, facilities, len);
-			dptr = skb_put(skb, x25->calluserdata.cudlength);
-			memcpy(dptr, x25->calluserdata.cuddata,
-			       x25->calluserdata.cudlength);
+
+			/* fast select with no restriction on response
+				allows call user data. Userland must
+				ensure it is ours and not theirs */
+			if(x25->facilities.reverse & 0x80) {
+				dptr = skb_put(skb,
+					x25->calluserdata.cudlength);
+				memcpy(dptr, x25->calluserdata.cuddata,
+				       x25->calluserdata.cudlength);
+			}
 			x25->calluserdata.cudlength = 0;
 			break;
 
 		case X25_CLEAR_REQUEST:
+			dptr    = skb_put(skb, 3);
+			*dptr++ = frametype;
+			*dptr++ = x25->causediag.cause;
+			*dptr++ = x25->causediag.diagnostic;
+			break;
+
 		case X25_RESET_REQUEST:
 			dptr    = skb_put(skb, 3);
 			*dptr++ = frametype;
@@ -262,7 +270,7 @@ void x25_write_internal(struct sock *sk, int frametype)
 int x25_decode(struct sock *sk, struct sk_buff *skb, int *ns, int *nr, int *q,
 	       int *d, int *m)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 	unsigned char *frame = skb->data;
 
 	*ns = *nr = *q = *d = *m = 0;
@@ -329,7 +337,7 @@ int x25_decode(struct sock *sk, struct sk_buff *skb, int *ns, int *nr, int *q,
 void x25_disconnect(struct sock *sk, int reason, unsigned char cause,
 		    unsigned char diagnostic)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 
 	x25_clear_queues(sk);
 	x25_stop_timer(sk);
@@ -356,9 +364,9 @@ void x25_disconnect(struct sock *sk, int reason, unsigned char cause,
  */
 void x25_check_rbuf(struct sock *sk)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 
-	if (atomic_read(&sk->sk_rmem_alloc) < (sk->sk_rcvbuf / 2) &&
+	if (atomic_read(&sk->sk_rmem_alloc) < (sk->sk_rcvbuf >> 1) &&
 	    (x25->condition & X25_COND_OWN_RX_BUSY)) {
 		x25->condition &= ~X25_COND_OWN_RX_BUSY;
 		x25->condition &= ~X25_COND_ACK_PENDING;
@@ -367,3 +375,4 @@ void x25_check_rbuf(struct sock *sk)
 		x25_stop_timer(sk);
 	}
 }
+

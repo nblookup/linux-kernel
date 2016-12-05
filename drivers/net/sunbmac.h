@@ -185,7 +185,7 @@
 #define BIGMAC_RXCFG_ENABLE    0x00000001 /* Enable the receiver                      */
 #define BIGMAC_RXCFG_FIFO      0x0000000e /* Default rx fthresh...                    */
 #define BIGMAC_RXCFG_PSTRIP    0x00000020 /* Pad byte strip enable                    */
-#define BIGMAC_RXCFG_PMISC     0x00000040 /* Enable promiscous mode                   */
+#define BIGMAC_RXCFG_PMISC     0x00000040 /* Enable promiscuous mode                   */
 #define BIGMAC_RXCFG_DERR      0x00000080 /* Disable error checking                   */
 #define BIGMAC_RXCFG_DCRCS     0x00000100 /* Disable CRC stripping                    */
 #define BIGMAC_RXCFG_ME        0x00000200 /* Receive packets addressed to me          */
@@ -303,10 +303,10 @@ enum bigmac_timer_state {
 };
 
 struct bigmac {
-	unsigned long	gregs;	/* QEC Global Registers               */
-	unsigned long	creg;	/* QEC BigMAC Channel Registers       */
-	unsigned long	bregs;	/* BigMAC Registers                   */
-	unsigned long	tregs;	/* BigMAC Transceiver                 */
+	void __iomem	*gregs;	/* QEC Global Registers               */
+	void __iomem	*creg;	/* QEC BigMAC Channel Registers       */
+	void __iomem	*bregs;	/* BigMAC Registers                   */
+	void __iomem	*tregs;	/* BigMAC Transceiver                 */
 	struct bmac_init_block	*bmac_block;	/* RX and TX descriptors */
 	__u32			 bblock_dvma;	/* RX and TX descriptors */
 
@@ -329,17 +329,16 @@ struct bigmac {
 	unsigned int		timer_ticks;
 
 	struct net_device_stats	enet_stats;
-	struct sbus_dev		*qec_sdev;
-	struct sbus_dev		*bigmac_sdev;
+	struct platform_device	*qec_op;
+	struct platform_device	*bigmac_op;
 	struct net_device	*dev;
-	struct bigmac		*next_module;
 };
 
 /* We use this to acquire receive skb's that we can DMA directly into. */
 #define ALIGNED_RX_SKB_ADDR(addr) \
         ((((unsigned long)(addr) + (64 - 1)) & ~(64 - 1)) - (unsigned long)(addr))
 
-static inline struct sk_buff *big_mac_alloc_skb(unsigned int length, int gfp_flags)
+static inline struct sk_buff *big_mac_alloc_skb(unsigned int length, gfp_t gfp_flags)
 {
 	struct sk_buff *skb;
 

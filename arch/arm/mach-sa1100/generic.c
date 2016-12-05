@@ -9,7 +9,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -17,14 +16,20 @@
 #include <linux/pm.h>
 #include <linux/cpufreq.h>
 #include <linux/ioport.h>
+#include <linux/platform_device.h>
 
-#include <asm/hardware.h>
+#include <asm/div64.h>
+#include <mach/hardware.h>
 #include <asm/system.h>
-#include <asm/pgtable.h>
 #include <asm/mach/map.h>
+#include <asm/mach/flash.h>
 #include <asm/irq.h>
+#include <asm/gpio.h>
 
 #include "generic.h"
+
+unsigned int reset_status;
+EXPORT_SYMBOL(reset_status);
 
 #define NR_FREQS	16
 
@@ -34,7 +39,7 @@
 static const unsigned short cclk_frequency_100khz[NR_FREQS] = {
 	 590,	/*  59.0 MHz */
 	 737,	/*  73.7 MHz */
-	 885, 	/*  88.5 MHz */
+	 885,	/*  88.5 MHz */
 	1032,	/* 103.2 MHz */
 	1180,	/* 118.0 MHz */
 	1327,	/* 132.7 MHz */
@@ -44,13 +49,12 @@ static const unsigned short cclk_frequency_100khz[NR_FREQS] = {
 	1917,	/* 191.7 MHz */
 	2064,	/* 206.4 MHz */
 	2212,	/* 221.2 MHz */
-	2359,   /* 235.9 MHz */
-	2507,   /* 250.7 MHz */
-	2654,   /* 265.4 MHz */
-	2802    /* 280.2 MHz */
+	2359,	/* 235.9 MHz */
+	2507,	/* 250.7 MHz */
+	2654,	/* 265.4 MHz */
+	2802	/* 280.2 MHz */
 };
 
-#if defined(CONFIG_CPU_FREQ_SA1100) || defined(CONFIG_CPU_FREQ_SA1110)
 /* rounds up(!)  */
 unsigned int sa11x0_freq_to_ppcr(unsigned int khz)
 {
@@ -95,20 +99,12 @@ int sa11x0_verify_speed(struct cpufreq_policy *policy)
 	return 0;
 }
 
-unsigned int sa11x0_getspeed(void)
+unsigned int sa11x0_getspeed(unsigned int cpu)
 {
+	if (cpu)
+		return 0;
 	return cclk_frequency_100khz[PPCR & 0xf] * 100;
 }
-#else
-/*
- * We still need to provide this so building without cpufreq works.
- */ 
-unsigned int cpufreq_get(unsigned int cpu)
-{
-	return cclk_frequency_100khz[PPCR & 0xf] * 100;
-}
-EXPORT_SYMBOL(cpufreq_get);
-#endif
 
 /*
  * Default power-off for SA1100
@@ -130,11 +126,27 @@ static void sa1100_power_off(void)
 	PMCR = PMCR_SF;
 }
 
+static void sa11x0_register_device(struct platform_device *dev, void *data)
+{
+	int err;
+	dev->dev.platform_data = data;
+	err = platform_device_register(dev);
+	if (err)
+		printk(KERN_ERR "Unable to register device %s: %d\n",
+			dev->name, err);
+}
+
+
 static struct resource sa11x0udc_resources[] = {
 	[0] = {
-		.start	= 0x80000000,
-		.end	= 0x8000ffff,
+		.start	= __PREG(Ser0UDCCR),
+		.end	= __PREG(Ser0UDCCR) + 0xffff,
 		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= IRQ_Ser0UDC,
+		.end	= IRQ_Ser0UDC,
+		.flags	= IORESOURCE_IRQ,
 	},
 };
 
@@ -142,28 +154,85 @@ static u64 sa11x0udc_dma_mask = 0xffffffffUL;
 
 static struct platform_device sa11x0udc_device = {
 	.name		= "sa11x0-udc",
-	.id		= 0,
+	.id		= -1,
 	.dev		= {
 		.dma_mask = &sa11x0udc_dma_mask,
+		.coherent_dma_mask = 0xffffffff,
 	},
 	.num_resources	= ARRAY_SIZE(sa11x0udc_resources),
 	.resource	= sa11x0udc_resources,
 };
 
-static struct resource sa11x0mcp_resources[] = {
+static struct resource sa11x0uart1_resources[] = {
 	[0] = {
-		.start	= 0x80060000,
-		.end	= 0x8006ffff,
+		.start	= __PREG(Ser1UTCR0),
+		.end	= __PREG(Ser1UTCR0) + 0xffff,
 		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= IRQ_Ser1UART,
+		.end	= IRQ_Ser1UART,
+		.flags	= IORESOURCE_IRQ,
 	},
 };
 
+static struct platform_device sa11x0uart1_device = {
+	.name		= "sa11x0-uart",
+	.id		= 1,
+	.num_resources	= ARRAY_SIZE(sa11x0uart1_resources),
+	.resource	= sa11x0uart1_resources,
+};
+
+static struct resource sa11x0uart3_resources[] = {
+	[0] = {
+		.start	= __PREG(Ser3UTCR0),
+		.end	= __PREG(Ser3UTCR0) + 0xffff,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= IRQ_Ser3UART,
+		.end	= IRQ_Ser3UART,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device sa11x0uart3_device = {
+	.name		= "sa11x0-uart",
+	.id		= 3,
+	.num_resources	= ARRAY_SIZE(sa11x0uart3_resources),
+	.resource	= sa11x0uart3_resources,
+};
+
+static struct resource sa11x0mcp_resources[] = {
+	[0] = {
+		.start	= __PREG(Ser4MCCR0),
+		.end	= __PREG(Ser4MCCR0) + 0xffff,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= IRQ_Ser4MCP,
+		.end	= IRQ_Ser4MCP,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static u64 sa11x0mcp_dma_mask = 0xffffffffUL;
+
 static struct platform_device sa11x0mcp_device = {
 	.name		= "sa11x0-mcp",
-	.id		= 0,
+	.id		= -1,
+	.dev = {
+		.dma_mask = &sa11x0mcp_dma_mask,
+		.coherent_dma_mask = 0xffffffff,
+	},
 	.num_resources	= ARRAY_SIZE(sa11x0mcp_resources),
 	.resource	= sa11x0mcp_resources,
 };
+
+void sa11x0_register_mcp(struct mcp_plat_data *data)
+{
+	sa11x0_register_device(&sa11x0mcp_device, data);
+}
 
 static struct resource sa11x0ssp_resources[] = {
 	[0] = {
@@ -171,15 +240,21 @@ static struct resource sa11x0ssp_resources[] = {
 		.end	= 0x8007ffff,
 		.flags	= IORESOURCE_MEM,
 	},
+	[1] = {
+		.start	= IRQ_Ser4SSP,
+		.end	= IRQ_Ser4SSP,
+		.flags	= IORESOURCE_IRQ,
+	},
 };
 
 static u64 sa11x0ssp_dma_mask = 0xffffffffUL;
 
 static struct platform_device sa11x0ssp_device = {
 	.name		= "sa11x0-ssp",
-	.id		= 0,
+	.id		= -1,
 	.dev = {
 		.dma_mask = &sa11x0ssp_dma_mask,
+		.coherent_dma_mask = 0xffffffff,
 	},
 	.num_resources	= ARRAY_SIZE(sa11x0ssp_resources),
 	.resource	= sa11x0ssp_resources,
@@ -200,28 +275,83 @@ static struct resource sa11x0fb_resources[] = {
 
 static struct platform_device sa11x0fb_device = {
 	.name		= "sa11x0-fb",
-	.id		= 0,
+	.id		= -1,
+	.dev = {
+		.coherent_dma_mask = 0xffffffff,
+	},
 	.num_resources	= ARRAY_SIZE(sa11x0fb_resources),
 	.resource	= sa11x0fb_resources,
 };
 
 static struct platform_device sa11x0pcmcia_device = {
 	.name		= "sa11x0-pcmcia",
-	.id		= 0,
+	.id		= -1,
+};
+
+static struct platform_device sa11x0mtd_device = {
+	.name		= "sa1100-mtd",
+	.id		= -1,
+};
+
+void sa11x0_register_mtd(struct flash_platform_data *flash,
+			 struct resource *res, int nr)
+{
+	flash->name = "sa1100";
+	sa11x0mtd_device.resource = res;
+	sa11x0mtd_device.num_resources = nr;
+	sa11x0_register_device(&sa11x0mtd_device, flash);
+}
+
+static struct resource sa11x0ir_resources[] = {
+	{
+		.start	= __PREG(Ser2UTCR0),
+		.end	= __PREG(Ser2UTCR0) + 0x24 - 1,
+		.flags	= IORESOURCE_MEM,
+	}, {
+		.start	= __PREG(Ser2HSCR0),
+		.end	= __PREG(Ser2HSCR0) + 0x1c - 1,
+		.flags	= IORESOURCE_MEM,
+	}, {
+		.start	= __PREG(Ser2HSCR2),
+		.end	= __PREG(Ser2HSCR2) + 0x04 - 1,
+		.flags	= IORESOURCE_MEM,
+	}, {
+		.start	= IRQ_Ser2ICP,
+		.end	= IRQ_Ser2ICP,
+		.flags	= IORESOURCE_IRQ,
+	}
+};
+
+static struct platform_device sa11x0ir_device = {
+	.name		= "sa11x0-ir",
+	.id		= -1,
+	.num_resources	= ARRAY_SIZE(sa11x0ir_resources),
+	.resource	= sa11x0ir_resources,
+};
+
+void sa11x0_register_irda(struct irda_platform_data *irda)
+{
+	sa11x0_register_device(&sa11x0ir_device, irda);
+}
+
+static struct platform_device sa11x0rtc_device = {
+	.name		= "sa1100-rtc",
+	.id		= -1,
 };
 
 static struct platform_device *sa11x0_devices[] __initdata = {
 	&sa11x0udc_device,
-	&sa11x0mcp_device,
+	&sa11x0uart1_device,
+	&sa11x0uart3_device,
 	&sa11x0ssp_device,
 	&sa11x0pcmcia_device,
 	&sa11x0fb_device,
+	&sa11x0rtc_device,
 };
 
 static int __init sa1100_init(void)
 {
 	pm_power_off = sa1100_power_off;
-
 	return platform_add_devices(sa11x0_devices, ARRAY_SIZE(sa11x0_devices));
 }
 
@@ -253,11 +383,27 @@ EXPORT_SYMBOL(sa1100fb_lcd_power);
  */
 
 static struct map_desc standard_io_desc[] __initdata = {
- /* virtual     physical    length      type */
-  { 0xf8000000, 0x80000000, 0x00100000, MT_DEVICE }, /* PCM */
-  { 0xfa000000, 0x90000000, 0x00100000, MT_DEVICE }, /* SCM */
-  { 0xfc000000, 0xa0000000, 0x00100000, MT_DEVICE }, /* MER */
-  { 0xfe000000, 0xb0000000, 0x00200000, MT_DEVICE }  /* LCD + DMA */
+	{	/* PCM */
+		.virtual	=  0xf8000000,
+		.pfn		= __phys_to_pfn(0x80000000),
+		.length		= 0x00100000,
+		.type		= MT_DEVICE
+	}, {	/* SCM */
+		.virtual	=  0xfa000000,
+		.pfn		= __phys_to_pfn(0x90000000),
+		.length		= 0x00100000,
+		.type		= MT_DEVICE
+	}, {	/* MER */
+		.virtual	=  0xfc000000,
+		.pfn		= __phys_to_pfn(0xa0000000),
+		.length		= 0x00100000,
+		.type		= MT_DEVICE
+	}, {	/* LCD + DMA */
+		.virtual	=  0xfe000000,
+		.pfn		= __phys_to_pfn(0xb0000000),
+		.length		= 0x00200000,
+		.type		= MT_DEVICE
+	},
 };
 
 void __init sa1100_map_io(void)
@@ -290,7 +436,7 @@ void __init sa1110_mb_disable(void)
  * If the system is going to use the SA-1111 DMA engines, set up
  * the memory bus request/grant pins.
  */
-void __init sa1110_mb_enable(void)
+void __devinit sa1110_mb_enable(void)
 {
 	unsigned long flags;
 

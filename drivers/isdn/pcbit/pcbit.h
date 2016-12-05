@@ -45,13 +45,13 @@ struct msn_entry {
 struct pcbit_dev {
 	/* board */
 
-	volatile unsigned char* sh_mem;		/* RDP address	*/
+	volatile unsigned char __iomem *sh_mem;		/* RDP address	*/
 	unsigned long ph_mem;
 	unsigned int irq;
 	unsigned int id;
 	unsigned int interrupt;			/* set during interrupt 
 						   processing */
-	
+	spinlock_t lock;
 	/* isdn4linux */
 
 	struct msn_entry * msn_list;		/* ISDN address list */
@@ -79,8 +79,8 @@ struct pcbit_dev {
 	u_char w_busy;
 	u_char r_busy;
 
-	volatile unsigned char *readptr;
-	volatile unsigned char *writeptr;
+	volatile unsigned char __iomem *readptr;
+	volatile unsigned char __iomem *writeptr;
 
 	ushort loadptr;
 
@@ -165,5 +165,13 @@ struct pcbit_ioctl {
 #define L2_STARTING 4
 #define L2_RUNNING  5
 #define L2_ERROR    6
+
+void pcbit_deliver(struct work_struct *work);
+int pcbit_init_dev(int board, int mem_base, int irq);
+void pcbit_terminate(int board);
+void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg, struct sk_buff * skb,
+		      ushort hdr_len, ushort refnum);
+void pcbit_state_change(struct pcbit_dev * dev, struct pcbit_chan * chan,
+			unsigned short i, unsigned short ev, unsigned short f);
 
 #endif

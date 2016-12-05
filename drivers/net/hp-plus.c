@@ -37,6 +37,8 @@ static const char version[] =
 
 #include "8390.h"
 
+#define DRV_NAME "hp-plus"
+
 /* A zero-terminated list of I/O addresses to be probed. */
 static unsigned int hpplus_portlist[] __initdata =
 {0x200, 0x240, 0x280, 0x2C0, 0x300, 0x320, 0x340, 0};
@@ -92,7 +94,6 @@ enum HP_Option {
 	EnableIRQ = 4, FakeIntr = 8, BootROMEnb = 0x10, IOEnb = 0x20,
 	MemEnable = 0x40, ZeroWait = 0x80, MemDisable = 0x1000, };
 
-int hp_plus_probe(struct net_device *dev);
 static int hpp_probe1(struct net_device *dev, int ioaddr);
 
 static void hpp_reset_8390(struct net_device *dev);
@@ -111,28 +112,67 @@ static void hpp_io_block_output(struct net_device *dev, int count,
 static void hpp_io_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 						  int ring_page);
 
-
+
 /*	Probe a list of addresses for an HP LAN+ adaptor.
 	This routine is almost boilerplate. */
 
-int __init hp_plus_probe(struct net_device *dev)
+static int __init do_hpp_probe(struct net_device *dev)
 {
 	int i;
 	int base_addr = dev->base_addr;
-
-	SET_MODULE_OWNER(dev);
+	int irq = dev->irq;
 
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return hpp_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
 		return -ENXIO;
 
-	for (i = 0; hpplus_portlist[i]; i++)
+	for (i = 0; hpplus_portlist[i]; i++) {
 		if (hpp_probe1(dev, hpplus_portlist[i]) == 0)
 			return 0;
+		dev->irq = irq;
+	}
 
 	return -ENODEV;
 }
+
+#ifndef MODULE
+struct net_device * __init hp_plus_probe(int unit)
+{
+	struct net_device *dev = alloc_eip_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_hpp_probe(dev);
+	if (err)
+		goto out;
+	return dev;
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
+
+static const struct net_device_ops hpp_netdev_ops = {
+	.ndo_open		= hpp_open,
+	.ndo_stop		= hpp_close,
+	.ndo_start_xmit		= eip_start_xmit,
+	.ndo_tx_timeout		= eip_tx_timeout,
+	.ndo_get_stats		= eip_get_stats,
+	.ndo_set_multicast_list = eip_set_multicast_list,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= eip_poll,
+#endif
+};
+
 
 /* Do the interesting part of the probe at a single address. */
 static int __init hpp_probe1(struct net_device *dev, int ioaddr)
@@ -143,12 +183,12 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	int mem_start;
 	static unsigned version_printed;
 
-	if (!request_region(ioaddr, HP_IO_EXTENT, dev->name))
+	if (!request_region(ioaddr, HP_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
 
 	/* Check for the HP+ signature, 50 48 0x 53. */
-	if (inw(ioaddr + HP_ID) != 0x4850
-		|| (inw(ioaddr + HP_PAGING) & 0xfff0) != 0x5300) {
+	if (inw(ioaddr + HP_ID) != 0x4850 ||
+	    (inw(ioaddr + HP_PAGING) & 0xfff0) != 0x5300) {
 		retval = -ENODEV;
 		goto out;
 	}
@@ -156,7 +196,7 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	if (ei_debug  &&  version_printed++ == 0)
 		printk(version);
 
-	printk("%s: %s at %#3x,", dev->name, name, ioaddr);
+	printk("%s: %s at %#3x, ", dev->name, name, ioaddr);
 
 	/* Retrieve and checksum the station address. */
 	outw(MAC_Page, ioaddr + HP_PAGING);
@@ -165,9 +205,10 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 		unsigned char inval = inb(ioaddr + 8 + i);
 		dev->dev_addr[i] = inval;
 		checksum += inval;
-		printk(" %2.2x", inval);
 	}
 	checksum += inb(ioaddr + 14);
+
+	printk("%pM", dev->dev_addr);
 
 	if (checksum != 0xff) {
 		printk(" bad checksum %2.2x.\n", checksum);
@@ -178,13 +219,6 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 		outw(ID_Page, ioaddr + HP_PAGING);
 		printk(" ID %4.4x", inw(ioaddr + 12));
 	}
-
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk ("hp-plus.c: unable to allocate memory for dev->priv.\n");
-		retval = -ENOMEM;
-		goto out;
-	 }
 
 	/* Read the IRQ line. */
 	outw(HW_Page, ioaddr + HP_PAGING);
@@ -203,18 +237,17 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	}
 
 	/* Set the wrap registers for string I/O reads.   */
-	outw((HP_START_PG + TX_2X_PAGES) | ((HP_STOP_PG - 1) << 8), ioaddr + 14);
+	outw((HP_START_PG + TX_PAGES/2) | ((HP_STOP_PG - 1) << 8), ioaddr + 14);
 
 	/* Set the base address to point to the NIC, not the "real" base! */
 	dev->base_addr = ioaddr + NIC_OFFSET;
 
-	dev->open = &hpp_open;
-	dev->stop = &hpp_close;
+	dev->netdev_ops = &hpp_netdev_ops;
 
 	ei_status.name = name;
 	ei_status.word16 = 0;		/* Agggghhhhh! Debug time: 2 days! */
 	ei_status.tx_start_page = HP_START_PG;
-	ei_status.rx_start_page = HP_START_PG + TX_2X_PAGES;
+	ei_status.rx_start_page = HP_START_PG + TX_PAGES/2;
 	ei_status.stop_page = HP_STOP_PG;
 
 	ei_status.reset_8390 = &hpp_reset_8390;
@@ -228,17 +261,28 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 		ei_status.block_output = &hpp_mem_block_output;
 		ei_status.get_8390_hdr = &hpp_mem_get_8390_hdr;
 		dev->mem_start = mem_start;
-		ei_status.rmem_start = dev->mem_start + TX_2X_PAGES*256;
+		ei_status.mem = ioremap(mem_start,
+					(HP_STOP_PG - HP_START_PG)*256);
+		if (!ei_status.mem) {
+			retval = -ENOMEM;
+			goto out;
+		}
+		ei_status.rmem_start = dev->mem_start + TX_PAGES/2*256;
 		dev->mem_end = ei_status.rmem_end
 			= dev->mem_start + (HP_STOP_PG - HP_START_PG)*256;
 	}
 
 	outw(Perf_Page, ioaddr + HP_PAGING);
-	NS8390_init(dev, 0);
+	NS8390p_init(dev, 0);
 	/* Leave the 8390 and HP chip reset. */
 	outw(inw(ioaddr + HPP_OPTION) & ~EnableIRQ, ioaddr + HPP_OPTION);
 
+	retval = register_netdev(dev);
+	if (retval)
+		goto out1;
 	return 0;
+out1:
+	iounmap(ei_status.mem);
 out:
 	release_region(ioaddr, HP_IO_EXTENT);
 	return retval;
@@ -251,7 +295,7 @@ hpp_open(struct net_device *dev)
 	int option_reg;
 	int retval;
 
-	if ((retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev))) {
+	if ((retval = request_irq(dev->irq, eip_interrupt, 0, dev->name, dev))) {
 	    return retval;
 	}
 
@@ -264,13 +308,12 @@ hpp_open(struct net_device *dev)
 
 	/* Set the wrap registers for programmed-I/O operation.   */
 	outw(HW_Page, ioaddr + HP_PAGING);
-	outw((HP_START_PG + TX_2X_PAGES) | ((HP_STOP_PG - 1) << 8), ioaddr + 14);
+	outw((HP_START_PG + TX_PAGES/2) | ((HP_STOP_PG - 1) << 8), ioaddr + 14);
 
 	/* Select the operational page. */
 	outw(Perf_Page, ioaddr + HP_PAGING);
 
-	ei_open(dev);
-	return 0;
+	return eip_open(dev);
 }
 
 static int
@@ -280,7 +323,7 @@ hpp_close(struct net_device *dev)
 	int option_reg = inw(ioaddr + HPP_OPTION);
 
 	free_irq(dev->irq, dev);
-	ei_close(dev);
+	eip_close(dev);
 	outw((option_reg & ~EnableIRQ) | MemDisable | NICReset | ChipReset,
 		 ioaddr + HPP_OPTION);
 
@@ -308,7 +351,6 @@ hpp_reset_8390(struct net_device *dev)
 		printk("%s: hp_reset_8390() did not complete.\n", dev->name);
 
 	if (ei_debug > 1) printk("8390 reset done (%ld).", jiffies);
-	return;
 }
 
 /* The programmed-I/O version of reading the 4 byte 8390 specific header.
@@ -347,7 +389,7 @@ hpp_mem_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring
 
 	outw((ring_page<<8), ioaddr + HPP_IN_ADDR);
 	outw(option_reg & ~(MemDisable + BootROMEnb), ioaddr + HPP_OPTION);
-	isa_memcpy_fromio(hdr, dev->mem_start, sizeof(struct e8390_pkt_hdr));
+	memcpy_fromio(hdr, ei_status.mem, sizeof(struct e8390_pkt_hdr));
 	outw(option_reg, ioaddr + HPP_OPTION);
 	hdr->count = (le16_to_cpu(hdr->count) + 3) & ~3;	/* Round up allocation. */
 }
@@ -366,7 +408,7 @@ hpp_mem_block_input(struct net_device *dev, int count, struct sk_buff *skb, int 
 	   Also note that we *can't* use eth_io_copy_and_sum() because
 	   it will not always copy "count" bytes (e.g. padded IP).  */
 
-	isa_memcpy_fromio(skb->data, dev->mem_start, count);
+	memcpy_fromio(skb->data, ei_status.mem, count);
 	outw(option_reg, ioaddr + HPP_OPTION);
 }
 
@@ -379,7 +421,6 @@ hpp_io_block_output(struct net_device *dev, int count,
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	outw(start_page << 8, ioaddr + HPP_OUT_ADDR);
 	outsl(ioaddr + HP_DATAPORT, buf, (count+3)>>2);
-	return;
 }
 
 static void
@@ -391,21 +432,19 @@ hpp_mem_block_output(struct net_device *dev, int count,
 
 	outw(start_page << 8, ioaddr + HPP_OUT_ADDR);
 	outw(option_reg & ~(MemDisable + BootROMEnb), ioaddr + HPP_OPTION);
-	isa_memcpy_toio(dev->mem_start, buf, (count + 3) & ~3);
+	memcpy_toio(ei_status.mem, buf, (count + 3) & ~3);
 	outw(option_reg, ioaddr + HPP_OPTION);
-
-	return;
 }
 
-
+
 #ifdef MODULE
 #define MAX_HPP_CARDS	4	/* Max number of HPP cards per module */
-static struct net_device dev_hpp[MAX_HPP_CARDS];
+static struct net_device *dev_hpp[MAX_HPP_CARDS];
 static int io[MAX_HPP_CARDS];
 static int irq[MAX_HPP_CARDS];
 
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_HPP_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_HPP_CARDS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
 MODULE_PARM_DESC(io, "I/O port address(es)");
 MODULE_PARM_DESC(irq, "IRQ number(s); ignored if properly detected");
 MODULE_DESCRIPTION("HP PC-LAN+ ISA ethernet driver");
@@ -413,46 +452,53 @@ MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
-int
+int __init
 init_module(void)
 {
+	struct net_device *dev;
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_HPP_CARDS; this_dev++) {
-		struct net_device *dev = &dev_hpp[this_dev];
-		dev->irq = irq[this_dev];
-		dev->base_addr = io[this_dev];
-		dev->init = hp_plus_probe;
 		if (io[this_dev] == 0)  {
 			if (this_dev != 0) break; /* only autoprobe 1st one */
 			printk(KERN_NOTICE "hp-plus.c: Presently autoprobing (not recommended) for a single card.\n");
 		}
-		if (register_netdev(dev) != 0) {
-			printk(KERN_WARNING "hp-plus.c: No HP-Plus card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) {	/* Got at least one. */
-				return 0;
-			}
-			return -ENXIO;
+		dev = alloc_eip_netdev();
+		if (!dev)
+			break;
+		dev->irq = irq[this_dev];
+		dev->base_addr = io[this_dev];
+		if (do_hpp_probe(dev) == 0) {
+			dev_hpp[found++] = dev;
+			continue;
 		}
-		found++;
+		free_netdev(dev);
+		printk(KERN_WARNING "hp-plus.c: No HP-Plus card found (i/o = 0x%x).\n", io[this_dev]);
+		break;
 	}
-	return 0;
+	if (found)
+		return 0;
+	return -ENXIO;
 }
 
-void
+static void cleanup_card(struct net_device *dev)
+{
+	/* NB: hpp_close() handles free_irq */
+	iounmap(ei_status.mem);
+	release_region(dev->base_addr - NIC_OFFSET, HP_IO_EXTENT);
+}
+
+void __exit
 cleanup_module(void)
 {
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_HPP_CARDS; this_dev++) {
-		struct net_device *dev = &dev_hpp[this_dev];
-		if (dev->priv != NULL) {
-			int ioaddr = dev->base_addr - NIC_OFFSET;
-			void *priv = dev->priv;
-			/* NB: hpp_close() handles free_irq */
-			release_region(ioaddr, HP_IO_EXTENT);
+		struct net_device *dev = dev_hpp[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
-			kfree(priv);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }

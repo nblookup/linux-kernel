@@ -177,7 +177,7 @@ DBG_DECL(PRV3)
 } }
 #endif
 /*
- * For event level debug use a separate define, the paramete are
+ * For event level debug use a separate define, the parameter are
  * different and cause compiler errors on some systems.
  */
 #define DBG_EVL_ID(args) \
@@ -232,10 +232,10 @@ typedef struct _DbgHandle_ *pDbgHandle ;
 typedef void ( * DbgEnd) (pDbgHandle) ;
 typedef void ( * DbgLog) (unsigned short, int, char *, va_list) ;
 typedef void ( * DbgOld) (unsigned short, char *, va_list) ;
-typedef void ( * DbgEv)  (unsigned short, unsigned int, va_list) ;
+typedef void ( * DbgEv)  (unsigned short, unsigned long, va_list) ;
 typedef void ( * DbgIrq) (unsigned short, int, char *, va_list) ;
 typedef struct _DbgHandle_
-{ char    Registered ; /* driver successfull registered */
+{ char    Registered ; /* driver successfully registered */
 #define DBG_HANDLE_REG_NEW 0x01  /* this (new) structure    */
 #define DBG_HANDLE_REG_OLD 0x7f  /* old structure (see below)  */
  char    Version;  /* version of this structure  */
@@ -249,7 +249,7 @@ typedef struct _DbgHandle_
  }     regTime ;  /* timestamp for registration       */
  void               *pIrp ;   /* ptr to pending i/o request       */
  unsigned long       dbgMask ;  /* current debug mask               */
- char                drvName[16] ; /* ASCII name of registered driver  */
+ char                drvName[128] ; /* ASCII name of registered driver  */
  char                drvTag[64] ; /* revision string     */
  DbgEnd              dbg_end ;  /* function for debug closing       */
  DbgLog              dbg_prt ;  /* function for debug appending     */
@@ -259,7 +259,7 @@ typedef struct _DbgHandle_
  void      *pReserved3 ;
 } _DbgHandle_ ;
 extern _DbgHandle_ myDriverDebugHandle ;
-typedef struct
+typedef struct _OldDbgHandle_
 { struct _OldDbgHandle_ *next ;
  void                *pIrp ;
  long    regTime[2] ;
@@ -310,7 +310,7 @@ typedef struct
             unsigned long   B_ChannelMask;
             unsigned long   LogBufferSize;
         } CardTrace;
-    } u1;     
+    }Data;     
 } _DbgExtendedInfo_;
 #ifndef DIVA_NO_DEBUGLIB
 /* -------------------------------------------------------------

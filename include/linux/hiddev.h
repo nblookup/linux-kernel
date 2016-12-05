@@ -2,8 +2,6 @@
 #define _HIDDEV_H
 
 /*
- * $Id: hiddev.h,v 1.2 2001/04/26 11:26:09 vojtech Exp $
- *
  *  Copyright (c) 1999-2000 Vojtech Pavlik
  *
  *  Sponsored by SuSE
@@ -29,6 +27,8 @@
  * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
  */
 
+#include <linux/types.h>
+
 /*
  * The event structure itself
  */
@@ -39,33 +39,33 @@ struct hiddev_event {
 };
 
 struct hiddev_devinfo {
-	unsigned int bustype;
-	unsigned int busnum;
-	unsigned int devnum;
-	unsigned int ifnum;
-	short vendor;
-	short product;
-	short version;
-	unsigned num_applications;
+	__u32 bustype;
+	__u32 busnum;
+	__u32 devnum;
+	__u32 ifnum;
+	__s16 vendor;
+	__s16 product;
+	__s16 version;
+	__u32 num_applications;
 };
 
 struct hiddev_collection_info {
-	unsigned index;
-	unsigned type;
-	unsigned usage;
-	unsigned level;
+	__u32 index;
+	__u32 type;
+	__u32 usage;
+	__u32 level;
 };
 
 #define HID_STRING_SIZE 256
 struct hiddev_string_descriptor {
-	int index;
+	__s32 index;
 	char value[HID_STRING_SIZE];
 };
 
 struct hiddev_report_info {
-	unsigned report_type;
-	unsigned report_id;
-	unsigned num_fields;
+	__u32 report_type;
+	__u32 report_id;
+	__u32 num_fields;
 };
 
 /* To do a GUSAGE/SUSAGE, fill in at least usage_code,  report_type and 
@@ -88,20 +88,20 @@ struct hiddev_report_info {
 #define HID_REPORT_TYPE_MAX     3
 
 struct hiddev_field_info {
-	unsigned report_type;
-	unsigned report_id;
-	unsigned field_index;
-	unsigned maxusage;
-	unsigned flags;
-	unsigned physical;		/* physical usage for this field */
-	unsigned logical;		/* logical usage for this field */
-	unsigned application;		/* application usage for this field */
+	__u32 report_type;
+	__u32 report_id;
+	__u32 field_index;
+	__u32 maxusage;
+	__u32 flags;
+	__u32 physical;		/* physical usage for this field */
+	__u32 logical;		/* logical usage for this field */
+	__u32 application;		/* application usage for this field */
 	__s32 logical_minimum;
 	__s32 logical_maximum;
 	__s32 physical_minimum;
 	__s32 physical_maximum;
-	unsigned unit_exponent;
-	unsigned unit;
+	__u32 unit_exponent;
+	__u32 unit;
 };
 
 /* Fill in report_type, report_id and field_index to get the information on a
@@ -118,12 +118,21 @@ struct hiddev_field_info {
 #define HID_FIELD_BUFFERED_BYTE		0x100
 
 struct hiddev_usage_ref {
-	unsigned report_type;
-	unsigned report_id;
-	unsigned field_index;
-	unsigned usage_index;
-	unsigned usage_code;
+	__u32 report_type;
+	__u32 report_id;
+	__u32 field_index;
+	__u32 usage_index;
+	__u32 usage_code;
 	__s32 value;
+};
+
+/* hiddev_usage_ref_multi is used for sending multiple bytes to a control.
+ * It really manifests itself as setting the value of consecutive usages */
+#define HID_MAX_MULTI_USAGES 1024
+struct hiddev_usage_ref_multi {
+	struct hiddev_usage_ref uref;
+	__u32 num_values;
+	__s32 values[HID_MAX_MULTI_USAGES];
 };
 
 /* FIELD_INDEX_NONE is returned in read() data from the kernel when flags
@@ -161,6 +170,10 @@ struct hiddev_usage_ref {
 #define HIDIOCGCOLLECTIONINFO	_IOWR('H', 0x11, struct hiddev_collection_info)
 #define HIDIOCGPHYS(len)	_IOC(_IOC_READ, 'H', 0x12, len)
 
+/* For writing/reading to multiple/consecutive usages */
+#define HIDIOCGUSAGES		_IOWR('H', 0x13, struct hiddev_usage_ref_multi)
+#define HIDIOCSUSAGES		_IOW('H', 0x14, struct hiddev_usage_ref_multi)
+
 /* 
  * Flags to be used in HIDIOCSFLAG
  */
@@ -171,26 +184,28 @@ struct hiddev_usage_ref {
 /* To traverse the input report descriptor info for a HID device, perform the 
  * following:
  *
- *  rinfo.report_type = HID_REPORT_TYPE_INPUT;
- *  rinfo.report_id = HID_REPORT_ID_FIRST;
- *  ret = ioctl(fd, HIDIOCGREPORTINFO, &rinfo);
+ * rinfo.report_type = HID_REPORT_TYPE_INPUT;
+ * rinfo.report_id = HID_REPORT_ID_FIRST;
+ * ret = ioctl(fd, HIDIOCGREPORTINFO, &rinfo);
  *
- *  while (ret >= 0) {
- *      for (i = 0; i < rinfo.num_fields; i++) { 
- *	    finfo.report_type = rinfo.report_type;
- *          finfo.report_id = rinfo.report_id;
- *          finfo.field_index = i;
- *          ioctl(fd, HIDIOCGFIELDINFO, &finfo);
- *          for (j = 0; j < finfo.maxusage; j++) {
- *              uref.field_index = i;
- *		uref.usage_index = j;
- *		ioctl(fd, HIDIOCGUCODE, &uref);
- *		ioctl(fd, HIDIOCGUSAGE, &uref);
- *          }
- *	}
- *	uref.report_id |= HID_REPORT_ID_NEXT;
- *	ret = ioctl(fd, HIDIOCGREPORTINFO, &uref);
- *  }
+ * while (ret >= 0) {
+ * 	for (i = 0; i < rinfo.num_fields; i++) {
+ * 		finfo.report_type = rinfo.report_type;
+ * 		finfo.report_id = rinfo.report_id;
+ * 		finfo.field_index = i;
+ * 		ioctl(fd, HIDIOCGFIELDINFO, &finfo);
+ * 		for (j = 0; j < finfo.maxusage; j++) {
+ * 			uref.report_type = rinfo.report_type;
+ * 			uref.report_id = rinfo.report_id;
+ * 			uref.field_index = i;
+ * 			uref.usage_index = j;
+ * 			ioctl(fd, HIDIOCGUCODE, &uref);
+ * 			ioctl(fd, HIDIOCGUSAGE, &uref);
+ * 		}
+ * 	}
+ * 	rinfo.report_id |= HID_REPORT_ID_NEXT;
+ * 	ret = ioctl(fd, HIDIOCGREPORTINFO, &rinfo);
+ * }
  */
 
 
@@ -200,22 +215,25 @@ struct hiddev_usage_ref {
  * In-kernel definitions.
  */
 
+struct hid_device;
+struct hid_usage;
+struct hid_field;
+struct hid_report;
+
 #ifdef CONFIG_USB_HIDDEV
-int hiddev_connect(struct hid_device *);
+int hiddev_connect(struct hid_device *hid, unsigned int force);
 void hiddev_disconnect(struct hid_device *);
 void hiddev_hid_event(struct hid_device *hid, struct hid_field *field,
-		      struct hid_usage *usage, __s32 value, struct pt_regs *regs);
+		      struct hid_usage *usage, __s32 value);
 void hiddev_report_event(struct hid_device *hid, struct hid_report *report);
-int __init hiddev_init(void);
-void hiddev_exit(void);
 #else
-static inline int hiddev_connect(struct hid_device *hid) { return -1; }
+static inline int hiddev_connect(struct hid_device *hid,
+		unsigned int force)
+{ return -1; }
 static inline void hiddev_disconnect(struct hid_device *hid) { }
 static inline void hiddev_hid_event(struct hid_device *hid, struct hid_field *field,
-		      struct hid_usage *usage, __s32 value, struct pt_regs *regs) { }
+		      struct hid_usage *usage, __s32 value) { }
 static inline void hiddev_report_event(struct hid_device *hid, struct hid_report *report) { }
-static inline int hiddev_init(void) { return 0; }
-static inline void hiddev_exit(void) { }
 #endif
 
 #endif

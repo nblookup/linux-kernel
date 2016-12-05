@@ -61,6 +61,7 @@
 
 /*****************************************************************************/
 
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
@@ -69,6 +70,7 @@
 #include <asm/io.h>
 #include <linux/hdlcdrv.h>
 #include <linux/baycom.h>
+#include <linux/jiffies.h>
 
 /* --------------------------------------------------------------------- */
 
@@ -78,7 +80,7 @@
 
 static const char bc_drvname[] = "baycom_ser_hdx";
 static const char bc_drvinfo[] = KERN_INFO "baycom_ser_hdx: (C) 1996-2000 Thomas Sailer, HB9JNX/AE4WA\n"
-KERN_INFO "baycom_ser_hdx: version 0.10 compiled " __TIME__ " " __DATE__ "\n";
+"baycom_ser_hdx: version 0.10 compiled " __TIME__ " " __DATE__ "\n";
 
 /* --------------------------------------------------------------------- */
 
@@ -150,7 +152,7 @@ static inline void baycom_int_freq(struct baycom_state *bc)
 	 * measure the interrupt frequency
 	 */
 	bc->debug_vals.cur_intcnt++;
-	if ((cur_jiffies - bc->debug_vals.last_jiffies) >= HZ) {
+	if (time_after_eq(cur_jiffies, bc->debug_vals.last_jiffies + HZ)) {
 		bc->debug_vals.last_jiffies = cur_jiffies;
 		bc->debug_vals.last_intcnt = bc->debug_vals.cur_intcnt;
 		bc->debug_vals.cur_intcnt = 0;
@@ -372,10 +374,10 @@ static inline void ser12_rx(struct net_device *dev, struct baycom_state *bc)
 
 /* --------------------------------------------------------------------- */
 
-static irqreturn_t ser12_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ser12_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *)dev_id;
-	struct baycom_state *bc = (struct baycom_state *)dev->priv;
+	struct baycom_state *bc = netdev_priv(dev);
 	unsigned char iir;
 
 	if (!dev || !bc || bc->hdrv.magic != HDLCDRV_MAGIC)
@@ -468,7 +470,7 @@ static enum uart ser12_check_uart(unsigned int iobase)
 
 static int ser12_open(struct net_device *dev)
 {
-	struct baycom_state *bc = (struct baycom_state *)dev->priv;
+	struct baycom_state *bc = netdev_priv(dev);
 	enum uart u;
 
 	if (!dev || !bc)
@@ -487,7 +489,7 @@ static int ser12_open(struct net_device *dev)
 	outb(0, FCR(dev->base_addr));  /* disable FIFOs */
 	outb(0x0d, MCR(dev->base_addr));
 	outb(0, IER(dev->base_addr));
-	if (request_irq(dev->irq, ser12_interrupt, SA_INTERRUPT | SA_SHIRQ,
+	if (request_irq(dev->irq, ser12_interrupt, IRQF_DISABLED | IRQF_SHARED,
 			"baycom_ser12", dev)) {
 		release_region(dev->base_addr, SER12_EXTENT);       
 		return -EBUSY;
@@ -511,7 +513,7 @@ static int ser12_open(struct net_device *dev)
 
 static int ser12_close(struct net_device *dev)
 {
-	struct baycom_state *bc = (struct baycom_state *)dev->priv;
+	struct baycom_state *bc = netdev_priv(dev);
 
 	if (!dev || !bc)
 		return -EINVAL;
@@ -569,19 +571,15 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr,
 {
 	struct baycom_state *bc;
 	struct baycom_ioctl bi;
-	int cmd2;
 
-	if (!dev || !dev->priv ||
-	    ((struct baycom_state *)dev->priv)->hdrv.magic != HDLCDRV_MAGIC) {
-		printk(KERN_ERR "bc_ioctl: invalid device struct\n");
+	if (!dev)
 		return -EINVAL;
-	}
-	bc = (struct baycom_state *)dev->priv;
+
+	bc = netdev_priv(dev);
+	BUG_ON(bc->hdrv.magic != HDLCDRV_MAGIC);
 
 	if (cmd != SIOCDEVPRIVATE)
 		return -ENOIOCTLCMD;
-	if (get_user(cmd2, (int *)ifr->ifr_data))
-		return -EFAULT;
 	switch (hi->cmd) {
 	default:
 		break;
@@ -641,11 +639,11 @@ static char *mode[NR_PORTS] = { "ser12*", };
 static int iobase[NR_PORTS] = { 0x3f8, };
 static int irq[NR_PORTS] = { 4, };
 
-MODULE_PARM(mode, "1-" __MODULE_STRING(NR_PORTS) "s");
+module_param_array(mode, charp, NULL, 0);
 MODULE_PARM_DESC(mode, "baycom operating mode; * for software DCD");
-MODULE_PARM(iobase, "1-" __MODULE_STRING(NR_PORTS) "i");
+module_param_array(iobase, int, NULL, 0);
 MODULE_PARM_DESC(iobase, "baycom io base address");
-MODULE_PARM(irq, "1-" __MODULE_STRING(NR_PORTS) "i");
+module_param_array(irq, int, NULL, 0);
 MODULE_PARM_DESC(irq, "baycom irq number");
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
@@ -681,7 +679,7 @@ static int __init init_baycomserhdx(void)
 		if (IS_ERR(dev)) 
 			break;
 
-		bc = (struct baycom_state *)dev->priv;
+		bc = netdev_priv(dev);
 		if (set_hw && baycom_setmode(bc, mode[i]))
 			set_hw = 0;
 		found++;

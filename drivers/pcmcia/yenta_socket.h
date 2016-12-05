@@ -95,6 +95,12 @@
  */
 #define CB_MEM_PAGE(map)	(0x40 + (map))
 
+
+/* control how 16bit cards are powered */
+#define YENTA_16BIT_POWER_EXCA	0x00000001
+#define YENTA_16BIT_POWER_DF	0x00000002
+
+
 struct yenta_socket;
 
 struct cardbus_type {
@@ -107,17 +113,22 @@ struct cardbus_type {
 struct yenta_socket {
 	struct pci_dev *dev;
 	int cb_irq, io_irq;
-	void *base;
+	void __iomem *base;
 	struct timer_list poll_timer;
 
 	struct pcmcia_socket socket;
 	struct cardbus_type *type;
 
+	u32 flags;
+
+	/* for PCI interrupt probing */
+	unsigned int probe_status;
+
 	/* A few words of private data for special stuff of overrides... */
 	unsigned int private[8];
 
 	/* PCI saved state */
-	u32 saved_state[18];
+	u32 saved_state[2];
 };
 
 

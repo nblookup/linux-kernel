@@ -2,7 +2,7 @@
 #define __SOUND_CS46XX_H
 
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>,
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>,
  *		     Cirrus Logic, Inc.
  *  Definitions for Cirrus Logic CS46xx chips
  *
@@ -24,22 +24,10 @@
  */
 
 #include "pcm.h"
+#include "pcm-indirect.h"
 #include "rawmidi.h"
 #include "ac97_codec.h"
 #include "cs46xx_dsp_spos.h"
-
-#ifndef PCI_VENDOR_ID_CIRRUS
-#define PCI_VENDOR_ID_CIRRUS            0x1013
-#endif
-#ifndef PCI_DEVICE_ID_CIRRUS_4610
-#define PCI_DEVICE_ID_CIRRUS_4610       0x6001
-#endif
-#ifndef PCI_DEVICE_ID_CIRRUS_4612
-#define PCI_DEVICE_ID_CIRRUS_4612       0x6003
-#endif
-#ifndef PCI_DEVICE_ID_CIRRUS_4615
-#define PCI_DEVICE_ID_CIRRUS_4615       0x6004
-#endif
 
 /*
  *  Direct registers
@@ -1643,138 +1631,115 @@
 #define CS46XX_MIXER_SPDIF_INPUT_ELEMENT    1
 #define CS46XX_MIXER_SPDIF_OUTPUT_ELEMENT   2
 
-typedef struct _snd_cs46xx cs46xx_t;
 
-typedef struct _snd_cs46xx_pcm_t {
-	unsigned char *hw_area;
-	dma_addr_t hw_addr;	/* PCI bus address, not accessible */
-	unsigned long hw_size;
+struct snd_cs46xx_pcm {
+	struct snd_dma_buffer hw_buf;
   
 	unsigned int ctl;
 	unsigned int shift;	/* Shift count to trasform frames in bytes */
-	unsigned int sw_bufsize;
-	unsigned int sw_data;	/* Offset to next dst (or src) in sw ring buffer */
-	unsigned int sw_io;
-	int sw_ready;		/* Bytes ready to be transferred to/from hw */
-	unsigned int hw_data;	/* Offset to next dst (or src) in hw ring buffer */
-	unsigned int hw_io;	/* Ring buffer hw pointer */
-	int hw_ready;		/* Bytes ready for play (or captured) in hw ring buffer */
-	size_t appl_ptr;	/* Last seen appl_ptr */
-	snd_pcm_substream_t *substream;
+	struct snd_pcm_indirect pcm_rec;
+	struct snd_pcm_substream *substream;
 
-	pcm_channel_descriptor_t * pcm_channel;
+	struct dsp_pcm_channel_descriptor * pcm_channel;
 
 	int pcm_channel_id;    /* Fron Rear, Center Lfe  ... */
-} cs46xx_pcm_t;
+};
 
-typedef struct {
+struct snd_cs46xx_region {
 	char name[24];
 	unsigned long base;
-	unsigned long remap_addr;
+	void __iomem *remap_addr;
 	unsigned long size;
 	struct resource *resource;
-} snd_cs46xx_region_t;
+};
 
-struct _snd_cs46xx {
+struct snd_cs46xx {
 	int irq;
 	unsigned long ba0_addr;
 	unsigned long ba1_addr;
 	union {
 		struct {
-			snd_cs46xx_region_t ba0;
-			snd_cs46xx_region_t data0;
-			snd_cs46xx_region_t data1;
-			snd_cs46xx_region_t pmem;
-			snd_cs46xx_region_t reg;
+			struct snd_cs46xx_region ba0;
+			struct snd_cs46xx_region data0;
+			struct snd_cs46xx_region data1;
+			struct snd_cs46xx_region pmem;
+			struct snd_cs46xx_region reg;
 		} name;
-		snd_cs46xx_region_t idx[5];
+		struct snd_cs46xx_region idx[5];
 	} region;
 
 	unsigned int mode;
 	
 	struct {
-		unsigned char *hw_area;
-		dma_addr_t hw_addr;	/* PCI bus address, not accessible */
-		unsigned long hw_size;
+		struct snd_dma_buffer hw_buf;
 
 		unsigned int ctl;
 		unsigned int shift;	/* Shift count to trasform frames in bytes */
-		unsigned int sw_bufsize;
-		unsigned int sw_data;	/* Offset to next dst (or src) in sw ring buffer */
-		unsigned int sw_io;
-		int sw_ready;		/* Bytes ready to be transferred to/from hw */
-		unsigned int hw_data;	/* Offset to next dst (or src) in hw ring buffer */
-		unsigned int hw_io;	/* Ring buffer hw pointer */
-		int hw_ready;		/* Bytes ready for play (or captured) in hw ring buffer */
-		size_t appl_ptr;	/* Last seen appl_ptr */
-		snd_pcm_substream_t *substream;
+		struct snd_pcm_indirect pcm_rec;
+		struct snd_pcm_substream *substream;
 	} capt;
 
 
 	int nr_ac97_codecs;
-	ac97_t *ac97[MAX_NR_AC97];
+	struct snd_ac97_bus *ac97_bus;
+	struct snd_ac97 *ac97[MAX_NR_AC97];
 
 	struct pci_dev *pci;
-	snd_card_t *card;
-	snd_pcm_t *pcm;
+	struct snd_card *card;
+	struct snd_pcm *pcm;
 
-	snd_rawmidi_t *rmidi;
-	snd_rawmidi_substream_t *midi_input;
-	snd_rawmidi_substream_t *midi_output;
+	struct snd_rawmidi *rmidi;
+	struct snd_rawmidi_substream *midi_input;
+	struct snd_rawmidi_substream *midi_output;
 
 	spinlock_t reg_lock;
 	unsigned int midcr;
 	unsigned int uartm;
 
 	int amplifier;
-	void (*amplifier_ctrl)(cs46xx_t *, int);
-	void (*active_ctrl)(cs46xx_t *, int);
-  	void (*mixer_init)(cs46xx_t *);
+	void (*amplifier_ctrl)(struct snd_cs46xx *, int);
+	void (*active_ctrl)(struct snd_cs46xx *, int);
+  	void (*mixer_init)(struct snd_cs46xx *);
 
-	struct pci_dev *acpi_dev;
 	int acpi_port;
-	snd_kcontrol_t *eapd_switch; /* for amplifier hack */
+	struct snd_kcontrol *eapd_switch; /* for amplifier hack */
 	int accept_valid;	/* accept mmap valid (for OSS) */
+	int in_suspend;
 
-	struct snd_cs46xx_gameport *gameport;
+	struct gameport *gameport;
+
+#ifdef CONFIG_SND_CS46XX_NEW_DSP
+	struct mutex spos_mutex;
+
+	struct dsp_spos_instance * dsp_spos_instance;
+
+	struct snd_pcm *pcm_rear;
+	struct snd_pcm *pcm_center_lfe;
+	struct snd_pcm *pcm_iec958;
+#else /* for compatibility */
+	struct snd_cs46xx_pcm *playback_pcm;
+	unsigned int play_ctl;
+#endif
 
 #ifdef CONFIG_PM
-	struct pm_dev *pm_dev;
-#endif
-#ifdef CONFIG_SND_CS46XX_DEBUG_GPIO
-	int current_gpio;
-#endif
-#ifdef CONFIG_SND_CS46XX_NEW_DSP
-	struct semaphore spos_mutex;
-
-	dsp_spos_instance_t * dsp_spos_instance;
-
-	snd_pcm_t *pcm_rear;
-	snd_pcm_t *pcm_center_lfe;
-	snd_pcm_t *pcm_iec958;
-#else /* for compatibility */
-	cs46xx_pcm_t *playback_pcm;
-	unsigned int play_ctl;
+	u32 *saved_regs;
 #endif
 };
 
-int snd_cs46xx_create(snd_card_t *card,
+int snd_cs46xx_create(struct snd_card *card,
 		      struct pci_dev *pci,
 		      int external_amp, int thinkpad,
-		      cs46xx_t **rcodec);
+		      struct snd_cs46xx **rcodec);
+int snd_cs46xx_suspend(struct pci_dev *pci, pm_message_t state);
+int snd_cs46xx_resume(struct pci_dev *pci);
 
-int snd_cs46xx_pcm(cs46xx_t *chip, int device, snd_pcm_t **rpcm);
-int snd_cs46xx_pcm_rear(cs46xx_t *chip, int device, snd_pcm_t **rpcm);
-int snd_cs46xx_pcm_iec958(cs46xx_t *chip, int device, snd_pcm_t **rpcm);
-int snd_cs46xx_pcm_center_lfe(cs46xx_t *chip, int device, snd_pcm_t **rpcm);
-int snd_cs46xx_mixer(cs46xx_t *chip);
-int snd_cs46xx_midi(cs46xx_t *chip, int device, snd_rawmidi_t **rmidi);
-int snd_cs46xx_start_dsp(cs46xx_t *chip);
-void snd_cs46xx_gameport(cs46xx_t *chip);
-
-#ifdef CONFIG_PM
-void snd_cs46xx_suspend(cs46xx_t *chip);
-void snd_cs46xx_resume(cs46xx_t *chip);
-#endif
+int snd_cs46xx_pcm(struct snd_cs46xx *chip, int device, struct snd_pcm **rpcm);
+int snd_cs46xx_pcm_rear(struct snd_cs46xx *chip, int device, struct snd_pcm **rpcm);
+int snd_cs46xx_pcm_iec958(struct snd_cs46xx *chip, int device, struct snd_pcm **rpcm);
+int snd_cs46xx_pcm_center_lfe(struct snd_cs46xx *chip, int device, struct snd_pcm **rpcm);
+int snd_cs46xx_mixer(struct snd_cs46xx *chip, int spdif_device);
+int snd_cs46xx_midi(struct snd_cs46xx *chip, int device, struct snd_rawmidi **rmidi);
+int snd_cs46xx_start_dsp(struct snd_cs46xx *chip);
+int snd_cs46xx_gameport(struct snd_cs46xx *chip);
 
 #endif /* __SOUND_CS46XX_H */

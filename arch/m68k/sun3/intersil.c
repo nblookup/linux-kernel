@@ -15,7 +15,6 @@
 
 #include <asm/errno.h>
 #include <asm/system.h>
-#include <asm/semaphore.h>
 #include <asm/rtc.h>
 #include <asm/intersil.h>
 
@@ -26,7 +25,7 @@
 
 /* does this need to be implemented? */
 unsigned long sun3_gettimeoffset(void)
-{ 
+{
   return 1;
 }
 

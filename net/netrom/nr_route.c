@@ -13,11 +13,11 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
@@ -41,11 +41,11 @@
 static unsigned int nr_neigh_no = 1;
 
 static HLIST_HEAD(nr_node_list);
-static spinlock_t nr_node_list_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(nr_node_list_lock);
 static HLIST_HEAD(nr_neigh_list);
-static spinlock_t nr_neigh_list_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(nr_neigh_list_lock);
 
-struct nr_node *nr_node_get(ax25_address *callsign)
+static struct nr_node *nr_node_get(ax25_address *callsign)
 {
 	struct nr_node *found = NULL;
 	struct nr_node *nr_node;
@@ -62,7 +62,8 @@ struct nr_node *nr_node_get(ax25_address *callsign)
 	return found;
 }
 
-struct nr_neigh *nr_neigh_get_dev(ax25_address *callsign, struct net_device *dev)
+static struct nr_neigh *nr_neigh_get_dev(ax25_address *callsign,
+					 struct net_device *dev)
 {
 	struct nr_neigh *found = NULL;
 	struct nr_neigh *nr_neigh;
@@ -86,8 +87,9 @@ static void nr_remove_neigh(struct nr_neigh *);
  *	Add a new route to a node, and in the process add the node and the
  *	neighbour if it is new.
  */
-static int nr_add_node(ax25_address *nr, const char *mnemonic, ax25_address *ax25,
-	ax25_digi *ax25_digi, struct net_device *dev, int quality, int obs_count)
+static int __must_check nr_add_node(ax25_address *nr, const char *mnemonic,
+	ax25_address *ax25, ax25_digi *ax25_digi, struct net_device *dev,
+	int quality, int obs_count)
 {
 	struct nr_node  *nr_node;
 	struct nr_neigh *nr_neigh;
@@ -154,14 +156,15 @@ static int nr_add_node(ax25_address *nr, const char *mnemonic, ax25_address *ax2
 		atomic_set(&nr_neigh->refcount, 1);
 
 		if (ax25_digi != NULL && ax25_digi->ndigi > 0) {
-			if ((nr_neigh->digipeat = kmalloc(sizeof(*ax25_digi), GFP_KERNEL)) == NULL) {
+			nr_neigh->digipeat = kmemdup(ax25_digi,
+						     sizeof(*ax25_digi),
+						     GFP_KERNEL);
+			if (nr_neigh->digipeat == NULL) {
 				kfree(nr_neigh);
 				if (nr_node)
 					nr_node_put(nr_node);
 				return -ENOMEM;
 			}
-			memcpy(nr_neigh->digipeat, ax25_digi,
-					sizeof(*ax25_digi));
 		}
 
 		spin_lock_bh(&nr_neigh_list_lock);
@@ -186,7 +189,7 @@ static int nr_add_node(ax25_address *nr, const char *mnemonic, ax25_address *ax2
 		nr_node->which = 0;
 		nr_node->count = 1;
 		atomic_set(&nr_node->refcount, 1);
-		nr_node->node_lock = SPIN_LOCK_UNLOCKED;
+		spin_lock_init(&nr_node->node_lock);
 
 		nr_node->routes[0].quality   = quality;
 		nr_node->routes[0].obs_count = obs_count;
@@ -404,7 +407,8 @@ static int nr_del_node(ax25_address *callsign, ax25_address *neighbour, struct n
 /*
  *	Lock a neighbour with a quality.
  */
-static int nr_add_neigh(ax25_address *callsign, ax25_digi *ax25_digi, struct net_device *dev, unsigned int quality)
+static int __must_check nr_add_neigh(ax25_address *callsign,
+	ax25_digi *ax25_digi, struct net_device *dev, unsigned int quality)
 {
 	struct nr_neigh *nr_neigh;
 
@@ -431,11 +435,12 @@ static int nr_add_neigh(ax25_address *callsign, ax25_digi *ax25_digi, struct net
 	atomic_set(&nr_neigh->refcount, 1);
 
 	if (ax25_digi != NULL && ax25_digi->ndigi > 0) {
-		if ((nr_neigh->digipeat = kmalloc(sizeof(*ax25_digi), GFP_KERNEL)) == NULL) {
+		nr_neigh->digipeat = kmemdup(ax25_digi, sizeof(*ax25_digi),
+					     GFP_KERNEL);
+		if (nr_neigh->digipeat == NULL) {
 			kfree(nr_neigh);
 			return -ENOMEM;
 		}
-		memcpy(nr_neigh->digipeat, ax25_digi, sizeof(*ax25_digi));
 	}
 
 	spin_lock_bh(&nr_neigh_list_lock);
@@ -576,7 +581,7 @@ static struct net_device *nr_ax25_dev_get(char *devname)
 {
 	struct net_device *dev;
 
-	if ((dev = dev_get_by_name(devname)) == NULL)
+	if ((dev = dev_get_by_name(&init_net, devname)) == NULL)
 		return NULL;
 
 	if ((dev->flags & IFF_UP) && dev->type == ARPHRD_AX25)
@@ -593,15 +598,15 @@ struct net_device *nr_dev_first(void)
 {
 	struct net_device *dev, *first = NULL;
 
-	read_lock(&dev_base_lock);
-	for (dev = dev_base; dev != NULL; dev = dev->next) {
+	rcu_read_lock();
+	for_each_netdev_rcu(&init_net, dev) {
 		if ((dev->flags & IFF_UP) && dev->type == ARPHRD_NETROM)
 			if (first == NULL || strncmp(dev->name, first->name, 3) < 0)
 				first = dev;
 	}
 	if (first)
 		dev_hold(first);
-	read_unlock(&dev_base_lock);
+	rcu_read_unlock();
 
 	return first;
 }
@@ -613,44 +618,47 @@ struct net_device *nr_dev_get(ax25_address *addr)
 {
 	struct net_device *dev;
 
-	read_lock(&dev_base_lock);
-	for (dev = dev_base; dev != NULL; dev = dev->next) {
-		if ((dev->flags & IFF_UP) && dev->type == ARPHRD_NETROM && ax25cmp(addr, (ax25_address *)dev->dev_addr) == 0) {
+	rcu_read_lock();
+	for_each_netdev_rcu(&init_net, dev) {
+		if ((dev->flags & IFF_UP) && dev->type == ARPHRD_NETROM &&
+		    ax25cmp(addr, (ax25_address *)dev->dev_addr) == 0) {
 			dev_hold(dev);
 			goto out;
 		}
 	}
+	dev = NULL;
 out:
-	read_unlock(&dev_base_lock);
+	rcu_read_unlock();
 	return dev;
 }
 
-static ax25_digi *nr_call_to_digi(int ndigis, ax25_address *digipeaters)
+static ax25_digi *nr_call_to_digi(ax25_digi *digi, int ndigis,
+	ax25_address *digipeaters)
 {
-	static ax25_digi ax25_digi;
 	int i;
 
 	if (ndigis == 0)
 		return NULL;
 
 	for (i = 0; i < ndigis; i++) {
-		ax25_digi.calls[i]    = digipeaters[i];
-		ax25_digi.repeated[i] = 0;
+		digi->calls[i]    = digipeaters[i];
+		digi->repeated[i] = 0;
 	}
 
-	ax25_digi.ndigi      = ndigis;
-	ax25_digi.lastrepeat = -1;
+	digi->ndigi      = ndigis;
+	digi->lastrepeat = -1;
 
-	return &ax25_digi;
+	return digi;
 }
 
 /*
  *	Handle the ioctls that control the routing functions.
  */
-int nr_rt_ioctl(unsigned int cmd, void *arg)
+int nr_rt_ioctl(unsigned int cmd, void __user *arg)
 {
 	struct nr_route_struct nr_route;
 	struct net_device *dev;
+	ax25_digi digi;
 	int ret;
 
 	switch (cmd) {
@@ -668,13 +676,15 @@ int nr_rt_ioctl(unsigned int cmd, void *arg)
 			ret = nr_add_node(&nr_route.callsign,
 				nr_route.mnemonic,
 				&nr_route.neighbour,
-				nr_call_to_digi(nr_route.ndigis, nr_route.digipeaters),
+				nr_call_to_digi(&digi, nr_route.ndigis,
+						nr_route.digipeaters),
 				dev, nr_route.quality,
 				nr_route.obs_count);
 			break;
 		case NETROM_NEIGH:
 			ret = nr_add_neigh(&nr_route.callsign,
-				nr_call_to_digi(nr_route.ndigis, nr_route.digipeaters),
+				nr_call_to_digi(&digi, nr_route.ndigis,
+						nr_route.digipeaters),
 				dev, nr_route.quality);
 			break;
 		default:
@@ -724,15 +734,17 @@ void nr_link_failed(ax25_cb *ax25, int reason)
 	struct nr_node  *nr_node = NULL;
 
 	spin_lock_bh(&nr_neigh_list_lock);
-	nr_neigh_for_each(s, node, &nr_neigh_list)
+	nr_neigh_for_each(s, node, &nr_neigh_list) {
 		if (s->ax25 == ax25) {
 			nr_neigh_hold(s);
 			nr_neigh = s;
 			break;
 		}
+	}
 	spin_unlock_bh(&nr_neigh_list_lock);
 
-	if (nr_neigh == NULL) return;
+	if (nr_neigh == NULL)
+		return;
 
 	nr_neigh->ax25 = NULL;
 	ax25_cb_put(ax25);
@@ -742,11 +754,13 @@ void nr_link_failed(ax25_cb *ax25, int reason)
 		return;
 	}
 	spin_lock_bh(&nr_node_list_lock);
-	nr_node_for_each(nr_node, node, &nr_node_list)
+	nr_node_for_each(nr_node, node, &nr_node_list) {
 		nr_node_lock(nr_node);
-		if (nr_node->which < nr_node->count && nr_node->routes[nr_node->which].neighbour == nr_neigh)
+		if (nr_node->which < nr_node->count &&
+		    nr_node->routes[nr_node->which].neighbour == nr_neigh)
 			nr_node->which++;
 		nr_node_unlock(nr_node);
+	}
 	spin_unlock_bh(&nr_node_list_lock);
 	nr_neigh_put(nr_neigh);
 }
@@ -770,9 +784,13 @@ int nr_route_frame(struct sk_buff *skb, ax25_cb *ax25)
 	nr_src  = (ax25_address *)(skb->data + 0);
 	nr_dest = (ax25_address *)(skb->data + 7);
 
-	if (ax25 != NULL)
-		nr_add_node(nr_src, "", &ax25->dest_addr, ax25->digipeat,
-			    ax25->ax25_dev->dev, 0, sysctl_netrom_obsolescence_count_initialiser);
+	if (ax25 != NULL) {
+		ret = nr_add_node(nr_src, "", &ax25->dest_addr, ax25->digipeat,
+				  ax25->ax25_dev->dev, 0,
+				  sysctl_netrom_obsolescence_count_initialiser);
+		if (ret)
+			return ret;
+	}
 
 	if ((dev = nr_dev_get(nr_dest)) != NULL) {	/* Its for me */
 		if (ax25 == NULL)			/* Its from me */
@@ -826,17 +844,19 @@ int nr_route_frame(struct sk_buff *skb, ax25_cb *ax25)
 	dptr  = skb_push(skb, 1);
 	*dptr = AX25_P_NETROM;
 
-	ax25s = ax25_send_frame(skb, 256, (ax25_address *)dev->dev_addr, &nr_neigh->callsign, nr_neigh->digipeat, nr_neigh->dev);
-	if (nr_neigh->ax25 && ax25s) {
-		/* We were already holding this ax25_cb */
+	ax25s = nr_neigh->ax25;
+	nr_neigh->ax25 = ax25_send_frame(skb, 256,
+					 (ax25_address *)dev->dev_addr,
+					 &nr_neigh->callsign,
+					 nr_neigh->digipeat, nr_neigh->dev);
+	if (ax25s)
 		ax25_cb_put(ax25s);
-	}
-	nr_neigh->ax25 = ax25s;
 
 	dev_put(dev);
 	ret = (nr_neigh->ax25 != NULL);
 	nr_node_unlock(nr_node);
 	nr_node_put(nr_node);
+
 	return ret;
 }
 
@@ -844,33 +864,13 @@ int nr_route_frame(struct sk_buff *skb, ax25_cb *ax25)
 
 static void *nr_node_start(struct seq_file *seq, loff_t *pos)
 {
-	struct nr_node *nr_node;
-	struct hlist_node *node;
-	int i = 1;
- 
- 	spin_lock_bh(&nr_node_list_lock);
-	if (*pos == 0)
-		return SEQ_START_TOKEN;
-
-	nr_node_for_each(nr_node, node, &nr_node_list) {
-		if (i == *pos)
-			return nr_node;
-		++i;
-	}
-
-	return NULL;
+	spin_lock_bh(&nr_node_list_lock);
+	return seq_hlist_start_head(&nr_node_list, *pos);
 }
 
 static void *nr_node_next(struct seq_file *seq, void *v, loff_t *pos)
 {
-	struct hlist_node *node;
-	++*pos;
-	
-	node = (v == SEQ_START_TOKEN)  
-		? nr_node_list.first
-		: ((struct nr_node *)v)->node_node.next;
-
-	return hlist_entry(node, struct nr_node, node_node);
+	return seq_hlist_next(v, &nr_node_list, pos);
 }
 
 static void nr_node_stop(struct seq_file *seq, void *v)
@@ -880,16 +880,19 @@ static void nr_node_stop(struct seq_file *seq, void *v)
 
 static int nr_node_show(struct seq_file *seq, void *v)
 {
+	char buf[11];
 	int i;
 
 	if (v == SEQ_START_TOKEN)
 		seq_puts(seq,
 			 "callsign  mnemonic w n qual obs neigh qual obs neigh qual obs neigh\n");
 	else {
-		struct nr_node *nr_node = v;
+		struct nr_node *nr_node = hlist_entry(v, struct nr_node,
+						      node_node);
+
 		nr_node_lock(nr_node);
 		seq_printf(seq, "%-9s %-7s  %d %d",
-			ax2asc(&nr_node->callsign),
+			ax2asc(buf, &nr_node->callsign),
 			(nr_node->mnemonic[0] == '\0') ? "*" : nr_node->mnemonic,
 			nr_node->which + 1,
 			nr_node->count);
@@ -907,7 +910,7 @@ static int nr_node_show(struct seq_file *seq, void *v)
 	return 0;
 }
 
-static struct seq_operations nr_node_seqops = {
+static const struct seq_operations nr_node_seqops = {
 	.start = nr_node_start,
 	.next = nr_node_next,
 	.stop = nr_node_stop,
@@ -919,7 +922,7 @@ static int nr_node_info_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nr_node_seqops);
 }
 
-struct file_operations nr_nodes_fops = {
+const struct file_operations nr_nodes_fops = {
 	.owner = THIS_MODULE,
 	.open = nr_node_info_open,
 	.read = seq_read,
@@ -929,31 +932,13 @@ struct file_operations nr_nodes_fops = {
 
 static void *nr_neigh_start(struct seq_file *seq, loff_t *pos)
 {
-	struct nr_neigh *nr_neigh;
-	struct hlist_node *node;
-	int i = 1;
-
 	spin_lock_bh(&nr_neigh_list_lock);
-	if (*pos == 0)
-		return SEQ_START_TOKEN;
-
-	nr_neigh_for_each(nr_neigh, node, &nr_neigh_list) {
-		if (i == *pos)
-			return nr_neigh;
-	}
-	return NULL;
+	return seq_hlist_start_head(&nr_neigh_list, *pos);
 }
 
 static void *nr_neigh_next(struct seq_file *seq, void *v, loff_t *pos)
 {
-	struct hlist_node *node;
-	++*pos;
-	
-	node = (v == SEQ_START_TOKEN)  
-		? nr_neigh_list.first
-		: ((struct nr_neigh *)v)->neigh_node.next;
-
-	return hlist_entry(node, struct nr_neigh, neigh_node);
+	return seq_hlist_next(v, &nr_neigh_list, pos);
 }
 
 static void nr_neigh_stop(struct seq_file *seq, void *v)
@@ -963,16 +948,18 @@ static void nr_neigh_stop(struct seq_file *seq, void *v)
 
 static int nr_neigh_show(struct seq_file *seq, void *v)
 {
+	char buf[11];
 	int i;
 
 	if (v == SEQ_START_TOKEN)
 		seq_puts(seq, "addr  callsign  dev  qual lock count failed digipeaters\n");
 	else {
-		struct nr_neigh *nr_neigh = v;
+		struct nr_neigh *nr_neigh;
 
+		nr_neigh = hlist_entry(v, struct nr_neigh, neigh_node);
 		seq_printf(seq, "%05d %-9s %-4s  %3d    %d   %3d    %3d",
 			nr_neigh->number,
-			ax2asc(&nr_neigh->callsign),
+			ax2asc(buf, &nr_neigh->callsign),
 			nr_neigh->dev ? nr_neigh->dev->name : "???",
 			nr_neigh->quality,
 			nr_neigh->locked,
@@ -981,8 +968,8 @@ static int nr_neigh_show(struct seq_file *seq, void *v)
 
 		if (nr_neigh->digipeat != NULL) {
 			for (i = 0; i < nr_neigh->digipeat->ndigi; i++)
-				seq_printf(seq, " %s", 
-					   ax2asc(&nr_neigh->digipeat->calls[i]));
+				seq_printf(seq, " %s",
+					   ax2asc(buf, &nr_neigh->digipeat->calls[i]));
 		}
 
 		seq_puts(seq, "\n");
@@ -990,7 +977,7 @@ static int nr_neigh_show(struct seq_file *seq, void *v)
 	return 0;
 }
 
-static struct seq_operations nr_neigh_seqops = {
+static const struct seq_operations nr_neigh_seqops = {
 	.start = nr_neigh_start,
 	.next = nr_neigh_next,
 	.stop = nr_neigh_stop,
@@ -1002,7 +989,7 @@ static int nr_neigh_info_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nr_neigh_seqops);
 }
 
-struct file_operations nr_neigh_fops = {
+const struct file_operations nr_neigh_fops = {
 	.owner = THIS_MODULE,
 	.open = nr_neigh_info_open,
 	.read = seq_read,

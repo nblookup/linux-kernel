@@ -8,7 +8,7 @@
  * Version:	@(#)if.h	1.0.2	04/18/93
  *
  * Authors:	Original taken from Berkeley UNIX 4.3, (c) UCB 1982-1988
- *		Ross Biro, <bir7@leland.Stanford.Edu>
+ *		Ross Biro
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
  *		This program is free software; you can redistribute it and/or
@@ -21,8 +21,10 @@
 
 #include <linux/types.h>		/* for "__kernel_caddr_t" et al	*/
 #include <linux/socket.h>		/* for "struct sockaddr" et al	*/
+#include <linux/compiler.h>		/* for "__user" et al           */
 
 #define	IFNAMSIZ	16
+#define	IFALIASZ	256
 #include <linux/hdlc/ioctl.h>
 
 /* Standard interface flags (netdevice->flags). */
@@ -32,7 +34,7 @@
 #define	IFF_LOOPBACK	0x8		/* is a loopback net		*/
 #define	IFF_POINTOPOINT	0x10		/* interface is has p-p link	*/
 #define	IFF_NOTRAILERS	0x20		/* avoid use of trailers	*/
-#define	IFF_RUNNING	0x40		/* resources allocated		*/
+#define	IFF_RUNNING	0x40		/* interface RFC2863 OPER_UP	*/
 #define	IFF_NOARP	0x80		/* no ARP protocol		*/
 #define	IFF_PROMISC	0x100		/* receive all packets		*/
 #define	IFF_ALLMULTI	0x200		/* receive all multicast packets*/
@@ -42,15 +44,38 @@
 
 #define IFF_MULTICAST	0x1000		/* Supports multicast		*/
 
-#define IFF_VOLATILE	(IFF_LOOPBACK|IFF_POINTOPOINT|IFF_BROADCAST|IFF_MASTER|IFF_SLAVE|IFF_RUNNING)
-
 #define IFF_PORTSEL	0x2000          /* can set media type		*/
 #define IFF_AUTOMEDIA	0x4000		/* auto media select active	*/
 #define IFF_DYNAMIC	0x8000		/* dialup device with changing addresses*/
 
+#define IFF_LOWER_UP	0x10000		/* driver signals L1 up		*/
+#define IFF_DORMANT	0x20000		/* driver signals dormant	*/
+
+#define IFF_ECHO	0x40000		/* echo sent packets		*/
+
+#define IFF_VOLATILE	(IFF_LOOPBACK|IFF_POINTOPOINT|IFF_BROADCAST|IFF_ECHO|\
+		IFF_MASTER|IFF_SLAVE|IFF_RUNNING|IFF_LOWER_UP|IFF_DORMANT)
+
 /* Private (from user) interface flags (netdevice->priv_flags). */
 #define IFF_802_1Q_VLAN 0x1             /* 802.1Q VLAN device.          */
 #define IFF_EBRIDGE	0x2		/* Ethernet bridging device.	*/
+#define IFF_SLAVE_INACTIVE	0x4	/* bonding slave not the curr. active */
+#define IFF_MASTER_8023AD	0x8	/* bonding master, 802.3ad. 	*/
+#define IFF_MASTER_ALB	0x10		/* bonding master, balance-alb.	*/
+#define IFF_BONDING	0x20		/* bonding master or slave	*/
+#define IFF_SLAVE_NEEDARP 0x40		/* need ARPs for validation	*/
+#define IFF_ISATAP	0x80		/* ISATAP interface (RFC4214)	*/
+#define IFF_MASTER_ARPMON 0x100		/* bonding master, ARP mon in use */
+#define IFF_WAN_HDLC	0x200		/* WAN HDLC device		*/
+#define IFF_XMIT_DST_RELEASE 0x400	/* dev_hard_start_xmit() is allowed to
+					 * release skb->dst
+					 */
+#define IFF_DONT_BRIDGE 0x800		/* disallow bridging this ether dev */
+#define IFF_DISABLE_NETPOLL	0x1000	/* disable netpoll at run-time */
+#define IFF_MACVLAN_PORT	0x2000	/* device used as macvlan port */
+#define IFF_BRIDGE_PORT	0x4000		/* device used as bridge port */
+#define IFF_OVS_DATAPATH	0x8000	/* device used as Open vSwitch
+					 * datapath port */
 
 #define IF_GET_IFACE	0x0001		/* for querying only */
 #define IF_GET_PROTO	0x0002
@@ -62,6 +87,7 @@
 #define IF_IFACE_T1	0x1003		/* T1 telco serial interface	*/
 #define IF_IFACE_E1	0x1004		/* E1 telco serial interface	*/
 #define IF_IFACE_SYNC_SERIAL 0x1005	/* can't be set by software	*/
+#define IF_IFACE_X21D   0x1006          /* X.21 Dual Clocking (FarSite) */
 
 /* For definitions see hdlc.h */
 #define IF_PROTO_HDLC	0x2000		/* raw HDLC protocol		*/
@@ -76,7 +102,24 @@
 #define IF_PROTO_FR_DEL_ETH_PVC 0x2009	/*  Delete FR Ethernet-bridged PVC */
 #define IF_PROTO_FR_PVC	0x200A		/* for reading PVC status	*/
 #define IF_PROTO_FR_ETH_PVC 0x200B
+#define IF_PROTO_RAW    0x200C          /* RAW Socket                   */
 
+/* RFC 2863 operational status */
+enum {
+	IF_OPER_UNKNOWN,
+	IF_OPER_NOTPRESENT,
+	IF_OPER_DOWN,
+	IF_OPER_LOWERLAYERDOWN,
+	IF_OPER_TESTING,
+	IF_OPER_DORMANT,
+	IF_OPER_UP,
+};
+
+/* link modes */
+enum {
+	IF_LINK_MODE_DEFAULT,
+	IF_LINK_MODE_DORMANT,	/* limit upward transition to dormant */
+};
 
 /*
  *	Device mapping structure. I'd just gone off and designed a 
@@ -88,8 +131,7 @@
  *	being very small might be worth keeping for clean configuration.
  */
 
-struct ifmap 
-{
+struct ifmap {
 	unsigned long mem_start;
 	unsigned long mem_end;
 	unsigned short base_addr; 
@@ -99,21 +141,20 @@ struct ifmap
 	/* 3 bytes spare */
 };
 
-struct if_settings
-{
+struct if_settings {
 	unsigned int type;	/* Type of physical device or protocol */
 	unsigned int size;	/* Size of the data allocated by the caller */
 	union {
 		/* {atm/eth/dsl}_settings anyone ? */
-		raw_hdlc_proto		*raw_hdlc;
-		cisco_proto		*cisco;
-		fr_proto		*fr;
-		fr_proto_pvc		*fr_pvc;
-		fr_proto_pvc_info	*fr_pvc_info;
+		raw_hdlc_proto		__user *raw_hdlc;
+		cisco_proto		__user *cisco;
+		fr_proto		__user *fr;
+		fr_proto_pvc		__user *fr_pvc;
+		fr_proto_pvc_info	__user *fr_pvc_info;
 
 		/* interface settings */
-		sync_serial_settings	*sync;
-		te1_settings		*te1;
+		sync_serial_settings	__user *sync;
+		te1_settings		__user *te1;
 	} ifs_ifsu;
 };
 
@@ -124,8 +165,7 @@ struct if_settings
  * remainder may be interface specific.
  */
 
-struct ifreq 
-{
+struct ifreq {
 #define IFHWADDRLEN	6
 	union
 	{
@@ -144,7 +184,7 @@ struct ifreq
 		struct  ifmap ifru_map;
 		char	ifru_slave[IFNAMSIZ];	/* Just fits the size */
 		char	ifru_newname[IFNAMSIZ];
-		char *	ifru_data;
+		void __user *	ifru_data;
 		struct	if_settings ifru_settings;
 	} ifr_ifru;
 };
@@ -174,17 +214,14 @@ struct ifreq
  * must know all networks accessible).
  */
 
-struct ifconf 
-{
+struct ifconf  {
 	int	ifc_len;			/* size of buffer	*/
-	union 
-	{
-		char *			ifcu_buf;
-		struct	ifreq 		*ifcu_req;
+	union {
+		char __user *ifcu_buf;
+		struct ifreq __user *ifcu_req;
 	} ifc_ifcu;
 };
 #define	ifc_buf	ifc_ifcu.ifcu_buf		/* buffer address	*/
 #define	ifc_req	ifc_ifcu.ifcu_req		/* array of structures	*/
-
 
 #endif /* _LINUX_IF_H */

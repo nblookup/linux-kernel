@@ -7,18 +7,8 @@
 /*	(SCSI chip set used Tekram ASIC TRM-S1040)			*/
 /*									*/
 /************************************************************************/
-
 #ifndef DC395x_H
 #define DC395x_H
-
-/************************************************************************/
-/*									*/
-/*	Name, Banner and Version					*/
-/*									*/
-/************************************************************************/
-#define DC395X_NAME			"dc395x"
-#define DC395X_BANNER			"Tekram DC395(U/UW/F), DC315(U) - ASIC TRM-S1040"
-#define DC395X_VERSION			"v2.04, 2003/05/19"
 
 /************************************************************************/
 /*									*/
@@ -627,7 +617,7 @@ struct ScsiInqData
 #define NTC_DO_SEND_START		0x08	/* Send start command SPINUP		*/
 #define NTC_DO_DISCONNECT		0x04	/* Enable SCSI disconnect		*/
 #define NTC_DO_SYNC_NEGO		0x02	/* Sync negotiation			*/
-#define NTC_DO_PARITY_CHK		0x01	/* (it sould define at NAC)		*/
+#define NTC_DO_PARITY_CHK		0x01	/* (it should define at NAC)		*/
 						/* Parity check enable			*/
 
 /************************************************************************/

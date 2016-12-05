@@ -1,20 +1,25 @@
 #ifndef _LINUX_TIME_H
 #define _LINUX_TIME_H
 
-#include <asm/param.h>
 #include <linux/types.h>
+
+#ifdef __KERNEL__
+# include <linux/cache.h>
+# include <linux/seqlock.h>
+# include <linux/math64.h>
+#endif
 
 #ifndef _STRUCT_TIMESPEC
 #define _STRUCT_TIMESPEC
 struct timespec {
-	time_t	tv_sec;		/* seconds */
-	long	tv_nsec;	/* nanoseconds */
+	__kernel_time_t	tv_sec;			/* seconds */
+	long		tv_nsec;		/* nanoseconds */
 };
-#endif /* _STRUCT_TIMESPEC */
+#endif
 
 struct timeval {
-	time_t		tv_sec;		/* seconds */
-	suseconds_t	tv_usec;	/* microseconds */
+	__kernel_time_t		tv_sec;		/* seconds */
+	__kernel_suseconds_t	tv_usec;	/* microseconds */
 };
 
 struct timezone {
@@ -24,318 +29,235 @@ struct timezone {
 
 #ifdef __KERNEL__
 
-#include <linux/spinlock.h>
-#include <linux/seqlock.h>
-#include <linux/timex.h>
-#include <asm/div64.h>
-#ifndef div_long_long_rem
+extern struct timezone sys_tz;
 
-#define div_long_long_rem(dividend,divisor,remainder) ({ \
-		       u64 result = dividend;		\
-		       *remainder = do_div(result,divisor); \
-		       result; })
+/* Parameters used to convert the timespec values: */
+#define MSEC_PER_SEC	1000L
+#define USEC_PER_MSEC	1000L
+#define NSEC_PER_USEC	1000L
+#define NSEC_PER_MSEC	1000000L
+#define USEC_PER_SEC	1000000L
+#define NSEC_PER_SEC	1000000000L
+#define FSEC_PER_SEC	1000000000000000LL
 
-#endif
+#define TIME_T_MAX	(time_t)((1UL << ((sizeof(time_t) << 3) - 1)) - 1)
 
-/*
- * Have the 32 bit jiffies value wrap 5 minutes after boot
- * so jiffies wrap bugs show up earlier.
- */
-#define INITIAL_JIFFIES ((unsigned long)(unsigned int) (-300*HZ))
-
-/*
- * Change timeval to jiffies, trying to avoid the
- * most obvious overflows..
- *
- * And some not so obvious.
- *
- * Note that we don't want to return MAX_LONG, because
- * for various timeout reasons we often end up having
- * to wait "jiffies+1" in order to guarantee that we wait
- * at _least_ "jiffies" - so "jiffies+1" had better still
- * be positive.
- */
-#define MAX_JIFFY_OFFSET ((~0UL >> 1)-1)
-
-/* Parameters used to convert the timespec values */
-#ifndef USEC_PER_SEC
-#define USEC_PER_SEC (1000000L)
-#endif
-
-#ifndef NSEC_PER_SEC
-#define NSEC_PER_SEC (1000000000L)
-#endif
-
-#ifndef NSEC_PER_USEC
-#define NSEC_PER_USEC (1000L)
-#endif
-
-/*
- * We want to do realistic conversions of time so we need to use the same
- * values the update wall clock code uses as the jiffies size.  This value
- * is: TICK_NSEC (which is defined in timex.h).  This
- * is a constant and is in nanoseconds.  We will used scaled math
- * with a set of scales defined here as SEC_JIFFIE_SC,  USEC_JIFFIE_SC and
- * NSEC_JIFFIE_SC.  Note that these defines contain nothing but
- * constants and so are computed at compile time.  SHIFT_HZ (computed in
- * timex.h) adjusts the scaling for different HZ values.
-
- * Scaled math???  What is that?
- *
- * Scaled math is a way to do integer math on values that would,
- * otherwise, either overflow, underflow, or cause undesired div
- * instructions to appear in the execution path.  In short, we "scale"
- * up the operands so they take more bits (more precision, less
- * underflow), do the desired operation and then "scale" the result back
- * by the same amount.  If we do the scaling by shifting we avoid the
- * costly mpy and the dastardly div instructions.
-
- * Suppose, for example, we want to convert from seconds to jiffies
- * where jiffies is defined in nanoseconds as NSEC_PER_JIFFIE.  The
- * simple math is: jiff = (sec * NSEC_PER_SEC) / NSEC_PER_JIFFIE; We
- * observe that (NSEC_PER_SEC / NSEC_PER_JIFFIE) is a constant which we
- * might calculate at compile time, however, the result will only have
- * about 3-4 bits of precision (less for smaller values of HZ).
- *
- * So, we scale as follows:
- * jiff = (sec) * (NSEC_PER_SEC / NSEC_PER_JIFFIE);
- * jiff = ((sec) * ((NSEC_PER_SEC * SCALE)/ NSEC_PER_JIFFIE)) / SCALE;
- * Then we make SCALE a power of two so:
- * jiff = ((sec) * ((NSEC_PER_SEC << SCALE)/ NSEC_PER_JIFFIE)) >> SCALE;
- * Now we define:
- * #define SEC_CONV = ((NSEC_PER_SEC << SCALE)/ NSEC_PER_JIFFIE))
- * jiff = (sec * SEC_CONV) >> SCALE;
- *
- * Often the math we use will expand beyond 32-bits so we tell C how to
- * do this and pass the 64-bit result of the mpy through the ">> SCALE"
- * which should take the result back to 32-bits.  We want this expansion
- * to capture as much precision as possible.  At the same time we don't
- * want to overflow so we pick the SCALE to avoid this.  In this file,
- * that means using a different scale for each range of HZ values (as
- * defined in timex.h).
- *
- * For those who want to know, gcc will give a 64-bit result from a "*"
- * operator if the result is a long long AND at least one of the
- * operands is cast to long long (usually just prior to the "*" so as
- * not to confuse it into thinking it really has a 64-bit operand,
- * which, buy the way, it can do, but it take more code and at least 2
- * mpys).
-
- * We also need to be aware that one second in nanoseconds is only a
- * couple of bits away from overflowing a 32-bit word, so we MUST use
- * 64-bits to get the full range time in nanoseconds.
-
- */
-
-/*
- * Here are the scales we will use.  One for seconds, nanoseconds and
- * microseconds.
- *
- * Within the limits of cpp we do a rough cut at the SEC_JIFFIE_SC and
- * check if the sign bit is set.  If not, we bump the shift count by 1.
- * (Gets an extra bit of precision where we can use it.)
- * We know it is set for HZ = 1024 and HZ = 100 not for 1000.
- * Haven't tested others.
-
- * Limits of cpp (for #if expressions) only long (no long long), but
- * then we only need the most signicant bit.
- */
-
-#define SEC_JIFFIE_SC (31 - SHIFT_HZ)
-#if !((((NSEC_PER_SEC << 2) / TICK_NSEC) << (SEC_JIFFIE_SC - 2)) & 0x80000000)
-#undef SEC_JIFFIE_SC
-#define SEC_JIFFIE_SC (32 - SHIFT_HZ)
-#endif
-#define NSEC_JIFFIE_SC (SEC_JIFFIE_SC + 29)
-#define USEC_JIFFIE_SC (SEC_JIFFIE_SC + 19)
-#define SEC_CONVERSION ((unsigned long)((((u64)NSEC_PER_SEC << SEC_JIFFIE_SC))\
-                                         / (u64)TICK_NSEC))
-
-#define NSEC_CONVERSION ((unsigned long)((((u64)1 << NSEC_JIFFIE_SC))\
-                                         / (u64)TICK_NSEC))
-#define USEC_CONVERSION  \
-                    ((unsigned long)((((u64)NSEC_PER_USEC << USEC_JIFFIE_SC)) \
-                                         / (u64)TICK_NSEC))
-/*
- * USEC_ROUND is used in the timeval to jiffie conversion.  See there
- * for more details.  It is the scaled resolution rounding value.  Note
- * that it is a 64-bit value.  Since, when it is applied, we are already
- * in jiffies (albit scaled), it is nothing but the bits we will shift
- * off.
- */
-#define USEC_ROUND (u64)(((u64)1 << USEC_JIFFIE_SC) - 1)
-/*
- * The maximum jiffie value is (MAX_INT >> 1).  Here we translate that
- * into seconds.  The 64-bit case will overflow if we are not careful,
- * so use the messy SH_DIV macro to do it.  Still all constants.
- */
-#if BITS_PER_LONG < 64
-# define MAX_SEC_IN_JIFFIES \
-	(long)((u64)((u64)MAX_JIFFY_OFFSET * TICK_NSEC) / NSEC_PER_SEC)
-#else	/* take care of overflow on 64 bits machines */
-# define MAX_SEC_IN_JIFFIES \
-	(SH_DIV((MAX_JIFFY_OFFSET >> SEC_JIFFIE_SC) * TICK_NSEC, NSEC_PER_SEC, 1) - 1)
-
-#endif
-/*
- * The TICK_NSEC - 1 rounds up the value to the next resolution.  Note
- * that a remainder subtract here would not do the right thing as the
- * resolution values don't fall on second boundries.  I.e. the line:
- * nsec -= nsec % TICK_NSEC; is NOT a correct resolution rounding.
- *
- * Rather, we just shift the bits off the right.
- *
- * The >> (NSEC_JIFFIE_SC - SEC_JIFFIE_SC) converts the scaled nsec
- * value to a scaled second value.
- */
-static __inline__ unsigned long
-timespec_to_jiffies(struct timespec *value)
+static inline int timespec_equal(const struct timespec *a,
+                                 const struct timespec *b)
 {
-	unsigned long sec = value->tv_sec;
-	long nsec = value->tv_nsec + TICK_NSEC - 1;
-
-	if (sec >= MAX_SEC_IN_JIFFIES){
-		sec = MAX_SEC_IN_JIFFIES;
-		nsec = 0;
-	}
-	return (((u64)sec * SEC_CONVERSION) +
-		(((u64)nsec * NSEC_CONVERSION) >>
-		 (NSEC_JIFFIE_SC - SEC_JIFFIE_SC))) >> SEC_JIFFIE_SC;
-
-}
-
-static __inline__ void
-jiffies_to_timespec(unsigned long jiffies, struct timespec *value)
-{
-	/*
-	 * Convert jiffies to nanoseconds and separate with
-	 * one divide.
-	 */
-	u64 nsec = (u64)jiffies * TICK_NSEC; 
-	value->tv_sec = div_long_long_rem(nsec, NSEC_PER_SEC, &value->tv_nsec);
-}
-
-/* Same for "timeval"
- *
- * Well, almost.  The problem here is that the real system resolution is
- * in nanoseconds and the value being converted is in micro seconds.
- * Also for some machines (those that use HZ = 1024, in-particular),
- * there is a LARGE error in the tick size in microseconds.
-
- * The solution we use is to do the rounding AFTER we convert the
- * microsecond part.  Thus the USEC_ROUND, the bits to be shifted off.
- * Instruction wise, this should cost only an additional add with carry
- * instruction above the way it was done above.
- */
-static __inline__ unsigned long
-timeval_to_jiffies(struct timeval *value)
-{
-	unsigned long sec = value->tv_sec;
-	long usec = value->tv_usec;
-
-	if (sec >= MAX_SEC_IN_JIFFIES){
-		sec = MAX_SEC_IN_JIFFIES;
-		usec = 0;
-	}
-	return (((u64)sec * SEC_CONVERSION) +
-		(((u64)usec * USEC_CONVERSION + USEC_ROUND) >>
-		 (USEC_JIFFIE_SC - SEC_JIFFIE_SC))) >> SEC_JIFFIE_SC;
-}
-
-static __inline__ void
-jiffies_to_timeval(unsigned long jiffies, struct timeval *value)
-{
-	/*
-	 * Convert jiffies to nanoseconds and separate with
-	 * one divide.
-	 */
-	u64 nsec = (u64)jiffies * TICK_NSEC; 
-	value->tv_sec = div_long_long_rem(nsec, NSEC_PER_SEC, &value->tv_usec);
-	value->tv_usec /= NSEC_PER_USEC;
-}
-
-static __inline__ int timespec_equal(struct timespec *a, struct timespec *b) 
-{ 
 	return (a->tv_sec == b->tv_sec) && (a->tv_nsec == b->tv_nsec);
-} 
+}
 
-/* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
- * Assumes input in normal date format, i.e. 1980-12-31 23:59:59
- * => year=1980, mon=12, day=31, hour=23, min=59, sec=59.
- *
- * [For the Julian calendar (which was used in Russia before 1917,
- * Britain & colonies before 1752, anywhere else before 1582,
- * and is still in use by some communities) leave out the
- * -year/100+year/400 terms, and add 10.]
- *
- * This algorithm was first published by Gauss (I think).
- *
- * WARNING: this function will overflow on 2106-02-07 06:28:16 on
- * machines were long is 32-bit! (However, as time_t is signed, we
- * will already get problems at other places on 2038-01-19 03:14:08)
+/*
+ * lhs < rhs:  return <0
+ * lhs == rhs: return 0
+ * lhs > rhs:  return >0
  */
-static inline unsigned long
-mktime (unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
+static inline int timespec_compare(const struct timespec *lhs, const struct timespec *rhs)
 {
-	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
-		mon += 12;		/* Puts Feb last since it has leap day */
-		year -= 1;
-	}
-
-	return (((
-		(unsigned long) (year/4 - year/100 + year/400 + 367*mon/12 + day) +
-			year*365 - 719499
-	    )*24 + hour /* now have hours */
-	  )*60 + min /* now have minutes */
-	)*60 + sec; /* finally seconds */
+	if (lhs->tv_sec < rhs->tv_sec)
+		return -1;
+	if (lhs->tv_sec > rhs->tv_sec)
+		return 1;
+	return lhs->tv_nsec - rhs->tv_nsec;
 }
 
-extern struct timespec xtime;
-extern struct timespec wall_to_monotonic;
-extern seqlock_t xtime_lock;
-
-static inline unsigned long get_seconds(void)
-{ 
-	return xtime.tv_sec;
+static inline int timeval_compare(const struct timeval *lhs, const struct timeval *rhs)
+{
+	if (lhs->tv_sec < rhs->tv_sec)
+		return -1;
+	if (lhs->tv_sec > rhs->tv_sec)
+		return 1;
+	return lhs->tv_usec - rhs->tv_usec;
 }
 
+extern unsigned long mktime(const unsigned int year, const unsigned int mon,
+			    const unsigned int day, const unsigned int hour,
+			    const unsigned int min, const unsigned int sec);
+
+extern void set_normalized_timespec(struct timespec *ts, time_t sec, s64 nsec);
+
+/*
+ * timespec_add_safe assumes both values are positive and checks
+ * for overflow. It will return TIME_T_MAX if the reutrn would be
+ * smaller then either of the arguments.
+ */
+extern struct timespec timespec_add_safe(const struct timespec lhs,
+					 const struct timespec rhs);
+
+
+static inline struct timespec timespec_add(struct timespec lhs,
+						struct timespec rhs)
+{
+	struct timespec ts_delta;
+	set_normalized_timespec(&ts_delta, lhs.tv_sec + rhs.tv_sec,
+				lhs.tv_nsec + rhs.tv_nsec);
+	return ts_delta;
+}
+
+/*
+ * sub = lhs - rhs, in normalized form
+ */
+static inline struct timespec timespec_sub(struct timespec lhs,
+						struct timespec rhs)
+{
+	struct timespec ts_delta;
+	set_normalized_timespec(&ts_delta, lhs.tv_sec - rhs.tv_sec,
+				lhs.tv_nsec - rhs.tv_nsec);
+	return ts_delta;
+}
+
+/*
+ * Returns true if the timespec is norm, false if denorm:
+ */
+#define timespec_valid(ts) \
+	(((ts)->tv_sec >= 0) && (((unsigned long) (ts)->tv_nsec) < NSEC_PER_SEC))
+
+extern void read_persistent_clock(struct timespec *ts);
+extern void read_boot_clock(struct timespec *ts);
+extern int update_persistent_clock(struct timespec now);
+extern int no_sync_cmos_clock __read_mostly;
+void timekeeping_init(void);
+extern int timekeeping_suspended;
+
+unsigned long get_seconds(void);
 struct timespec current_kernel_time(void);
+struct timespec __current_kernel_time(void); /* does not take xtime_lock */
+struct timespec get_monotonic_coarse(void);
+void get_xtime_and_monotonic_and_sleep_offset(struct timespec *xtim,
+				struct timespec *wtom, struct timespec *sleep);
 
-#define CURRENT_TIME (current_kernel_time())
+#define CURRENT_TIME		(current_kernel_time())
+#define CURRENT_TIME_SEC	((struct timespec) { get_seconds(), 0 })
 
+/* Some architectures do not supply their own clocksource.
+ * This is mainly the case in architectures that get their
+ * inter-tick times by reading the counter on their interval
+ * timer. Since these timers wrap every tick, they're not really
+ * useful as clocksources. Wrapping them to act like one is possible
+ * but not very efficient. So we provide a callout these arches
+ * can implement for use with the jiffies clocksource to provide
+ * finer then tick granular time.
+ */
+#ifdef CONFIG_ARCH_USES_GETTIMEOFFSET
+extern u32 arch_gettimeoffset(void);
+#else
+static inline u32 arch_gettimeoffset(void) { return 0; }
+#endif
+
+extern void do_gettimeofday(struct timeval *tv);
+extern int do_settimeofday(const struct timespec *tv);
+extern int do_sys_settimeofday(const struct timespec *tv,
+			       const struct timezone *tz);
+#define do_posix_clock_monotonic_gettime(ts) ktime_get_ts(ts)
+extern long do_utimes(int dfd, const char __user *filename, struct timespec *times, int flags);
+struct itimerval;
+extern int do_setitimer(int which, struct itimerval *value,
+			struct itimerval *ovalue);
+extern unsigned int alarm_setitimer(unsigned int seconds);
+extern int do_getitimer(int which, struct itimerval *value);
+extern void getnstimeofday(struct timespec *tv);
+extern void getrawmonotonic(struct timespec *ts);
+extern void getnstime_raw_and_real(struct timespec *ts_raw,
+		struct timespec *ts_real);
+extern void getboottime(struct timespec *ts);
+extern void monotonic_to_bootbased(struct timespec *ts);
+extern void get_monotonic_boottime(struct timespec *ts);
+
+extern struct timespec timespec_trunc(struct timespec t, unsigned gran);
+extern int timekeeping_valid_for_hres(void);
+extern u64 timekeeping_max_deferment(void);
+extern void timekeeping_leap_insert(int leapsecond);
+extern int timekeeping_inject_offset(struct timespec *ts);
+
+struct tms;
+extern void do_sys_times(struct tms *);
+
+/*
+ * Similar to the struct tm in userspace <time.h>, but it needs to be here so
+ * that the kernel source is self contained.
+ */
+struct tm {
+	/*
+	 * the number of seconds after the minute, normally in the range
+	 * 0 to 59, but can be up to 60 to allow for leap seconds
+	 */
+	int tm_sec;
+	/* the number of minutes after the hour, in the range 0 to 59*/
+	int tm_min;
+	/* the number of hours past midnight, in the range 0 to 23 */
+	int tm_hour;
+	/* the day of the month, in the range 1 to 31 */
+	int tm_mday;
+	/* the number of months since January, in the range 0 to 11 */
+	int tm_mon;
+	/* the number of years since 1900 */
+	long tm_year;
+	/* the number of days since Sunday, in the range 0 to 6 */
+	int tm_wday;
+	/* the number of days since January 1, in the range 0 to 365 */
+	int tm_yday;
+};
+
+void time_to_tm(time_t totalsecs, int offset, struct tm *result);
+
+/**
+ * timespec_to_ns - Convert timespec to nanoseconds
+ * @ts:		pointer to the timespec variable to be converted
+ *
+ * Returns the scalar nanosecond representation of the timespec
+ * parameter.
+ */
+static inline s64 timespec_to_ns(const struct timespec *ts)
+{
+	return ((s64) ts->tv_sec * NSEC_PER_SEC) + ts->tv_nsec;
+}
+
+/**
+ * timeval_to_ns - Convert timeval to nanoseconds
+ * @ts:		pointer to the timeval variable to be converted
+ *
+ * Returns the scalar nanosecond representation of the timeval
+ * parameter.
+ */
+static inline s64 timeval_to_ns(const struct timeval *tv)
+{
+	return ((s64) tv->tv_sec * NSEC_PER_SEC) +
+		tv->tv_usec * NSEC_PER_USEC;
+}
+
+/**
+ * ns_to_timespec - Convert nanoseconds to timespec
+ * @nsec:	the nanoseconds value to be converted
+ *
+ * Returns the timespec representation of the nsec parameter.
+ */
+extern struct timespec ns_to_timespec(const s64 nsec);
+
+/**
+ * ns_to_timeval - Convert nanoseconds to timeval
+ * @nsec:	the nanoseconds value to be converted
+ *
+ * Returns the timeval representation of the nsec parameter.
+ */
+extern struct timeval ns_to_timeval(const s64 nsec);
+
+/**
+ * timespec_add_ns - Adds nanoseconds to a timespec
+ * @a:		pointer to timespec to be incremented
+ * @ns:		unsigned nanoseconds value to be added
+ *
+ * This must always be inlined because its used from the x86-64 vdso,
+ * which cannot call other kernel functions.
+ */
+static __always_inline void timespec_add_ns(struct timespec *a, u64 ns)
+{
+	a->tv_sec += __iter_div_u64_rem(a->tv_nsec + ns, NSEC_PER_SEC, &ns);
+	a->tv_nsec = ns;
+}
 #endif /* __KERNEL__ */
 
 #define NFDBITS			__NFDBITS
-
-#ifdef __KERNEL__
-extern void do_gettimeofday(struct timeval *tv);
-extern int do_settimeofday(struct timespec *tv);
-extern int do_sys_settimeofday(struct timespec *tv, struct timezone *tz);
-extern void clock_was_set(void); // call when ever the clock is set
-extern int do_posix_clock_monotonic_gettime(struct timespec *tp);
-extern long do_nanosleep(struct timespec *t);
-extern long do_utimes(char __user * filename, struct timeval * times);
-struct itimerval;
-extern int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue);
-extern int do_getitimer(int which, struct itimerval *value);
-
-static inline void
-set_normalized_timespec (struct timespec *ts, time_t sec, long nsec)
-{
-	while (nsec > NSEC_PER_SEC) {
-		nsec -= NSEC_PER_SEC;
-		++sec;
-	}
-	while (nsec < 0) {
-		nsec += NSEC_PER_SEC;
-		--sec;
-	}
-	ts->tv_sec = sec;
-	ts->tv_nsec = nsec;
-}
-#endif
 
 #define FD_SETSIZE		__FD_SETSIZE
 #define FD_SET(fd,fdsetp)	__FD_SET(fd,fdsetp)
@@ -345,43 +267,45 @@ set_normalized_timespec (struct timespec *ts, time_t sec, long nsec)
 
 /*
  * Names of the interval timers, and structure
- * defining a timer setting.
+ * defining a timer setting:
  */
-#define	ITIMER_REAL	0
-#define	ITIMER_VIRTUAL	1
-#define	ITIMER_PROF	2
+#define	ITIMER_REAL		0
+#define	ITIMER_VIRTUAL		1
+#define	ITIMER_PROF		2
 
-struct  itimerspec {
-        struct  timespec it_interval;    /* timer period */
-        struct  timespec it_value;       /* timer expiration */
+struct itimerspec {
+	struct timespec it_interval;	/* timer period */
+	struct timespec it_value;	/* timer expiration */
 };
 
-struct	itimerval {
-	struct	timeval it_interval;	/* timer interval */
-	struct	timeval it_value;	/* current value */
+struct itimerval {
+	struct timeval it_interval;	/* timer interval */
+	struct timeval it_value;	/* current value */
 };
 
+/*
+ * The IDs of the various system clocks (for POSIX.1b interval timers):
+ */
+#define CLOCK_REALTIME			0
+#define CLOCK_MONOTONIC			1
+#define CLOCK_PROCESS_CPUTIME_ID	2
+#define CLOCK_THREAD_CPUTIME_ID		3
+#define CLOCK_MONOTONIC_RAW		4
+#define CLOCK_REALTIME_COARSE		5
+#define CLOCK_MONOTONIC_COARSE		6
+#define CLOCK_BOOTTIME			7
 
 /*
- * The IDs of the various system clocks (for POSIX.1b interval timers).
+ * The IDs of various hardware clocks:
  */
-#define CLOCK_REALTIME		  0
-#define CLOCK_MONOTONIC	  1
-#define CLOCK_PROCESS_CPUTIME_ID 2
-#define CLOCK_THREAD_CPUTIME_ID	 3
-#define CLOCK_REALTIME_HR	 4
-#define CLOCK_MONOTONIC_HR	  5
-
-#define MAX_CLOCKS 6
-#define CLOCKS_MASK  (CLOCK_REALTIME | CLOCK_MONOTONIC | \
-                     CLOCK_REALTIME_HR | CLOCK_MONOTONIC_HR)
-#define CLOCKS_MONO (CLOCK_MONOTONIC & CLOCK_MONOTONIC_HR)
+#define CLOCK_SGI_CYCLE			10
+#define MAX_CLOCKS			16
+#define CLOCKS_MASK			(CLOCK_REALTIME | CLOCK_MONOTONIC)
+#define CLOCKS_MONO			CLOCK_MONOTONIC
 
 /*
- * The various flags for setting POSIX.1b interval timers.
+ * The various flags for setting POSIX.1b interval timers:
  */
-
-#define TIMER_ABSTIME 0x01
-
+#define TIMER_ABSTIME			0x01
 
 #endif

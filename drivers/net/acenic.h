@@ -1,7 +1,6 @@
 #ifndef _ACENIC_H_
 #define _ACENIC_H_
 
-#include <linux/config.h>
 
 /*
  * Generate TX index update each time, when TX ring is closed.
@@ -9,11 +8,6 @@
  * without TX_COAL_INTS_ONLY).
  */
 #define USE_TX_COAL_NOW	 0
-
-#ifndef MAX_SKB_FRAGS
-#define MAX_SKB_FRAGS 0
-#endif
-
 
 /*
  * Addressing:
@@ -179,7 +173,7 @@ typedef struct {
 /*
  * Host control register bits.
  */
-	
+
 #define IN_INT		0x01
 #define CLR_INT		0x02
 #define HW_RESET	0x08
@@ -455,7 +449,7 @@ struct cmd {
 
 struct tx_desc{
         aceaddr	addr;
-	u32	flagsize; 
+	u32	flagsize;
 #if 0
 /*
  * This is in PCI shared mem and must be accessed with readl/writel
@@ -595,7 +589,7 @@ struct ace_info {
 
 struct ring_info {
 	struct sk_buff		*skb;
-	DECLARE_PCI_UNMAP_ADDR(mapping)
+	DEFINE_DMA_UNMAP_ADDR(mapping);
 };
 
 
@@ -606,8 +600,8 @@ struct ring_info {
  */
 struct tx_ring_info {
 	struct sk_buff		*skb;
-	DECLARE_PCI_UNMAP_ADDR(mapping)
-	DECLARE_PCI_UNMAP_LEN(maplen)
+	DEFINE_DMA_UNMAP_ADDR(mapping);
+	DEFINE_DMA_UNMAP_LEN(maplen);
 };
 
 
@@ -638,7 +632,7 @@ struct ace_skb
 struct ace_private
 {
 	struct ace_info		*info;
-	struct ace_regs		*regs;		/* register base */
+	struct ace_regs	__iomem	*regs;		/* register base */
 	struct ace_skb		*skb;
 	dma_addr_t		info_dma;	/* 32/64 bit */
 
@@ -693,14 +687,17 @@ struct ace_private
 	int			board_idx;
 	u16			pci_command;
 	u8			pci_latency;
-	char			name[48];
+	const char		*name;
 #ifdef INDEX_DEBUG
 	spinlock_t		debug_lock
-				__attribute__ ((aligned (SMP_CACHE_BYTES)));;
+				__attribute__ ((aligned (SMP_CACHE_BYTES)));
 	u32			last_tx, last_std_rx, last_mini_rx;
 #endif
-	struct net_device_stats stats;
 	int			pci_using_dac;
+	u8			firmware_major;
+	u8			firmware_minor;
+	u8			firmware_fix;
+	u32			firmware_start;
 };
 
 
@@ -712,13 +709,7 @@ static inline int tx_space (struct ace_private *ap, u32 csm, u32 prd)
 }
 
 #define tx_free(ap) 		tx_space((ap)->tx_ret_csm, (ap)->tx_prd, ap)
-
-#if MAX_SKB_FRAGS
 #define tx_ring_full(ap, csm, prd)	(tx_space(ap, csm, prd) <= TX_RESERVED)
-#else
-#define tx_ring_full			0
-#endif
-
 
 static inline void set_aceaddr(aceaddr *aa, dma_addr_t addr)
 {
@@ -729,7 +720,7 @@ static inline void set_aceaddr(aceaddr *aa, dma_addr_t addr)
 }
 
 
-static inline void ace_set_txprd(struct ace_regs *regs,
+static inline void ace_set_txprd(struct ace_regs __iomem *regs,
 				 struct ace_private *ap, u32 value)
 {
 #ifdef INDEX_DEBUG
@@ -750,8 +741,8 @@ static inline void ace_set_txprd(struct ace_regs *regs,
 
 static inline void ace_mask_irq(struct net_device *dev)
 {
-	struct ace_private *ap = dev->priv;
-	struct ace_regs *regs = ap->regs;
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
 
 	if (ACE_IS_TIGON_I(ap))
 		writel(1, &regs->MaskInt);
@@ -764,9 +755,9 @@ static inline void ace_mask_irq(struct net_device *dev)
 
 static inline void ace_unmask_irq(struct net_device *dev)
 {
-	struct ace_private *ap = dev->priv;
-	struct ace_regs *regs = ap->regs;
- 
+	struct ace_private *ap = netdev_priv(dev);
+	struct ace_regs __iomem *regs = ap->regs;
+
 	if (ACE_IS_TIGON_I(ap))
 		writel(0, &regs->MaskInt);
 	else
@@ -781,16 +772,16 @@ static int ace_init(struct net_device *dev);
 static void ace_load_std_rx_ring(struct ace_private *ap, int nr_bufs);
 static void ace_load_mini_rx_ring(struct ace_private *ap, int nr_bufs);
 static void ace_load_jumbo_rx_ring(struct ace_private *ap, int nr_bufs);
-static irqreturn_t ace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t ace_interrupt(int irq, void *dev_id);
 static int ace_load_firmware(struct net_device *dev);
 static int ace_open(struct net_device *dev);
-static int ace_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t ace_start_xmit(struct sk_buff *skb,
+				  struct net_device *dev);
 static int ace_close(struct net_device *dev);
 static void ace_tasklet(unsigned long dev);
 static void ace_dump_trace(struct ace_private *ap);
 static void ace_set_multicast_list(struct net_device *dev);
 static int ace_change_mtu(struct net_device *dev, int new_mtu);
-static int ace_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static int ace_set_mac_addr(struct net_device *dev, void *p);
 static void ace_set_rxtx_parms(struct net_device *dev, int jumbo);
 static int ace_allocate_descriptors(struct net_device *dev);
@@ -800,7 +791,6 @@ static struct net_device_stats *ace_get_stats(struct net_device *dev);
 static int read_eeprom_byte(struct net_device *dev, unsigned long offset);
 #if ACENIC_DO_VLAN
 static void ace_vlan_rx_register(struct net_device *dev, struct vlan_group *grp);
-static void ace_vlan_rx_kill_vid(struct net_device *dev, unsigned short vid);
 #endif
 
 #endif /* _ACENIC_H_ */

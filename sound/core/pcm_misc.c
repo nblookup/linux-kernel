@@ -1,6 +1,6 @@
 /*
  *  PCM Interface - misc routines
- *  Copyright (c) 1998 by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) 1998 by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This library is free software; you can redistribute it and/or modify
@@ -19,16 +19,194 @@
  *
  */
   
-#include <sound/driver.h>
 #include <linux/time.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
-#define bswap_16 swab16
-#define bswap_32 swab32
-#define bswap_64 swab64
 #define SND_PCM_FORMAT_UNKNOWN (-1)
-#define snd_enum_to_int(v) (v)
-#define snd_int_to_enum(v) (v)
+
+/* NOTE: "signed" prefix must be given below since the default char is
+ *       unsigned on some architectures!
+ */
+struct pcm_format_data {
+	unsigned char width;	/* bit width */
+	unsigned char phys;	/* physical bit width */
+	signed char le;	/* 0 = big-endian, 1 = little-endian, -1 = others */
+	signed char signd;	/* 0 = unsigned, 1 = signed, -1 = others */
+	unsigned char silence[8];	/* silence data to fill */
+};
+
+/* we do lots of calculations on snd_pcm_format_t; shut up sparse */
+#define INT	__force int
+
+static struct pcm_format_data pcm_formats[(INT)SNDRV_PCM_FORMAT_LAST+1] = {
+	[SNDRV_PCM_FORMAT_S8] = {
+		.width = 8, .phys = 8, .le = -1, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_U8] = {
+		.width = 8, .phys = 8, .le = -1, .signd = 0,
+		.silence = { 0x80 },
+	},
+	[SNDRV_PCM_FORMAT_S16_LE] = {
+		.width = 16, .phys = 16, .le = 1, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_S16_BE] = {
+		.width = 16, .phys = 16, .le = 0, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_U16_LE] = {
+		.width = 16, .phys = 16, .le = 1, .signd = 0,
+		.silence = { 0x00, 0x80 },
+	},
+	[SNDRV_PCM_FORMAT_U16_BE] = {
+		.width = 16, .phys = 16, .le = 0, .signd = 0,
+		.silence = { 0x80, 0x00 },
+	},
+	[SNDRV_PCM_FORMAT_S24_LE] = {
+		.width = 24, .phys = 32, .le = 1, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_S24_BE] = {
+		.width = 24, .phys = 32, .le = 0, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_U24_LE] = {
+		.width = 24, .phys = 32, .le = 1, .signd = 0,
+		.silence = { 0x00, 0x00, 0x80 },
+	},
+	[SNDRV_PCM_FORMAT_U24_BE] = {
+		.width = 24, .phys = 32, .le = 0, .signd = 0,
+		.silence = { 0x00, 0x80, 0x00, 0x00 },
+	},
+	[SNDRV_PCM_FORMAT_S32_LE] = {
+		.width = 32, .phys = 32, .le = 1, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_S32_BE] = {
+		.width = 32, .phys = 32, .le = 0, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_U32_LE] = {
+		.width = 32, .phys = 32, .le = 1, .signd = 0,
+		.silence = { 0x00, 0x00, 0x00, 0x80 },
+	},
+	[SNDRV_PCM_FORMAT_U32_BE] = {
+		.width = 32, .phys = 32, .le = 0, .signd = 0,
+		.silence = { 0x80, 0x00, 0x00, 0x00 },
+	},
+	[SNDRV_PCM_FORMAT_FLOAT_LE] = {
+		.width = 32, .phys = 32, .le = 1, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_FLOAT_BE] = {
+		.width = 32, .phys = 32, .le = 0, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_FLOAT64_LE] = {
+		.width = 64, .phys = 64, .le = 1, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_FLOAT64_BE] = {
+		.width = 64, .phys = 64, .le = 0, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE] = {
+		.width = 32, .phys = 32, .le = 1, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_IEC958_SUBFRAME_BE] = {
+		.width = 32, .phys = 32, .le = 0, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_MU_LAW] = {
+		.width = 8, .phys = 8, .le = -1, .signd = -1,
+		.silence = { 0x7f },
+	},
+	[SNDRV_PCM_FORMAT_A_LAW] = {
+		.width = 8, .phys = 8, .le = -1, .signd = -1,
+		.silence = { 0x55 },
+	},
+	[SNDRV_PCM_FORMAT_IMA_ADPCM] = {
+		.width = 4, .phys = 4, .le = -1, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_G723_24] = {
+		.width = 3, .phys = 3, .le = -1, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_G723_40] = {
+		.width = 5, .phys = 5, .le = -1, .signd = -1,
+		.silence = {},
+	},
+	/* FIXME: the following three formats are not defined properly yet */
+	[SNDRV_PCM_FORMAT_MPEG] = {
+		.le = -1, .signd = -1,
+	},
+	[SNDRV_PCM_FORMAT_GSM] = {
+		.le = -1, .signd = -1,
+	},
+	[SNDRV_PCM_FORMAT_SPECIAL] = {
+		.le = -1, .signd = -1,
+	},
+	[SNDRV_PCM_FORMAT_S24_3LE] = {
+		.width = 24, .phys = 24, .le = 1, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_S24_3BE] = {
+		.width = 24, .phys = 24, .le = 0, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_U24_3LE] = {
+		.width = 24, .phys = 24, .le = 1, .signd = 0,
+		.silence = { 0x00, 0x00, 0x80 },
+	},
+	[SNDRV_PCM_FORMAT_U24_3BE] = {
+		.width = 24, .phys = 24, .le = 0, .signd = 0,
+		.silence = { 0x80, 0x00, 0x00 },
+	},
+	[SNDRV_PCM_FORMAT_S20_3LE] = {
+		.width = 20, .phys = 24, .le = 1, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_S20_3BE] = {
+		.width = 20, .phys = 24, .le = 0, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_U20_3LE] = {
+		.width = 20, .phys = 24, .le = 1, .signd = 0,
+		.silence = { 0x00, 0x00, 0x08 },
+	},
+	[SNDRV_PCM_FORMAT_U20_3BE] = {
+		.width = 20, .phys = 24, .le = 0, .signd = 0,
+		.silence = { 0x08, 0x00, 0x00 },
+	},
+	[SNDRV_PCM_FORMAT_S18_3LE] = {
+		.width = 18, .phys = 24, .le = 1, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_S18_3BE] = {
+		.width = 18, .phys = 24, .le = 0, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_U18_3LE] = {
+		.width = 18, .phys = 24, .le = 1, .signd = 0,
+		.silence = { 0x00, 0x00, 0x02 },
+	},
+	[SNDRV_PCM_FORMAT_U18_3BE] = {
+		.width = 18, .phys = 24, .le = 0, .signd = 0,
+		.silence = { 0x02, 0x00, 0x00 },
+	},
+	[SNDRV_PCM_FORMAT_G723_24_1B] = {
+		.width = 3, .phys = 8, .le = -1, .signd = -1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_G723_40_1B] = {
+		.width = 5, .phys = 8, .le = -1, .signd = -1,
+		.silence = {},
+	},
+};
+
 
 /**
  * snd_pcm_format_signed - Check the PCM format is signed linear
@@ -39,39 +217,15 @@
  */
 int snd_pcm_format_signed(snd_pcm_format_t format)
 {
-	switch (snd_enum_to_int(format)) {
-	case SNDRV_PCM_FORMAT_S8:
-	case SNDRV_PCM_FORMAT_S16_LE:
-	case SNDRV_PCM_FORMAT_S16_BE:
-	case SNDRV_PCM_FORMAT_S24_LE:
-	case SNDRV_PCM_FORMAT_S24_BE:
-	case SNDRV_PCM_FORMAT_S32_LE:
-	case SNDRV_PCM_FORMAT_S32_BE:
-	case SNDRV_PCM_FORMAT_S24_3LE:
-	case SNDRV_PCM_FORMAT_S24_3BE:
-	case SNDRV_PCM_FORMAT_S20_3LE:
-	case SNDRV_PCM_FORMAT_S20_3BE:
-	case SNDRV_PCM_FORMAT_S18_3LE:
-	case SNDRV_PCM_FORMAT_S18_3BE:
-		return 1;
-	case SNDRV_PCM_FORMAT_U8:
-	case SNDRV_PCM_FORMAT_U16_LE:
-	case SNDRV_PCM_FORMAT_U16_BE:
-	case SNDRV_PCM_FORMAT_U24_LE:
-	case SNDRV_PCM_FORMAT_U24_BE:
-	case SNDRV_PCM_FORMAT_U32_LE:
-	case SNDRV_PCM_FORMAT_U32_BE:
-	case SNDRV_PCM_FORMAT_U24_3LE:
-	case SNDRV_PCM_FORMAT_U24_3BE:
-	case SNDRV_PCM_FORMAT_U20_3LE:
-	case SNDRV_PCM_FORMAT_U20_3BE:
-	case SNDRV_PCM_FORMAT_U18_3LE:
-	case SNDRV_PCM_FORMAT_U18_3BE:
-		return 0;
-	default:
+	int val;
+	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
 		return -EINVAL;
-	}
+	if ((val = pcm_formats[(INT)format].signd) < 0)
+		return -EINVAL;
+	return val;
 }
+
+EXPORT_SYMBOL(snd_pcm_format_signed);
 
 /**
  * snd_pcm_format_unsigned - Check the PCM format is unsigned linear
@@ -90,6 +244,8 @@ int snd_pcm_format_unsigned(snd_pcm_format_t format)
 	return !val;
 }
 
+EXPORT_SYMBOL(snd_pcm_format_unsigned);
+
 /**
  * snd_pcm_format_linear - Check the PCM format is linear
  * @format: the format to check
@@ -101,6 +257,8 @@ int snd_pcm_format_linear(snd_pcm_format_t format)
 	return snd_pcm_format_signed(format) >= 0;
 }
 
+EXPORT_SYMBOL(snd_pcm_format_linear);
+
 /**
  * snd_pcm_format_little_endian - Check the PCM format is little-endian
  * @format: the format to check
@@ -110,43 +268,15 @@ int snd_pcm_format_linear(snd_pcm_format_t format)
  */
 int snd_pcm_format_little_endian(snd_pcm_format_t format)
 {
-	switch (snd_enum_to_int(format)) {
-	case SNDRV_PCM_FORMAT_S16_LE:
-	case SNDRV_PCM_FORMAT_U16_LE:
-	case SNDRV_PCM_FORMAT_S24_LE:
-	case SNDRV_PCM_FORMAT_U24_LE:
-	case SNDRV_PCM_FORMAT_S32_LE:
-	case SNDRV_PCM_FORMAT_U32_LE:
-	case SNDRV_PCM_FORMAT_FLOAT_LE:
-	case SNDRV_PCM_FORMAT_FLOAT64_LE:
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE:
-	case SNDRV_PCM_FORMAT_S24_3LE:
-	case SNDRV_PCM_FORMAT_S20_3LE:
-	case SNDRV_PCM_FORMAT_S18_3LE:
-	case SNDRV_PCM_FORMAT_U24_3LE:
-	case SNDRV_PCM_FORMAT_U20_3LE:
-	case SNDRV_PCM_FORMAT_U18_3LE:
-		return 1;
-	case SNDRV_PCM_FORMAT_S16_BE:
-	case SNDRV_PCM_FORMAT_U16_BE:
-	case SNDRV_PCM_FORMAT_S24_BE:
-	case SNDRV_PCM_FORMAT_U24_BE:
-	case SNDRV_PCM_FORMAT_S32_BE:
-	case SNDRV_PCM_FORMAT_U32_BE:
-	case SNDRV_PCM_FORMAT_FLOAT_BE:
-	case SNDRV_PCM_FORMAT_FLOAT64_BE:
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_BE:
-	case SNDRV_PCM_FORMAT_S24_3BE:
-	case SNDRV_PCM_FORMAT_S20_3BE:
-	case SNDRV_PCM_FORMAT_S18_3BE:
-	case SNDRV_PCM_FORMAT_U24_3BE:
-	case SNDRV_PCM_FORMAT_U20_3BE:
-	case SNDRV_PCM_FORMAT_U18_3BE:
-		return 0;
-	default:
+	int val;
+	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
 		return -EINVAL;
-	}
+	if ((val = pcm_formats[(INT)format].le) < 0)
+		return -EINVAL;
+	return val;
 }
+
+EXPORT_SYMBOL(snd_pcm_format_little_endian);
 
 /**
  * snd_pcm_format_big_endian - Check the PCM format is big-endian
@@ -165,21 +295,7 @@ int snd_pcm_format_big_endian(snd_pcm_format_t format)
 	return !val;
 }
 
-/**
- * snd_pcm_format_cpu_endian - Check the PCM format is CPU-endian
- * @format: the format to check
- *
- * Returns 1 if the given PCM format is CPU-endian, 0 if
- * opposite, or a negative error code if endian not specified.
- */
-int snd_pcm_format_cpu_endian(snd_pcm_format_t format)
-{
-#ifdef SNDRV_LITTLE_ENDIAN
-	return snd_pcm_format_little_endian(format);
-#else
-	return snd_pcm_format_big_endian(format);
-#endif
-}
+EXPORT_SYMBOL(snd_pcm_format_big_endian);
 
 /**
  * snd_pcm_format_width - return the bit-width of the format
@@ -190,56 +306,15 @@ int snd_pcm_format_cpu_endian(snd_pcm_format_t format)
  */
 int snd_pcm_format_width(snd_pcm_format_t format)
 {
-	switch (snd_enum_to_int(format)) {
-	case SNDRV_PCM_FORMAT_S8:
-	case SNDRV_PCM_FORMAT_U8:
-		return 8;
-	case SNDRV_PCM_FORMAT_S16_LE:
-	case SNDRV_PCM_FORMAT_S16_BE:
-	case SNDRV_PCM_FORMAT_U16_LE:
-	case SNDRV_PCM_FORMAT_U16_BE:
-		return 16;
-	case SNDRV_PCM_FORMAT_S18_3LE:
-	case SNDRV_PCM_FORMAT_S18_3BE:
-	case SNDRV_PCM_FORMAT_U18_3LE:
-	case SNDRV_PCM_FORMAT_U18_3BE:
-		return 18;
-	case SNDRV_PCM_FORMAT_S20_3LE:
-	case SNDRV_PCM_FORMAT_S20_3BE:
-	case SNDRV_PCM_FORMAT_U20_3LE:
-	case SNDRV_PCM_FORMAT_U20_3BE:
-		return 20;
-	case SNDRV_PCM_FORMAT_S24_LE:
-	case SNDRV_PCM_FORMAT_S24_BE:
-	case SNDRV_PCM_FORMAT_U24_LE:
-	case SNDRV_PCM_FORMAT_U24_BE:
-	case SNDRV_PCM_FORMAT_S24_3LE:
-	case SNDRV_PCM_FORMAT_S24_3BE:
-	case SNDRV_PCM_FORMAT_U24_3LE:
-	case SNDRV_PCM_FORMAT_U24_3BE:
-		return 24;
-	case SNDRV_PCM_FORMAT_S32_LE:
-	case SNDRV_PCM_FORMAT_S32_BE:
-	case SNDRV_PCM_FORMAT_U32_LE:
-	case SNDRV_PCM_FORMAT_U32_BE:
-	case SNDRV_PCM_FORMAT_FLOAT_LE:
-	case SNDRV_PCM_FORMAT_FLOAT_BE:
-		return 32;
-	case SNDRV_PCM_FORMAT_FLOAT64_LE:
-	case SNDRV_PCM_FORMAT_FLOAT64_BE:
-		return 64;
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE:
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_BE:
-		return 24;
-	case SNDRV_PCM_FORMAT_MU_LAW:
-	case SNDRV_PCM_FORMAT_A_LAW:
-		return 8;
-	case SNDRV_PCM_FORMAT_IMA_ADPCM:
-		return 4;
-	default:
+	int val;
+	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
 		return -EINVAL;
-	}
+	if ((val = pcm_formats[(INT)format].width) == 0)
+		return -EINVAL;
+	return val;
 }
+
+EXPORT_SYMBOL(snd_pcm_format_width);
 
 /**
  * snd_pcm_format_physical_width - return the physical bit-width of the format
@@ -250,274 +325,50 @@ int snd_pcm_format_width(snd_pcm_format_t format)
  */
 int snd_pcm_format_physical_width(snd_pcm_format_t format)
 {
-	switch (snd_enum_to_int(format)) {
-	case SNDRV_PCM_FORMAT_S8:
-	case SNDRV_PCM_FORMAT_U8:
-		return 8;
-	case SNDRV_PCM_FORMAT_S16_LE:
-	case SNDRV_PCM_FORMAT_S16_BE:
-	case SNDRV_PCM_FORMAT_U16_LE:
-	case SNDRV_PCM_FORMAT_U16_BE:
-		return 16;
-	case SNDRV_PCM_FORMAT_S18_3LE:
-	case SNDRV_PCM_FORMAT_S18_3BE:
-	case SNDRV_PCM_FORMAT_U18_3LE:
-	case SNDRV_PCM_FORMAT_U18_3BE:
-	case SNDRV_PCM_FORMAT_S20_3LE:
-	case SNDRV_PCM_FORMAT_S20_3BE:
-	case SNDRV_PCM_FORMAT_U20_3LE:
-	case SNDRV_PCM_FORMAT_U20_3BE:
-	case SNDRV_PCM_FORMAT_S24_3LE:
-	case SNDRV_PCM_FORMAT_S24_3BE:
-	case SNDRV_PCM_FORMAT_U24_3LE:
-	case SNDRV_PCM_FORMAT_U24_3BE:
-		return 24;
-	case SNDRV_PCM_FORMAT_S24_LE:
-	case SNDRV_PCM_FORMAT_S24_BE:
-	case SNDRV_PCM_FORMAT_U24_LE:
-	case SNDRV_PCM_FORMAT_U24_BE:
-	case SNDRV_PCM_FORMAT_S32_LE:
-	case SNDRV_PCM_FORMAT_S32_BE:
-	case SNDRV_PCM_FORMAT_U32_LE:
-	case SNDRV_PCM_FORMAT_U32_BE:
-	case SNDRV_PCM_FORMAT_FLOAT_LE:
-	case SNDRV_PCM_FORMAT_FLOAT_BE:
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE:
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_BE:
-		return 32;
-	case SNDRV_PCM_FORMAT_FLOAT64_LE:
-	case SNDRV_PCM_FORMAT_FLOAT64_BE:
-		return 64;
-	case SNDRV_PCM_FORMAT_MU_LAW:
-	case SNDRV_PCM_FORMAT_A_LAW:
-		return 8;
-	case SNDRV_PCM_FORMAT_IMA_ADPCM:
-		return 4;
-	default:
+	int val;
+	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
 		return -EINVAL;
-	}
+	if ((val = pcm_formats[(INT)format].phys) == 0)
+		return -EINVAL;
+	return val;
 }
+
+EXPORT_SYMBOL(snd_pcm_format_physical_width);
 
 /**
  * snd_pcm_format_size - return the byte size of samples on the given format
  * @format: the format to check
+ * @samples: sampling rate
  *
  * Returns the byte size of the given samples for the format, or a
  * negative error code if unknown format.
  */
 ssize_t snd_pcm_format_size(snd_pcm_format_t format, size_t samples)
 {
-	switch (snd_enum_to_int(format)) {
-	case SNDRV_PCM_FORMAT_S8:
-	case SNDRV_PCM_FORMAT_U8:
-		return samples;
-	case SNDRV_PCM_FORMAT_S16_LE:
-	case SNDRV_PCM_FORMAT_S16_BE:
-	case SNDRV_PCM_FORMAT_U16_LE:
-	case SNDRV_PCM_FORMAT_U16_BE:
-		return samples * 2;
-	case SNDRV_PCM_FORMAT_S18_3LE:
-	case SNDRV_PCM_FORMAT_S18_3BE:
-	case SNDRV_PCM_FORMAT_U18_3LE:
-	case SNDRV_PCM_FORMAT_U18_3BE:
-	case SNDRV_PCM_FORMAT_S20_3LE:
-	case SNDRV_PCM_FORMAT_S20_3BE:
-	case SNDRV_PCM_FORMAT_U20_3LE:
-	case SNDRV_PCM_FORMAT_U20_3BE:
-	case SNDRV_PCM_FORMAT_S24_3LE:
-	case SNDRV_PCM_FORMAT_S24_3BE:
-	case SNDRV_PCM_FORMAT_U24_3LE:
-	case SNDRV_PCM_FORMAT_U24_3BE:
-		return samples * 3;
-	case SNDRV_PCM_FORMAT_S24_LE:
-	case SNDRV_PCM_FORMAT_S24_BE:
-	case SNDRV_PCM_FORMAT_U24_LE:
-	case SNDRV_PCM_FORMAT_U24_BE:
-	case SNDRV_PCM_FORMAT_S32_LE:
-	case SNDRV_PCM_FORMAT_S32_BE:
-	case SNDRV_PCM_FORMAT_U32_LE:
-	case SNDRV_PCM_FORMAT_U32_BE:
-	case SNDRV_PCM_FORMAT_FLOAT_LE:
-	case SNDRV_PCM_FORMAT_FLOAT_BE:
-		return samples * 4;
-	case SNDRV_PCM_FORMAT_FLOAT64_LE:
-	case SNDRV_PCM_FORMAT_FLOAT64_BE:
-		return samples * 8;
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE:
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_BE:
-		return samples * 4;
-	case SNDRV_PCM_FORMAT_MU_LAW:
-	case SNDRV_PCM_FORMAT_A_LAW:
-		return samples;
-	case SNDRV_PCM_FORMAT_IMA_ADPCM:
-		if (samples & 1)
-			return -EINVAL;
-		return samples / 2;
-	default:
+	int phys_width = snd_pcm_format_physical_width(format);
+	if (phys_width < 0)
 		return -EINVAL;
-	}
+	return samples * phys_width / 8;
 }
+
+EXPORT_SYMBOL(snd_pcm_format_size);
 
 /**
- * snd_pcm_format_silence_64 - return the silent data in 64bit integer
+ * snd_pcm_format_silence_64 - return the silent data in 8 bytes array
  * @format: the format to check
  *
- * Returns the silent data in 64bit integer for the given format.
+ * Returns the format pattern to fill or NULL if error.
  */
-u_int64_t snd_pcm_format_silence_64(snd_pcm_format_t format)
+const unsigned char *snd_pcm_format_silence_64(snd_pcm_format_t format)
 {
-	switch (snd_enum_to_int(format)) {
-	case SNDRV_PCM_FORMAT_S8:
-	case SNDRV_PCM_FORMAT_S16_LE:
-	case SNDRV_PCM_FORMAT_S16_BE:
-	case SNDRV_PCM_FORMAT_S24_LE:
-	case SNDRV_PCM_FORMAT_S24_BE:
-	case SNDRV_PCM_FORMAT_S32_LE:
-	case SNDRV_PCM_FORMAT_S32_BE:
-	case SNDRV_PCM_FORMAT_S24_3LE:
-	case SNDRV_PCM_FORMAT_S24_3BE:
-	case SNDRV_PCM_FORMAT_S20_3LE:
-	case SNDRV_PCM_FORMAT_S20_3BE:
-	case SNDRV_PCM_FORMAT_S18_3LE:
-	case SNDRV_PCM_FORMAT_S18_3BE:
-		return 0;
-	case SNDRV_PCM_FORMAT_U8:
-		return 0x8080808080808080ULL;
-#ifdef SNDRV_LITTLE_ENDIAN
-	case SNDRV_PCM_FORMAT_U16_LE:
-		return 0x8000800080008000ULL;
-	case SNDRV_PCM_FORMAT_U24_LE:
-		return 0x0080000000800000ULL;
-	case SNDRV_PCM_FORMAT_U32_LE:
-		return 0x8000000080000000ULL;
-	case SNDRV_PCM_FORMAT_U16_BE:
-		return 0x0080008000800080ULL;
-	case SNDRV_PCM_FORMAT_U24_BE:
-		return 0x0000800000008000ULL;
-	case SNDRV_PCM_FORMAT_U32_BE:
-		return 0x0000008000000080ULL;
-	case SNDRV_PCM_FORMAT_U24_3LE:
-		return 0x0000800000800000ULL;
-	case SNDRV_PCM_FORMAT_U24_3BE:
-		return 0x0080000080000080ULL;
-	case SNDRV_PCM_FORMAT_U20_3LE:
-		return 0x0000080000080000ULL;
-	case SNDRV_PCM_FORMAT_U20_3BE:
-		return 0x0008000008000008ULL;
-	case SNDRV_PCM_FORMAT_U18_3LE:
-		return 0x0000020000020000ULL;
-	case SNDRV_PCM_FORMAT_U18_3BE:
-		return 0x0002000002000002ULL;
-#else
-	case SNDRV_PCM_FORMAT_U16_LE:
-		return 0x0080008000800080ULL;
-	case SNDRV_PCM_FORMAT_U24_LE:
-		return 0x0000800000008000ULL;
-	case SNDRV_PCM_FORMAT_U32_LE:
-		return 0x0000008000000080ULL;
-	case SNDRV_PCM_FORMAT_U16_BE:
-		return 0x8000800080008000ULL;
-	case SNDRV_PCM_FORMAT_U24_BE:
-		return 0x0080000000800000ULL;
-	case SNDRV_PCM_FORMAT_U32_BE:
-		return 0x8000000080000000ULL;
-	case SNDRV_PCM_FORMAT_U24_3LE:
-		return 0x0080000080000080ULL;
-	case SNDRV_PCM_FORMAT_U24_3BE:
-		return 0x0000800000800000ULL;
-	case SNDRV_PCM_FORMAT_U20_3LE:
-		return 0x0008000008000008ULL;
-	case SNDRV_PCM_FORMAT_U20_3BE:
-		return 0x0000080000080000ULL;
-	case SNDRV_PCM_FORMAT_U18_3LE:
-		return 0x0002000002000002ULL;
-	case SNDRV_PCM_FORMAT_U18_3BE:
-		return 0x0000020000020000ULL;
-#endif
-	case SNDRV_PCM_FORMAT_FLOAT_LE:
-	{
-		union {
-			float f;
-			u_int32_t i;
-		} u;
-		u.f = 0.0;
-#ifdef SNDRV_LITTLE_ENDIAN
-		return u.i;
-#else
-		return bswap_32(u.i);
-#endif
-	}
-	case SNDRV_PCM_FORMAT_FLOAT64_LE:
-	{
-		union {
-			double f;
-			u_int64_t i;
-		} u;
-		u.f = 0.0;
-#ifdef SNDRV_LITTLE_ENDIAN
-		return u.i;
-#else
-		return bswap_64(u.i);
-#endif
-	}
-	case SNDRV_PCM_FORMAT_FLOAT_BE:		
-	{
-		union {
-			float f;
-			u_int32_t i;
-		} u;
-		u.f = 0.0;
-#ifdef SNDRV_LITTLE_ENDIAN
-		return bswap_32(u.i);
-#else
-		return u.i;
-#endif
-	}
-	case SNDRV_PCM_FORMAT_FLOAT64_BE:
-	{
-		union {
-			double f;
-			u_int64_t i;
-		} u;
-		u.f = 0.0;
-#ifdef SNDRV_LITTLE_ENDIAN
-		return bswap_64(u.i);
-#else
-		return u.i;
-#endif
-	}
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE:
-	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_BE:
-		return 0;	
-	case SNDRV_PCM_FORMAT_MU_LAW:
-		return 0x7f7f7f7f7f7f7f7fULL;
-	case SNDRV_PCM_FORMAT_A_LAW:
-		return 0x5555555555555555ULL;
-	case SNDRV_PCM_FORMAT_IMA_ADPCM:	/* special case */
-	case SNDRV_PCM_FORMAT_MPEG:
-	case SNDRV_PCM_FORMAT_GSM:
-	case SNDRV_PCM_FORMAT_SPECIAL:
-		return 0;
-	default:
-		return -EINVAL;
-	}
-	return 0;
+	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
+		return NULL;
+	if (! pcm_formats[(INT)format].phys)
+		return NULL;
+	return pcm_formats[(INT)format].silence;
 }
 
-u_int32_t snd_pcm_format_silence_32(snd_pcm_format_t format)
-{
-	return (u_int32_t)snd_pcm_format_silence_64(format);
-}
-
-u_int16_t snd_pcm_format_silence_16(snd_pcm_format_t format)
-{
-	return (u_int16_t)snd_pcm_format_silence_64(format);
-}
-
-u_int8_t snd_pcm_format_silence(snd_pcm_format_t format)
-{
-	return (u_int8_t)snd_pcm_format_silence_64(format);
-}
+EXPORT_SYMBOL(snd_pcm_format_silence_64);
 
 /**
  * snd_pcm_format_set_silence - set the silence data on the buffer
@@ -531,122 +382,108 @@ u_int8_t snd_pcm_format_silence(snd_pcm_format_t format)
  */
 int snd_pcm_format_set_silence(snd_pcm_format_t format, void *data, unsigned int samples)
 {
+	int width;
+	unsigned char *dst, *pat;
+
+	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
+		return -EINVAL;
 	if (samples == 0)
 		return 0;
-	switch (snd_pcm_format_width(format)) {
-	case 4: {
-		u_int8_t silence = snd_pcm_format_silence_64(format);
-		unsigned int samples1;
-		if (samples % 2 != 0)
-			return -EINVAL;
-		samples1 = samples / 2;
-		memset(data, silence, samples1);
-		break;
-	}
-	case 8: {
-		u_int8_t silence = snd_pcm_format_silence_64(format);
-		memset(data, silence, samples);
-		break;
-	}
-	case 16: {
-		u_int16_t silence = snd_pcm_format_silence_64(format);
-		if (! silence)
-			memset(data, 0, samples * 2);
-		else {
-			while (samples-- > 0)
-				*((u_int16_t *)data)++ = silence;
-		}
-		break;
-	}
-	case 24: {
-		u_int32_t silence = snd_pcm_format_silence_64(format);
-		if (! silence)
-			memset(data, 0, samples * 3);
-		else {
-			while (samples-- > 0) {
-#ifdef SNDRV_LITTLE_ENDIAN
-				*((u_int8_t *)data)++ = silence >> 0;
-				*((u_int8_t *)data)++ = silence >> 8;
-				*((u_int8_t *)data)++ = silence >> 16;
-#else
-				*((u_int8_t *)data)++ = silence >> 16;
-				*((u_int8_t *)data)++ = silence >> 8;
-				*((u_int8_t *)data)++ = silence >> 0;
-#endif
-			}
-		}
-		break;
-	}
-	case 32: {
-		u_int32_t silence = snd_pcm_format_silence_64(format);
-		if (! silence)
-			memset(data, 0, samples * 4);
-		else {
-			while (samples-- > 0)
-				*((u_int32_t *)data)++ = silence;
-		}
-		break;
-	}
-	case 64: {
-		u_int64_t silence = snd_pcm_format_silence_64(format);
-		if (! silence)
-			memset(data, 0, samples * 8);
-		else {
-			while (samples-- > 0)
-				*((u_int64_t *)data)++ = silence;
-		}
-		break;
-	}
-	default:
+	width = pcm_formats[(INT)format].phys; /* physical width */
+	pat = pcm_formats[(INT)format].silence;
+	if (! width)
 		return -EINVAL;
+	/* signed or 1 byte data */
+	if (pcm_formats[(INT)format].signd == 1 || width <= 8) {
+		unsigned int bytes = samples * width / 8;
+		memset(data, *pat, bytes);
+		return 0;
+	}
+	/* non-zero samples, fill using a loop */
+	width /= 8;
+	dst = data;
+#if 0
+	while (samples--) {
+		memcpy(dst, pat, width);
+		dst += width;
+	}
+#else
+	/* a bit optimization for constant width */
+	switch (width) {
+	case 2:
+		while (samples--) {
+			memcpy(dst, pat, 2);
+			dst += 2;
+		}
+		break;
+	case 3:
+		while (samples--) {
+			memcpy(dst, pat, 3);
+			dst += 3;
+		}
+		break;
+	case 4:
+		while (samples--) {
+			memcpy(dst, pat, 4);
+			dst += 4;
+		}
+		break;
+	case 8:
+		while (samples--) {
+			memcpy(dst, pat, 8);
+			dst += 8;
+		}
+		break;
+	}
+#endif
+	return 0;
+}
+
+EXPORT_SYMBOL(snd_pcm_format_set_silence);
+
+/**
+ * snd_pcm_limit_hw_rates - determine rate_min/rate_max fields
+ * @runtime: the runtime instance
+ *
+ * Determines the rate_min and rate_max fields from the rates bits of
+ * the given runtime->hw.
+ *
+ * Returns zero if successful.
+ */
+int snd_pcm_limit_hw_rates(struct snd_pcm_runtime *runtime)
+{
+	int i;
+	for (i = 0; i < (int)snd_pcm_known_rates.count; i++) {
+		if (runtime->hw.rates & (1 << i)) {
+			runtime->hw.rate_min = snd_pcm_known_rates.list[i];
+			break;
+		}
+	}
+	for (i = (int)snd_pcm_known_rates.count - 1; i >= 0; i--) {
+		if (runtime->hw.rates & (1 << i)) {
+			runtime->hw.rate_max = snd_pcm_known_rates.list[i];
+			break;
+		}
 	}
 	return 0;
 }
 
-static int linear_formats[4*2*2] = {
-	SNDRV_PCM_FORMAT_S8,
-	SNDRV_PCM_FORMAT_S8,
-	SNDRV_PCM_FORMAT_U8,
-	SNDRV_PCM_FORMAT_U8,
-	SNDRV_PCM_FORMAT_S16_LE,
-	SNDRV_PCM_FORMAT_S16_BE,
-	SNDRV_PCM_FORMAT_U16_LE,
-	SNDRV_PCM_FORMAT_U16_BE,
-	SNDRV_PCM_FORMAT_S24_LE,
-	SNDRV_PCM_FORMAT_S24_BE,
-	SNDRV_PCM_FORMAT_U24_LE,
-	SNDRV_PCM_FORMAT_U24_BE,
-	SNDRV_PCM_FORMAT_S32_LE,
-	SNDRV_PCM_FORMAT_S32_BE,
-	SNDRV_PCM_FORMAT_U32_LE,
-	SNDRV_PCM_FORMAT_U32_BE
-};
+EXPORT_SYMBOL(snd_pcm_limit_hw_rates);
 
 /**
- * snd_pcm_build_linear_format - return the suitable linear format for the given condition
- * @width: the bit-width
- * @unsignd: 1 if unsigned, 0 if signed.
- * @big_endian: 1 if big-endian, 0 if little-endian
+ * snd_pcm_rate_to_rate_bit - converts sample rate to SNDRV_PCM_RATE_xxx bit
+ * @rate: the sample rate to convert
  *
- * Returns the suitable linear format for the given condition.
+ * Returns the SNDRV_PCM_RATE_xxx flag that corresponds to the given rate, or
+ * SNDRV_PCM_RATE_KNOT for an unknown rate.
  */
-snd_pcm_format_t snd_pcm_build_linear_format(int width, int unsignd, int big_endian)
+unsigned int snd_pcm_rate_to_rate_bit(unsigned int rate)
 {
-	switch (width) {
-	case 8:
-		width = 0;
-		break;
-	case 16:
-		width = 1;
-		break;
-	case 24:
-		width = 2;
-		break;
-	case 32:
-		width = 3;
-		break;
-	default:
-		return SND_PCM_FORMAT_UNKNOWN;
-	}
-	return snd_int_to_enum(((int(*)[2][2])linear_formats)[width][!!unsignd][!!big_endian]);
+	unsigned int i;
+
+	for (i = 0; i < snd_pcm_known_rates.count; i++)
+		if (snd_pcm_known_rates.list[i] == rate)
+			return 1u << i;
+	return SNDRV_PCM_RATE_KNOT;
 }
+EXPORT_SYMBOL(snd_pcm_rate_to_rate_bit);

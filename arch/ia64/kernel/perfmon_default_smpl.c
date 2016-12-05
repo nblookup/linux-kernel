@@ -8,7 +8,6 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/init.h>
 #include <asm/delay.h>
 #include <linux/smp.h>
@@ -20,32 +19,23 @@ MODULE_AUTHOR("Stephane Eranian <eranian@hpl.hp.com>");
 MODULE_DESCRIPTION("perfmon default sampling format");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(debug, "i");
-MODULE_PARM_DESC(debug, "debug");
-
-MODULE_PARM(debug_ovfl, "i");
-MODULE_PARM_DESC(debug_ovfl, "debug ovfl");
-
-
 #define DEFAULT_DEBUG 1
 
 #ifdef DEFAULT_DEBUG
 #define DPRINT(a) \
 	do { \
-		if (unlikely(debug >0)) { printk("%s.%d: CPU%d ", __FUNCTION__, __LINE__, smp_processor_id()); printk a; } \
+		if (unlikely(pfm_sysctl.debug >0)) { printk("%s.%d: CPU%d ", __func__, __LINE__, smp_processor_id()); printk a; } \
 	} while (0)
 
 #define DPRINT_ovfl(a) \
 	do { \
-		if (unlikely(debug_ovfl >0)) { printk("%s.%d: CPU%d ", __FUNCTION__, __LINE__, smp_processor_id()); printk a; } \
+		if (unlikely(pfm_sysctl.debug > 0 && pfm_sysctl.debug_ovfl >0)) { printk("%s.%d: CPU%d ", __func__, __LINE__, smp_processor_id()); printk a; } \
 	} while (0)
 
 #else
 #define DPRINT(a)
 #define DPRINT_ovfl(a)
 #endif
-
-static int debug, debug_ovfl;
 
 static int
 default_validate(struct task_struct *task, unsigned int flags, int cpu, void *data)
@@ -54,11 +44,11 @@ default_validate(struct task_struct *task, unsigned int flags, int cpu, void *da
 	int ret = 0;
 
 	if (data == NULL) {
-		DPRINT(("[%d] no argument passed\n", task->pid));
+		DPRINT(("[%d] no argument passed\n", task_pid_nr(task)));
 		return -EINVAL;
 	}
 
-	DPRINT(("[%d] validate flags=0x%x CPU%d\n", task->pid, flags, cpu));
+	DPRINT(("[%d] validate flags=0x%x CPU%d\n", task_pid_nr(task), flags, cpu));
 
 	/*
 	 * must hold at least the buffer header + one minimally sized entry
@@ -98,7 +88,7 @@ default_init(struct task_struct *task, void *buf, unsigned int flags, int cpu, v
 	hdr->hdr_count        = 0UL;
 
 	DPRINT(("[%d] buffer=%p buf_size=%lu hdr_size=%lu hdr_version=%u cur_offs=%lu\n",
-		task->pid,
+		task_pid_nr(task),
 		buf,
 		hdr->hdr_buf_size,
 		sizeof(*hdr),
@@ -114,7 +104,7 @@ default_handler(struct task_struct *task, void *buf, pfm_ovfl_arg_t *arg, struct
 	pfm_default_smpl_hdr_t *hdr;
 	pfm_default_smpl_entry_t *ent;
 	void *cur, *last;
-	unsigned long *e;
+	unsigned long *e, entry_size;
 	unsigned int npmds, i;
 	unsigned char ovfl_pmd;
 	unsigned char ovfl_notify;
@@ -131,8 +121,7 @@ default_handler(struct task_struct *task, void *buf, pfm_ovfl_arg_t *arg, struct
 	ovfl_notify = arg->ovfl_notify;
 
 	/*
-	 * check for space against largest possibly entry.
-	 * We may waste space at the end of the buffer.
+	 * precheck for sanity
 	 */
 	if ((last - cur) < PFM_DEFAULT_MAX_ENTRY_SIZE) goto full;
 
@@ -141,6 +130,8 @@ default_handler(struct task_struct *task, void *buf, pfm_ovfl_arg_t *arg, struct
 	ent = (pfm_default_smpl_entry_t *)cur;
 
 	prefetch(arg->smpl_pmds_values);
+
+	entry_size = sizeof(*ent) + (npmds << 3);
 
 	/* position for first pmd */
 	e = (unsigned long *)(ent+1);
@@ -159,7 +150,7 @@ default_handler(struct task_struct *task, void *buf, pfm_ovfl_arg_t *arg, struct
 	 * current = task running at the time of the overflow.
 	 *
 	 * per-task mode:
-	 * 	- this is ususally the task being monitored.
+	 * 	- this is usually the task being monitored.
 	 * 	  Under certain conditions, it might be a different task
 	 *
 	 * system-wide:
@@ -177,6 +168,7 @@ default_handler(struct task_struct *task, void *buf, pfm_ovfl_arg_t *arg, struct
 	ent->tstamp    = stamp;
 	ent->cpu       = smp_processor_id();
 	ent->set       = arg->active_set;
+	ent->tgid      = current->tgid;
 
 	/*
 	 * selectively store PMDs in increasing index number
@@ -191,7 +183,13 @@ default_handler(struct task_struct *task, void *buf, pfm_ovfl_arg_t *arg, struct
 	/*
 	 * update position for next entry
 	 */
-	hdr->hdr_cur_offs += sizeof(*ent) + (npmds << 3);
+	hdr->hdr_cur_offs += entry_size;
+	cur               += entry_size;
+
+	/*
+	 * post check to avoid losing the last sample
+	 */
+	if ((last - cur) < PFM_DEFAULT_MAX_ENTRY_SIZE) goto full;
 
 	/*
 	 * keep same ovfl_pmds, ovfl_notify
@@ -247,7 +245,7 @@ default_restart(struct task_struct *task, pfm_ovfl_ctrl_t *ctrl, void *buf, stru
 static int
 default_exit(struct task_struct *task, void *buf, struct pt_regs *regs)
 {
-	DPRINT(("[%d] exit(%p)\n", task->pid, buf));
+	DPRINT(("[%d] exit(%p)\n", task_pid_nr(task), buf));
 	return 0;
 }
 

@@ -1,9 +1,13 @@
+if ARCH_FOOTBRIDGE
 
 menu "Footbridge Implementations"
 
 config ARCH_CATS
 	bool "CATS"
-	depends on ARCH_FOOTBRIDGE
+	select FOOTBRIDGE_HOST
+	select ISA
+	select ISA_DMA
+	select PCI
 	help
 	  Say Y here if you intend to run this kernel on the CATS.
 
@@ -11,7 +15,10 @@ config ARCH_CATS
 
 config ARCH_PERSONAL_SERVER
 	bool "Compaq Personal Server"
-	depends on ARCH_FOOTBRIDGE
+	select FOOTBRIDGE_HOST
+	select ISA
+	select ISA_DMA
+	select PCI
 	---help---
 	  Say Y here if you intend to run this kernel on the Compaq
 	  Personal Server.
@@ -22,14 +29,15 @@ config ARCH_PERSONAL_SERVER
 	  There are no product plans beyond the current research
 	  prototypes at this time.  Information is available at:
 
-	  <http://crl.research.compaq.com/projects/personalserver/>
+	  <http://www.crl.hpl.hp.com/projects/personalserver/>
 
 	  If you have any questions or comments about the  Compaq Personal
-	  Server, send e-mail to skiff@crl.dec.com.
+	  Server, send e-mail to <skiff@crl.dec.com>.
 
 config ARCH_EBSA285_ADDIN
 	bool "EBSA285 (addin mode)"
-	depends on ARCH_FOOTBRIDGE
+	select ARCH_EBSA285
+	select FOOTBRIDGE_ADDIN
 	help
 	  Say Y here if you intend to run this kernel on the EBSA285 card
 	  in addin mode.
@@ -38,7 +46,11 @@ config ARCH_EBSA285_ADDIN
 
 config ARCH_EBSA285_HOST
 	bool "EBSA285 (host mode)"
-	depends on ARCH_FOOTBRIDGE
+	select ARCH_EBSA285
+	select FOOTBRIDGE_HOST
+	select ISA
+	select ISA_DMA
+	select PCI
 	help
 	  Say Y here if you intend to run this kernel on the EBSA285 card
 	  in host ("central function") mode.
@@ -47,7 +59,10 @@ config ARCH_EBSA285_HOST
 
 config ARCH_NETWINDER
 	bool "NetWinder"
-	depends on ARCH_FOOTBRIDGE
+	select FOOTBRIDGE_HOST
+	select ISA
+	select ISA_DMA
+	select PCI
 	help
 	  Say Y here if you intend to run this kernel on the Rebel.COM
 	  NetWinder.  Information about this machine can be found at:
@@ -58,3 +73,21 @@ config ARCH_NETWINDER
 
 endmenu
 
+# Footbridge support
+config FOOTBRIDGE
+	bool
+
+# Footbridge in host mode
+config FOOTBRIDGE_HOST
+	bool
+
+# Footbridge in addin mode
+config FOOTBRIDGE_ADDIN
+	bool
+
+# EBSA285 board in either host or addin mode
+config ARCH_EBSA285
+	select ARCH_MAY_HAVE_PC_FDC
+	bool
+
+endif

@@ -1,4 +1,4 @@
-/* $Id: t1pci.c,v 1.1.4.1.2.1 2001/12/21 15:00:17 kai Exp $
+/* $Id: t1pci.c,v 1.1.2.2 2004/01/16 21:09:27 keil Exp $
  * 
  * Module for AVM T1 PCI-card.
  * 
@@ -9,7 +9,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
@@ -29,6 +28,8 @@
 #undef CONFIG_T1PCI_DEBUG
 #undef CONFIG_T1PCI_POLLDEBUG
 
+/* ------------------------------------------------------------- */
+static char *revision = "$Revision: 1.1.2.2 $";
 /* ------------------------------------------------------------- */
 
 static struct pci_device_id t1pci_pci_tbl[] = {
@@ -102,7 +103,7 @@ static int t1pci_add_card(struct capicardparams *p, struct pci_dev *pdev)
 	}
 	b1dma_reset(card);
 
-	retval = request_irq(card->irq, b1dma_interrupt, SA_SHIRQ, card->name, card);
+	retval = request_irq(card->irq, b1dma_interrupt, IRQF_SHARED, card->name, card);
 	if (retval) {
 		printk(KERN_ERR "t1pci: unable to get IRQ %d.\n", card->irq);
 		retval = -EBUSY;
@@ -118,7 +119,7 @@ static int t1pci_add_card(struct capicardparams *p, struct pci_dev *pdev)
 	cinfo->capi_ctrl.load_firmware = b1dma_load_firmware;
 	cinfo->capi_ctrl.reset_ctr     = b1dma_reset_ctr;
 	cinfo->capi_ctrl.procinfo      = t1pci_procinfo;
-	cinfo->capi_ctrl.ctr_read_proc = b1dmactl_read_proc;
+	cinfo->capi_ctrl.proc_fops = &b1dmactl_proc_fops;
 	strcpy(cinfo->capi_ctrl.name, card->name);
 
 	retval = attach_capi_ctr(&cinfo->capi_ctrl);
@@ -209,6 +210,7 @@ static int __devinit t1pci_probe(struct pci_dev *dev,
 	if (retval != 0) {
 		printk(KERN_ERR "t1pci: no AVM-T1-PCI at i/o %#x, irq %d detected, mem %#x\n",
 		       param.port, param.irq, param.membase);
+		pci_disable_device(dev);
 		return -ENODEV;
 	}
 	return 0;
@@ -221,13 +223,36 @@ static struct pci_driver t1pci_pci_driver = {
        .remove         = t1pci_remove,
 };
 
+static struct capi_driver capi_driver_t1pci = {
+	.name		= "t1pci",
+	.revision	= "1.0",
+};
+
 static int __init t1pci_init(void)
 {
-	return pci_module_init(&t1pci_pci_driver);
+	char *p;
+	char rev[32];
+	int err;
+
+	if ((p = strchr(revision, ':')) != NULL && p[1]) {
+		strlcpy(rev, p + 2, 32);
+		if ((p = strchr(rev, '$')) != NULL && p > rev)
+		   *(p-1) = 0;
+	} else
+		strcpy(rev, "1.0");
+
+	err = pci_register_driver(&t1pci_pci_driver);
+	if (!err) {
+		strlcpy(capi_driver_t1pci.revision, rev, 32);
+		register_capi_driver(&capi_driver_t1pci);
+		printk(KERN_INFO "t1pci: revision %s\n", rev);
+	}
+	return err;
 }
 
 static void __exit t1pci_exit(void)
 {
+	unregister_capi_driver(&capi_driver_t1pci);
 	pci_unregister_driver(&t1pci_pci_driver);
 }
 

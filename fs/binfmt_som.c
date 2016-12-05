@@ -32,7 +32,6 @@
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 
-#include <linux/config.h>
 
 #include <linux/elf.h>
 
@@ -44,7 +43,7 @@ static int load_som_library(struct file *);
  * don't even try.
  */
 #if 0
-static int som_core_dump(long signr, struct pt_regs * regs);
+static int som_core_dump(struct coredump_params *cprm);
 #else
 #define som_core_dump	NULL
 #endif
@@ -189,7 +188,6 @@ out:
 static int
 load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
-	int som_exec_fileno;
 	int retval;
 	unsigned int size;
 	unsigned long som_entry;
@@ -209,20 +207,17 @@ load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	size = som_ex->aux_header_size;
 	if (size > SOM_PAGESIZE)
 		goto out;
-	hpuxhdr = (struct som_exec_auxhdr *) kmalloc(size, GFP_KERNEL);
+	hpuxhdr = kmalloc(size, GFP_KERNEL);
 	if (!hpuxhdr)
 		goto out;
 
 	retval = kernel_read(bprm->file, som_ex->aux_header_location,
 			(char *) hpuxhdr, size);
-	if (retval < 0)
+	if (retval != size) {
+		if (retval >= 0)
+			retval = -EIO;
 		goto out_free;
-
-	retval = get_unused_fd();
-	if (retval < 0)
-		goto out_free;
-	get_file(bprm->file);
-	fd_install(som_exec_fileno = retval, bprm->file);
+	}
 
 	/* Flush all traces of the currently running executable */
 	retval = flush_old_exec(bprm);
@@ -232,6 +227,7 @@ load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	/* OK, This is the point of no return */
 	current->flags &= ~PF_FORKNOEXEC;
 	current->personality = PER_HPUX;
+	setup_new_exec(bprm);
 
 	/* Set the task size for HP-UX processes such that
 	 * the gateway page is outside the address space.
@@ -253,13 +249,12 @@ load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	kfree(hpuxhdr);
 
 	set_binfmt(&som_format);
-	compute_creds(bprm);
-	setup_arg_pages(bprm);
+	install_exec_creds(bprm);
+	setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
 
 	create_som_tables(bprm);
 
 	current->mm->start_stack = bprm->p;
-	current->mm->rss = 0;
 
 #if 0
 	printk("(start_brk) %08lx\n" , (unsigned long) current->mm->start_brk);
@@ -273,8 +268,6 @@ load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	map_hpux_gateway_page(current,current->mm);
 
 	start_thread_som(regs, som_entry, bprm->p);
-	if (current->ptrace & PT_PTRACED)
-		send_sig(SIGTRAP, current, 0);
 	return 0;
 
 	/* error cleanup */
@@ -305,5 +298,7 @@ static void __exit exit_som_binfmt(void)
 	unregister_binfmt(&som_format);
 }
 
-module_init(init_som_binfmt);
+core_initcall(init_som_binfmt);
 module_exit(exit_som_binfmt);
+
+MODULE_LICENSE("GPL");

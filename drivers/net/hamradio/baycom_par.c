@@ -83,9 +83,10 @@
 #include <linux/hdlcdrv.h>
 #include <linux/baycom.h>
 #include <linux/parport.h>
+#include <linux/bitops.h>
+#include <linux/jiffies.h>
 
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/uaccess.h>
 
 /* --------------------------------------------------------------------- */
@@ -101,7 +102,7 @@
 
 static const char bc_drvname[] = "baycom_par";
 static const char bc_drvinfo[] = KERN_INFO "baycom_par: (C) 1996-2000 Thomas Sailer, HB9JNX/AE4WA\n"
-KERN_INFO "baycom_par: version 0.9 compiled " __TIME__ " " __DATE__ "\n";
+"baycom_par: version 0.9 compiled " __TIME__ " " __DATE__ "\n";
 
 /* --------------------------------------------------------------------- */
 
@@ -164,7 +165,7 @@ static void __inline__ baycom_int_freq(struct baycom_state *bc)
 	 * measure the interrupt frequency
 	 */
 	bc->debug_vals.cur_intcnt++;
-	if ((cur_jiffies - bc->debug_vals.last_jiffies) >= HZ) {
+	if (time_after_eq(cur_jiffies, bc->debug_vals.last_jiffies + HZ)) {
 		bc->debug_vals.last_jiffies = cur_jiffies;
 		bc->debug_vals.last_intcnt = bc->debug_vals.cur_intcnt;
 		bc->debug_vals.cur_intcnt = 0;
@@ -269,13 +270,10 @@ static __inline__ void par96_rx(struct net_device *dev, struct baycom_state *bc)
 
 /* --------------------------------------------------------------------- */
 
-static void par96_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static void par96_interrupt(void *dev_id)
 {
-	struct net_device *dev = (struct net_device *)dev_id;
-	struct baycom_state *bc = (struct baycom_state *)dev->priv;
-
-	if (!dev || !bc || bc->hdrv.magic != HDLCDRV_MAGIC)
-		return;
+	struct net_device *dev = dev_id;
+	struct baycom_state *bc = netdev_priv(dev);
 
 	baycom_int_freq(bc);
 	/*
@@ -302,7 +300,7 @@ static void par96_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 static void par96_wakeup(void *handle)
 {
         struct net_device *dev = (struct net_device *)handle;
-	struct baycom_state *bc = (struct baycom_state *)dev->priv;
+	struct baycom_state *bc = netdev_priv(dev);
 
 	printk(KERN_DEBUG "baycom_par: %s: why am I being woken up?\n", dev->name);
 	if (!parport_claim(bc->pdev))
@@ -313,30 +311,33 @@ static void par96_wakeup(void *handle)
 
 static int par96_open(struct net_device *dev)
 {
-	struct baycom_state *bc = (struct baycom_state *)dev->priv;
-	struct parport *pp = parport_enumerate();
+	struct baycom_state *bc = netdev_priv(dev);
+	struct parport *pp;
 
 	if (!dev || !bc)
 		return -ENXIO;
-	while (pp && pp->base != dev->base_addr) 
-		pp = pp->next;
+	pp = parport_find_base(dev->base_addr);
 	if (!pp) {
 		printk(KERN_ERR "baycom_par: parport at 0x%lx unknown\n", dev->base_addr);
 		return -ENXIO;
 	}
 	if (pp->irq < 0) {
 		printk(KERN_ERR "baycom_par: parport at 0x%lx has no irq\n", pp->base);
+		parport_put_port(pp);
 		return -ENXIO;
 	}
 	if ((~pp->modes) & (PARPORT_MODE_PCSPP | PARPORT_MODE_SAFEININT)) {
 		printk(KERN_ERR "baycom_par: parport at 0x%lx cannot be used\n", pp->base);
+		parport_put_port(pp);
 		return -ENXIO;
 	}
 	memset(&bc->modem, 0, sizeof(bc->modem));
 	bc->hdrv.par.bitrate = 9600;
-	if (!(bc->pdev = parport_register_device(pp, dev->name, NULL, par96_wakeup, 
-						 par96_interrupt, PARPORT_DEV_EXCL, dev))) {
-		printk(KERN_ERR "baycom_par: cannot register parport at 0x%lx\n", pp->base);
+	bc->pdev = parport_register_device(pp, dev->name, NULL, par96_wakeup, 
+				 par96_interrupt, PARPORT_DEV_EXCL, dev);
+	parport_put_port(pp);
+	if (!bc->pdev) {
+		printk(KERN_ERR "baycom_par: cannot register parport at 0x%lx\n", dev->base_addr);
 		return -ENXIO;
 	}
 	if (parport_claim(bc->pdev)) {
@@ -359,7 +360,7 @@ static int par96_open(struct net_device *dev)
 
 static int par96_close(struct net_device *dev)
 {
-	struct baycom_state *bc = (struct baycom_state *)dev->priv;
+	struct baycom_state *bc = netdev_priv(dev);
 	struct parport *pp;
 
 	if (!dev || !bc)
@@ -414,19 +415,15 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr,
 {
 	struct baycom_state *bc;
 	struct baycom_ioctl bi;
-	int cmd2;
 
-	if (!dev || !dev->priv ||
-	    ((struct baycom_state *)dev->priv)->hdrv.magic != HDLCDRV_MAGIC) {
-		printk(KERN_ERR "bc_ioctl: invalid device struct\n");
+	if (!dev)
 		return -EINVAL;
-	}
-	bc = (struct baycom_state *)dev->priv;
+
+	bc = netdev_priv(dev);
+	BUG_ON(bc->hdrv.magic != HDLCDRV_MAGIC);
 
 	if (cmd != SIOCDEVPRIVATE)
 		return -ENOIOCTLCMD;
-	if (get_user(cmd2, (int *)ifr->ifr_data))
-		return -EFAULT;
 	switch (hi->cmd) {
 	default:
 		break;
@@ -483,9 +480,9 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr,
 static const char *mode[NR_PORTS] = { "picpar", };
 static int iobase[NR_PORTS] = { 0x378, };
 
-MODULE_PARM(mode, "1-" __MODULE_STRING(NR_PORTS) "s");
+module_param_array(mode, charp, NULL, 0);
 MODULE_PARM_DESC(mode, "baycom operating mode; eg. par96 or picpar");
-MODULE_PARM(iobase, "1-" __MODULE_STRING(NR_PORTS) "i");
+module_param_array(iobase, int, NULL, 0);
 MODULE_PARM_DESC(iobase, "baycom io base address");
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
@@ -521,7 +518,7 @@ static int __init init_baycompar(void)
 		if (IS_ERR(dev)) 
 			break;
 
-		bc = (struct baycom_state *)dev->priv;
+		bc = netdev_priv(dev);
 		if (set_hw && baycom_setmode(bc, mode[i]))
 			set_hw = 0;
 		found++;

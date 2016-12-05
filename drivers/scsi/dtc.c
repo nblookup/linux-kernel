@@ -75,26 +75,21 @@
 #include <asm/system.h>
 #include <linux/module.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "dtc.h"
 #define AUTOPROBE_IRQ
 #include "NCR5380.h"
 
 
 #define DTC_PUBLIC_RELEASE 2
-
-/*#define DTCDEBUG 0x1*/
-#define DTCDEBUG_INIT	0x1
-#define DTCDEBUG_TRANSFER 0x2
 
 /*
  * The DTC3180 & 3280 boards are memory mapped.
@@ -142,46 +137,44 @@ static struct override {
 #ifdef OVERRIDE
 [] __initdata = OVERRIDE;
 #else
-[4] __initdata = { {
-0, IRQ_AUTO}, {
-0, IRQ_AUTO}, {
-0, IRQ_AUTO}, {
-0, IRQ_AUTO}};
+[4] __initdata = {
+	{ 0, IRQ_AUTO }, { 0, IRQ_AUTO }, { 0, IRQ_AUTO }, { 0, IRQ_AUTO }
+};
 #endif
 
-#define NO_OVERRIDES (sizeof(overrides) / sizeof(struct override))
+#define NO_OVERRIDES ARRAY_SIZE(overrides)
 
 static struct base {
 	unsigned long address;
 	int noauto;
-} bases[] __initdata = { 
-	{ 0xcc000, 0 }, 
-	{ 0xc8000, 0 }, 
-	{ 0xdc000, 0 }, 
+} bases[] __initdata = {
+	{ 0xcc000, 0 },
+	{ 0xc8000, 0 },
+	{ 0xdc000, 0 },
 	{ 0xd8000, 0 }
 };
 
-#define NO_BASES (sizeof (bases) / sizeof (struct base))
+#define NO_BASES ARRAY_SIZE(bases)
 
 static const struct signature {
 	const char *string;
 	int offset;
-} signatures[] = { 
+} signatures[] = {
 	{"DATA TECHNOLOGY CORPORATION BIOS", 0x25},
 };
 
-#define NO_SIGNATURES (sizeof (signatures) /  sizeof (struct signature))
+#define NO_SIGNATURES ARRAY_SIZE(signatures)
 
 #ifndef MODULE
 /*
  * Function : dtc_setup(char *str, int *ints)
  *
  * Purpose : LILO command line initialization of the overrides array,
- * 
+ *
  * Inputs : str - unused, ints - array of integer parameters with ints[0]
  *	equal to the number of ints.
  *
-*/
+ */
 
 static void __init dtc_setup(char *str, int *ints)
 {
@@ -203,7 +196,7 @@ static void __init dtc_setup(char *str, int *ints)
 #endif
 
 /* 
- * Function : int dtc_detect(Scsi_Host_Template * tpnt)
+ * Function : int dtc_detect(struct scsi_host_template * tpnt)
  *
  * Purpose : detects and initializes DTC 3180/3280 controllers
  *	that were autoprobed, overridden on the LILO command line, 
@@ -215,48 +208,62 @@ static void __init dtc_setup(char *str, int *ints)
  *
 */
 
-static int __init dtc_detect(Scsi_Host_Template * tpnt)
+static int __init dtc_detect(struct scsi_host_template * tpnt)
 {
 	static int current_override = 0, current_base = 0;
 	struct Scsi_Host *instance;
-	unsigned int base;
+	unsigned int addr;
+	void __iomem *base;
 	int sig, count;
 
 	tpnt->proc_name = "dtc3x80";
 	tpnt->proc_info = &dtc_proc_info;
 
 	for (count = 0; current_override < NO_OVERRIDES; ++current_override) {
-		base = 0;
+		addr = 0;
+		base = NULL;
 
-		if (overrides[current_override].address)
-			base = overrides[current_override].address;
-		else
-			for (; !base && (current_base < NO_BASES); ++current_base) {
+		if (overrides[current_override].address) {
+			addr = overrides[current_override].address;
+			base = ioremap(addr, 0x2000);
+			if (!base)
+				addr = 0;
+		} else
+			for (; !addr && (current_base < NO_BASES); ++current_base) {
 #if (DTCDEBUG & DTCDEBUG_INIT)
-				printk("scsi-dtc : probing address %08x\n", bases[current_base].address);
+				printk(KERN_DEBUG "scsi-dtc : probing address %08x\n", bases[current_base].address);
 #endif
-				for (sig = 0; sig < NO_SIGNATURES; ++sig)
-					if (!bases[current_base].noauto && isa_check_signature(bases[current_base].address + signatures[sig].offset, signatures[sig].string, strlen(signatures[sig].string))) {
-						base = bases[current_base].address;
+				if (bases[current_base].noauto)
+					continue;
+				base = ioremap(bases[current_base].address, 0x2000);
+				if (!base)
+					continue;
+				for (sig = 0; sig < NO_SIGNATURES; ++sig) {
+					if (check_signature(base + signatures[sig].offset, signatures[sig].string, strlen(signatures[sig].string))) {
+						addr = bases[current_base].address;
 #if (DTCDEBUG & DTCDEBUG_INIT)
-						printk("scsi-dtc : detected board.\n");
+						printk(KERN_DEBUG "scsi-dtc : detected board.\n");
 #endif
-						break;
+						goto found;
 					}
+				}
+				iounmap(base);
 			}
 
 #if defined(DTCDEBUG) && (DTCDEBUG & DTCDEBUG_INIT)
-		printk("scsi-dtc : base = %08x\n", base);
+		printk(KERN_DEBUG "scsi-dtc : base = %08x\n", addr);
 #endif
 
-		if (!base)
+		if (!addr)
 			break;
 
+found:
 		instance = scsi_register(tpnt, sizeof(struct NCR5380_hostdata));
 		if (instance == NULL)
 			break;
 
-		instance->base = base;
+		instance->base = addr;
+		((struct NCR5380_hostdata *)(instance)->hostdata)->base = base;
 
 		NCR5380_init(instance, 0);
 
@@ -270,7 +277,8 @@ static int __init dtc_detect(Scsi_Host_Template * tpnt)
 		/* With interrupts enabled, it will sometimes hang when doing heavy
 		 * reads. So better not enable them until I finger it out. */
 		if (instance->irq != SCSI_IRQ_NONE)
-			if (request_irq(instance->irq, dtc_intr, SA_INTERRUPT, "dtc", instance)) {
+			if (request_irq(instance->irq, dtc_intr, IRQF_DISABLED,
+					"dtc", instance)) {
 				printk(KERN_ERR "scsi%d : IRQ%d not free, interrupts disabled\n", instance->host_no, instance->irq);
 				instance->irq = SCSI_IRQ_NONE;
 			}
@@ -372,7 +380,7 @@ static inline int NCR5380_pread(struct Scsi_Host *instance, unsigned char *dst, 
 		while (NCR5380_read(DTC_CONTROL_REG) & CSR_HOST_BUF_NOT_RDY)
 			++i;
 		rtrc(3);
-		isa_memcpy_fromio(d, base + DTC_DATA_BUF, 128);
+		memcpy_fromio(d, base + DTC_DATA_BUF, 128);
 		d += 128;
 		len -= 128;
 		rtrc(7);
@@ -423,7 +431,7 @@ static inline int NCR5380_pwrite(struct Scsi_Host *instance, unsigned char *src,
 		while (NCR5380_read(DTC_CONTROL_REG) & CSR_HOST_BUF_NOT_RDY)
 			++i;
 		rtrc(3);
-		isa_memcpy_toio(base + DTC_DATA_BUF, src, 128);
+		memcpy_toio(base + DTC_DATA_BUF, src, 128);
 		src += 128;
 		len -= 128;
 	}
@@ -449,23 +457,25 @@ MODULE_LICENSE("GPL");
 
 static int dtc_release(struct Scsi_Host *shost)
 {
+	NCR5380_local_declare();
+	NCR5380_setup(shost);
 	if (shost->irq)
-		free_irq(shost->irq, NULL);
+		free_irq(shost->irq, shost);
+	NCR5380_exit(shost);
 	if (shost->io_port && shost->n_io_port)
 		release_region(shost->io_port, shost->n_io_port);
 	scsi_unregister(shost);
+	iounmap(base);
 	return 0;
 }
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.name				= "DTC 3180/3280 ",
 	.detect				= dtc_detect,
 	.release			= dtc_release,
 	.queuecommand			= dtc_queue_command,
 	.eh_abort_handler		= dtc_abort,
 	.eh_bus_reset_handler		= dtc_bus_reset,
-	.eh_device_reset_handler	= dtc_device_reset,
-	.eh_host_reset_handler          = dtc_host_reset,
 	.bios_param     		= dtc_biosparam,
 	.can_queue      		= CAN_QUEUE,
 	.this_id        		= 7,

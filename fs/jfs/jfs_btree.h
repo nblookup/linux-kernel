@@ -1,18 +1,18 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2001
+ *   Copyright (C) International Business Machines Corp., 2000-2004
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or 
+ *   the Free Software Foundation; either version 2 of the License, or
  *   (at your option) any later version.
- * 
+ *
  *   This program is distributed in the hope that it will be useful,
  *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
  *   the GNU General Public License for more details.
  *
  *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software 
+ *   along with this program;  if not, write to the Free Software
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 #ifndef	_H_JFS_BTREE
@@ -108,13 +108,12 @@ struct btpage {
  * record the path traversed during the search;
  * top frame record the leaf page/entry selected.
  */
-#define	MAXTREEHEIGHT		8
 struct btframe {	/* stack frame */
 	s64 bn;			/* 8: */
 	s16 index;		/* 2: */
-	s16 lastindex;		/* 2: */
-	struct metapage *mp;	/* 4: */
-};				/* (16) */
+	s16 lastindex;		/* 2: unused */
+	struct metapage *mp;	/* 4/8: */
+};				/* (16/24) */
 
 struct btstack {
 	struct btframe *top;
@@ -125,12 +124,15 @@ struct btstack {
 #define BT_CLR(btstack)\
 	(btstack)->top = (btstack)->stack
 
+#define BT_STACK_FULL(btstack)\
+	( (btstack)->top == &((btstack)->stack[MAXTREEHEIGHT-1]))
+
 #define BT_PUSH(BTSTACK, BN, INDEX)\
 {\
+	assert(!BT_STACK_FULL(BTSTACK));\
 	(BTSTACK)->top->bn = BN;\
 	(BTSTACK)->top->index = INDEX;\
 	++(BTSTACK)->top;\
-	assert((BTSTACK)->top != &((BTSTACK)->stack[MAXTREEHEIGHT]));\
 }
 
 #define BT_POP(btstack)\
@@ -138,6 +140,16 @@ struct btstack {
 
 #define BT_STACK(btstack)\
 	( (btstack)->top == (btstack)->stack ? NULL : (btstack)->top )
+
+static inline void BT_STACK_DUMP(struct btstack *btstack)
+{
+	int i;
+	printk("btstack dump:\n");
+	for (i = 0; i < MAXTREEHEIGHT; i++)
+		printk(KERN_ERR "bn = %Lx, index = %d\n",
+		       (long long)btstack->stack[i].bn,
+		       btstack->stack[i].index);
+}
 
 /* retrieve search results */
 #define BT_GETSEARCH(IP, LEAF, BN, MP, TYPE, P, INDEX, ROOT)\

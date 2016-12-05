@@ -16,85 +16,77 @@
  * __put_user_X
  *
  * Inputs:	r0 contains the address
- *		r1, r2 contains the value
+ *		r2, r3 contains the value
  * Outputs:	r0 is the error code
  *		lr corrupted
  *
- * No other registers must be altered.  (see include/asm-arm/uaccess.h
+ * No other registers must be altered.  (see <asm/uaccess.h>
  * for specific ASM register usage).
  *
  * Note that ADDR_LIMIT is either 0 or 0xc0000000
  * Note also that it is intended that __put_user_bad is not global.
  */
-#include <asm/constants.h>
-#include <asm/thread_info.h>
+#include <linux/linkage.h>
+#include <asm/errno.h>
+#include <asm/domain.h>
 
-	.global	__put_user_1
-__put_user_1:
-	bic	ip, sp, #0x1f00
-	bic	ip, ip, #0x00ff
-	ldr	ip, [ip, #TI_ADDR_LIMIT]
-	sub	ip, ip, #1
-	cmp	r0, ip
-1:	strlsbt	r1, [r0]
-	movls	r0, #0
-	movls	pc, lr
-	b	__put_user_bad
+ENTRY(__put_user_1)
+1:	T(strb)	r2, [r0]
+	mov	r0, #0
+	mov	pc, lr
+ENDPROC(__put_user_1)
 
-	.global	__put_user_2
-__put_user_2:
-	bic	ip, sp, #0x1f00
-	bic	ip, ip, #0x00ff
-	ldr	ip, [ip, #TI_ADDR_LIMIT]
-	sub	ip, ip, #2
-	cmp	r0, ip
-	movls	ip, r1, lsr #8
+ENTRY(__put_user_2)
+	mov	ip, r2, lsr #8
+#ifdef CONFIG_THUMB2_KERNEL
 #ifndef __ARMEB__
-2:	strlsbt	r1, [r0], #1
-3:	strlsbt	ip, [r0]
+2:	T(strb)	r2, [r0]
+3:	T(strb)	ip, [r0, #1]
 #else
-2:	strlsbt	ip, [r0], #1
-3:	strlsbt	r1, [r0]
+2:	T(strb)	ip, [r0]
+3:	T(strb)	r2, [r0, #1]
 #endif
-	movls	r0, #0
-	movls	pc, lr
-	b	__put_user_bad
+#else	/* !CONFIG_THUMB2_KERNEL */
+#ifndef __ARMEB__
+2:	T(strb)	r2, [r0], #1
+3:	T(strb)	ip, [r0]
+#else
+2:	T(strb)	ip, [r0], #1
+3:	T(strb)	r2, [r0]
+#endif
+#endif	/* CONFIG_THUMB2_KERNEL */
+	mov	r0, #0
+	mov	pc, lr
+ENDPROC(__put_user_2)
 
-	.global	__put_user_4
-__put_user_4:
-	bic	ip, sp, #0x1f00
-	bic	ip, ip, #0x00ff
-	ldr	ip, [ip, #TI_ADDR_LIMIT]
-	sub	ip, ip, #4
-	cmp	r0, ip
-4:	strlst	r1, [r0]
-	movls	r0, #0
-	movls	pc, lr
-	b	__put_user_bad
+ENTRY(__put_user_4)
+4:	T(str)	r2, [r0]
+	mov	r0, #0
+	mov	pc, lr
+ENDPROC(__put_user_4)
 
-	.global	__put_user_8
-__put_user_8:
-	bic	ip, sp, #0x1f00
-	bic	ip, ip, #0x00ff
-	ldr	ip, [ip, #TI_ADDR_LIMIT]
-	sub	ip, ip, #8
-	cmp	r0, ip
-5:	strlst	r1, [r0], #4
-6:	strlst	r2, [r0]
-	movls	r0, #0
-	movls	pc, lr
-
-	/* fall through */
+ENTRY(__put_user_8)
+#ifdef CONFIG_THUMB2_KERNEL
+5:	T(str)	r2, [r0]
+6:	T(str)	r3, [r0, #4]
+#else
+5:	T(str)	r2, [r0], #4
+6:	T(str)	r3, [r0]
+#endif
+	mov	r0, #0
+	mov	pc, lr
+ENDPROC(__put_user_8)
 
 __put_user_bad:
-	mov	r0, #-14
+	mov	r0, #-EFAULT
 	mov	pc, lr
+ENDPROC(__put_user_bad)
 
-.section __ex_table, "a"
+.pushsection __ex_table, "a"
 	.long	1b, __put_user_bad
 	.long	2b, __put_user_bad
 	.long	3b, __put_user_bad
 	.long	4b, __put_user_bad
 	.long	5b, __put_user_bad
 	.long	6b, __put_user_bad
-.previous
+.popsection

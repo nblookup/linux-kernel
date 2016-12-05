@@ -34,17 +34,19 @@
  *              HP 6020 writers now supported.
  */
 
-#include <linux/config.h>
+#include <linux/cdrom.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/bcd.h>
-
 #include <linux/blkdev.h>
-#include "scsi.h"
-#include "hosts.h"
+#include <linux/slab.h>
+
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
+#include <scsi/scsi_host.h>
 #include <scsi/scsi_ioctl.h>
 
-#include <linux/cdrom.h>
 #include "sr.h"
 
 #if 0
@@ -66,8 +68,8 @@ void sr_vendor_init(Scsi_CD *cd)
 #ifndef CONFIG_BLK_DEV_SR_VENDOR
 	cd->vendor = VENDOR_SCSI3;
 #else
-	char *vendor = cd->device->vendor;
-	char *model = cd->device->model;
+	const char *vendor = cd->device->vendor;
+	const char *model = cd->device->model;
 	
 	/* default */
 	cd->vendor = VENDOR_SCSI3;
@@ -107,7 +109,7 @@ void sr_vendor_init(Scsi_CD *cd)
 int sr_set_blocklength(Scsi_CD *cd, int blocklength)
 {
 	unsigned char *buffer;	/* the buffer for the ioctl */
-	struct cdrom_generic_command cgc;
+	struct packet_command cgc;
 	struct ccs_modesel_head *modesel;
 	int rc, density = 0;
 
@@ -116,14 +118,14 @@ int sr_set_blocklength(Scsi_CD *cd, int blocklength)
 		density = (blocklength > 2048) ? 0x81 : 0x83;
 #endif
 
-	buffer = (unsigned char *) kmalloc(512, GFP_KERNEL | GFP_DMA);
+	buffer = kmalloc(512, GFP_KERNEL | GFP_DMA);
 	if (!buffer)
 		return -ENOMEM;
 
 #ifdef DEBUG
 	printk("%s: MODE SELECT 0x%x/%d\n", cd->cdi.name, density, blocklength);
 #endif
-	memset(&cgc, 0, sizeof(struct cdrom_generic_command));
+	memset(&cgc, 0, sizeof(struct packet_command));
 	cgc.cmd[0] = MODE_SELECT;
 	cgc.cmd[1] = (1 << 4);
 	cgc.cmd[4] = 12;
@@ -135,7 +137,7 @@ int sr_set_blocklength(Scsi_CD *cd, int blocklength)
 	modesel->block_length_lo = blocklength & 0xff;
 	cgc.buffer = buffer;
 	cgc.buflen = sizeof(*modesel);
-	cgc.data_direction = SCSI_DATA_WRITE;
+	cgc.data_direction = DMA_TO_DEVICE;
 	cgc.timeout = VENDOR_TIMEOUT;
 	if (0 == (rc = sr_do_ioctl(cd, &cgc))) {
 		cd->device->sector_size = blocklength;
@@ -157,13 +159,13 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 	Scsi_CD *cd = cdi->handle;
 	unsigned long sector;
 	unsigned char *buffer;	/* the buffer for the ioctl */
-	struct cdrom_generic_command cgc;
+	struct packet_command cgc;
 	int rc, no_multi;
 
 	if (cd->cdi.mask & CDC_MULTI_SESSION)
 		return 0;
 
-	buffer = (unsigned char *) kmalloc(512, GFP_KERNEL | GFP_DMA);
+	buffer = kmalloc(512, GFP_KERNEL | GFP_DMA);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -171,7 +173,7 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 	no_multi = 0;		/* flag: the drive can't handle multisession */
 	rc = 0;
 
-	memset(&cgc, 0, sizeof(struct cdrom_generic_command));
+	memset(&cgc, 0, sizeof(struct packet_command));
 
 	switch (cd->vendor) {
 
@@ -182,7 +184,7 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 		cgc.buffer = buffer;
 		cgc.buflen = 12;
 		cgc.quiet = 1;
-		cgc.data_direction = SCSI_DATA_READ;
+		cgc.data_direction = DMA_FROM_DEVICE;
 		cgc.timeout = VENDOR_TIMEOUT;
 		rc = sr_do_ioctl(cd, &cgc);
 		if (rc != 0)
@@ -210,7 +212,7 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 			cgc.buffer = buffer;
 			cgc.buflen = 0x16;
 			cgc.quiet = 1;
-			cgc.data_direction = SCSI_DATA_READ;
+			cgc.data_direction = DMA_FROM_DEVICE;
 			cgc.timeout = VENDOR_TIMEOUT;
 			rc = sr_do_ioctl(cd, &cgc);
 			if (rc != 0)
@@ -222,9 +224,9 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 				no_multi = 1;
 				break;
 			}
-			min = BCD2BIN(buffer[15]);
-			sec = BCD2BIN(buffer[16]);
-			frame = BCD2BIN(buffer[17]);
+			min = bcd2bin(buffer[15]);
+			sec = bcd2bin(buffer[16]);
+			frame = bcd2bin(buffer[17]);
 			sector = min * CD_SECS * CD_FRAMES + sec * CD_FRAMES + frame;
 			break;
 		}
@@ -239,7 +241,7 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 			cgc.buffer = buffer;
 			cgc.buflen = 4;
 			cgc.quiet = 1;
-			cgc.data_direction = SCSI_DATA_READ;
+			cgc.data_direction = DMA_FROM_DEVICE;
 			cgc.timeout = VENDOR_TIMEOUT;
 			rc = sr_do_ioctl(cd, &cgc);
 			if (rc == -EINVAL) {
@@ -251,9 +253,9 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 			}
 			if (rc != 0)
 				break;
-			min = BCD2BIN(buffer[1]);
-			sec = BCD2BIN(buffer[2]);
-			frame = BCD2BIN(buffer[3]);
+			min = bcd2bin(buffer[1]);
+			sec = bcd2bin(buffer[2]);
+			frame = bcd2bin(buffer[3]);
 			sector = min * CD_SECS * CD_FRAMES + sec * CD_FRAMES + frame;
 			if (sector)
 				sector -= CD_MSF_OFFSET;
@@ -268,7 +270,7 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 		cgc.buffer = buffer;
 		cgc.buflen = 0x04;
 		cgc.quiet = 1;
-		cgc.data_direction = SCSI_DATA_READ;
+		cgc.data_direction = DMA_FROM_DEVICE;
 		cgc.timeout = VENDOR_TIMEOUT;
 		rc = sr_do_ioctl(cd, &cgc);
 		if (rc != 0) {
@@ -286,7 +288,7 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 		cgc.buffer = buffer;
 		cgc.buflen = 12;
 		cgc.quiet = 1;
-		cgc.data_direction = SCSI_DATA_READ;
+		cgc.data_direction = DMA_FROM_DEVICE;
 		cgc.timeout = VENDOR_TIMEOUT;
 		rc = sr_do_ioctl(cd, &cgc);
 		if (rc != 0) {

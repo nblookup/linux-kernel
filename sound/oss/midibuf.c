@@ -1,5 +1,5 @@
 /*
- * sound/midibuf.c
+ * sound/oss/midibuf.c
  *
  * Device file manager for /dev/midi#
  */
@@ -50,10 +50,10 @@ static struct midi_parms parms[MAX_MIDI_DEV];
 static void midi_poll(unsigned long dummy);
 
 
-static struct timer_list poll_timer = TIMER_INITIALIZER(midi_poll, 0, 0);
+static DEFINE_TIMER(poll_timer, midi_poll, 0, 0);
 
 static volatile int open_devs;
-static spinlock_t lock=SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(lock);
 
 #define DATA_AVAIL(q) (q->len)
 #define SPACE_AVAIL(q) (MAX_QUEUE_SIZE - q->len)
@@ -127,15 +127,16 @@ static void midi_poll(unsigned long dummy)
 		for (dev = 0; dev < num_midis; dev++)
 			if (midi_devs[dev] != NULL && midi_out_buf[dev] != NULL)
 			{
-				int ok = 1;
-
-				while (DATA_AVAIL(midi_out_buf[dev]) && ok)
+				while (DATA_AVAIL(midi_out_buf[dev]))
 				{
+					int ok;
 					int c = midi_out_buf[dev]->queue[midi_out_buf[dev]->head];
 
 					spin_unlock_irqrestore(&lock,flags);/* Give some time to others */
 					ok = midi_devs[dev]->outputc(dev, c);
 					spin_lock_irqsave(&lock, flags);
+					if (!ok)
+						break;
 					midi_out_buf[dev]->head = (midi_out_buf[dev]->head + 1) % MAX_QUEUE_SIZE;
 					midi_out_buf[dev]->len--;
 				}
@@ -177,7 +178,7 @@ int MIDIbuf_open(int dev, struct file *file)
 		return err;
 
 	parms[dev].prech_timeout = MAX_SCHEDULE_TIMEOUT;
-	midi_in_buf[dev] = (struct midi_buf *) vmalloc(sizeof(struct midi_buf));
+	midi_in_buf[dev] = vmalloc(sizeof(struct midi_buf));
 
 	if (midi_in_buf[dev] == NULL)
 	{
@@ -187,7 +188,7 @@ int MIDIbuf_open(int dev, struct file *file)
 	}
 	midi_in_buf[dev]->len = midi_in_buf[dev]->head = midi_in_buf[dev]->tail = 0;
 
-	midi_out_buf[dev] = (struct midi_buf *) vmalloc(sizeof(struct midi_buf));
+	midi_out_buf[dev] = vmalloc(sizeof(struct midi_buf));
 
 	if (midi_out_buf[dev] == NULL)
 	{
@@ -256,7 +257,7 @@ void MIDIbuf_release(int dev, struct file *file)
 	module_put(midi_devs[dev]->owner);
 }
 
-int MIDIbuf_write(int dev, struct file *file, const char *buf, int count)
+int MIDIbuf_write(int dev, struct file *file, const char __user *buf, int count)
 {
 	int c, n, i;
 	unsigned char tmp_data;
@@ -294,7 +295,7 @@ int MIDIbuf_write(int dev, struct file *file, const char *buf, int count)
 
 		for (i = 0; i < n; i++)
 		{
-			/* BROKE BROKE BROKE - CANT DO THIS WITH CLI !! */
+			/* BROKE BROKE BROKE - CAN'T DO THIS WITH CLI !! */
 			/* yes, think the same, so I removed the cli() brackets 
 				QUEUE_BYTE is protected against interrupts */
 			if (copy_from_user((char *) &tmp_data, &(buf)[c], 1)) {
@@ -310,7 +311,7 @@ out:
 }
 
 
-int MIDIbuf_read(int dev, struct file *file, char *buf, int count)
+int MIDIbuf_read(int dev, struct file *file, char __user *buf, int count)
 {
 	int n, c = 0;
 	unsigned char tmp_data;
@@ -359,7 +360,7 @@ out:
 }
 
 int MIDIbuf_ioctl(int dev, struct file *file,
-		  unsigned int cmd, caddr_t arg)
+		  unsigned int cmd, void __user *arg)
 {
 	int val;
 
@@ -377,13 +378,13 @@ int MIDIbuf_ioctl(int dev, struct file *file,
 		switch (cmd) 
 		{
 			case SNDCTL_MIDI_PRETIME:
-				if (get_user(val, (int *)arg))
+				if (get_user(val, (int __user *)arg))
 					return -EFAULT;
 				if (val < 0)
 					val = 0;
 				val = (HZ * val) / 10;
 				parms[dev].prech_timeout = val;
-				return put_user(val, (int *)arg);
+				return put_user(val, (int __user *)arg);
 			
 			default:
 				if (!midi_devs[dev]->ioctl)
@@ -414,18 +415,11 @@ unsigned int MIDIbuf_poll(int dev, struct file *file, poll_table * wait)
 }
 
 
-void MIDIbuf_init(void)
-{
-	/* drag in midi_syms.o */
-	{
-		extern char midi_syms_symbol;
-		midi_syms_symbol = 0;
-	}
-}
-
 int MIDIbuf_avail(int dev)
 {
 	if (midi_in_buf[dev])
 		return DATA_AVAIL (midi_in_buf[dev]);
 	return 0;
 }
+EXPORT_SYMBOL(MIDIbuf_avail);
+

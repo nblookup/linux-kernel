@@ -38,11 +38,8 @@
  * TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
  *
  *****************************************************************************/
-static char ixj_h_rcsid[] = "$Id: ixj.h,v 4.1 2001/08/04 14:49:27 craigs Exp $";
-
 #define IXJ_VERSION 3031
 
-#include <linux/version.h>
 #include <linux/types.h>
 
 #include <linux/ixjuser.h>
@@ -51,20 +48,9 @@ static char ixj_h_rcsid[] = "$Id: ixj.h,v 4.1 2001/08/04 14:49:27 craigs Exp $";
 typedef __u16 WORD;
 typedef __u32 DWORD;
 typedef __u8 BYTE;
-typedef __u8 BOOL;
 
 #ifndef IXJMAX
 #define IXJMAX 16
-#endif
-
-#define TRUE 1
-#define FALSE 0
-
-#ifndef min
-#define min(a,b) (((a)<(b))?(a):(b))
-#endif
-#ifndef max
-#define max(a,b) (((a)>(b))?(a):(b))
 #endif
 
 /******************************************************************************
@@ -1163,7 +1149,7 @@ typedef struct {
 	unsigned int firstring:1; /* First ring cadence is complete */
 	unsigned int pstncheck:1;	/* Currently checking the PSTN Line */
 	unsigned int pstn_rmr:1;
-	unsigned int x:3;	/* unsed bits */
+	unsigned int x:3;	/* unused bits */
 
 } IXJ_FLAGS;
 
@@ -1172,6 +1158,12 @@ typedef struct {
 *  This structure holds the state of all of the Quicknet cards
 *
 ******************************************************************************/
+
+typedef struct {
+	int elements_used;
+	IXJ_CADENCE_TERM termination;
+	IXJ_CADENCE_ELEMENT *ce;
+} ixj_cadence;
 
 typedef struct {
 	struct phone_device p;
@@ -1189,12 +1181,12 @@ typedef struct {
 	unsigned int cid_rec_codec;
 	unsigned int cid_rec_volume;
 	unsigned char cid_rec_flag;
-	char rec_mode;
+	signed char rec_mode;
 	unsigned int play_codec;
 	unsigned int cid_play_codec;
 	unsigned int cid_play_volume;
 	unsigned char cid_play_flag;
-	char play_mode;
+	signed char play_mode;
 	IXJ_FLAGS flags;
 	unsigned long busyflags;
 	unsigned int rec_frame_size;
@@ -1205,22 +1197,13 @@ typedef struct {
 	int aec_level;
 	int cid_play_aec_level;
 	int readers, writers;
-#if LINUX_VERSION_CODE < 0x020400
-	struct wait_queue *poll_q;
-	struct wait_queue *read_q;
-#else
         wait_queue_head_t poll_q;
         wait_queue_head_t read_q;
-#endif
 	char *read_buffer, *read_buffer_end;
 	char *read_convert_buffer;
 	size_t read_buffer_size;
 	unsigned int read_buffer_ready;
-#if LINUX_VERSION_CODE < 0x020400
-	struct wait_queue *write_q;
-#else
         wait_queue_head_t write_q;
-#endif
 	char *write_buffer, *write_buffer_end;
 	char *write_convert_buffer;
 	size_t write_buffer_size;
@@ -1236,8 +1219,8 @@ typedef struct {
 	char tone_index;
 	char tone_state;
 	char maxrings;
-	IXJ_CADENCE *cadence_t;
-	IXJ_CADENCE *cadence_r;
+	ixj_cadence *cadence_t;
+	ixj_cadence *cadence_r;
 	int tone_cadence_state;
 	IXJ_CADENCE_F cadence_f[6];
 	DTMF dtmf;
@@ -1308,7 +1291,7 @@ typedef struct {
 	Proc_Info_Type Info_write;
 	unsigned short frame_count;
 	unsigned int filter_hist[4];
-	unsigned char filter_en[4];
+	unsigned char filter_en[6];
 	unsigned short proc_load;
 	unsigned long framesread;
 	unsigned long frameswritten;

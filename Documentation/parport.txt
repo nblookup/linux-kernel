@@ -39,7 +39,7 @@ are automatically detected.
 KMod
 ----
 
-If you use kmod, you will find it useful to edit /etc/modules.conf.
+If you use kmod, you will find it useful to edit /etc/modprobe.conf.
 Here is an example of the lines that need to be added:
 
 	alias parport_lowlevel parport_pc
@@ -264,5 +264,5 @@ the DMA channel, and try with:
     io=0x378 irq=7 dma=none (for PIO)
     io=0x378 irq=7 dma=3 (for DMA)
 --
-Philip.Blundell@pobox.com
+philb@gnu.org
 tim@cyberelk.net

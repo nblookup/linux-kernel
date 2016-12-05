@@ -35,7 +35,6 @@
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <linux/config.h>
 #include "fp_emu.h"
 
 /*
@@ -1337,7 +1336,7 @@ fp_finalrounding_single:
 	jra	fp_finaltest
 
 fp_finalrounding_single_fast:
-	addq.l	#8,%sp 
+	addq.l	#8,%sp
 	jsr	fp_normalize_ext
 	jsr	fp_normalize_single_fast
 	jra	fp_finaltest

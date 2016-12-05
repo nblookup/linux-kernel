@@ -17,7 +17,7 @@ config JOYSTICK_IFORCE_USB
 	depends on JOYSTICK_IFORCE && (JOYSTICK_IFORCE=m || USB=y) && USB
 	help
 	  Say Y here if you have an I-Force joystick or steering wheel
-	  connected to your USB port. 
+	  connected to your USB port.
 
 config JOYSTICK_IFORCE_232
 	bool "I-Force Serial joysticks and wheels"
@@ -27,5 +27,6 @@ config JOYSTICK_IFORCE_232
 	  connected to your serial (COM) port.
 
 	  You will need an additional utility called inputattach, see
-	  Documentation/input/joystick.txt and ff.txt.
+	  <file:Documentation/input/joystick.txt>
+	  and <file:Documentation/input/ff.txt>.
 

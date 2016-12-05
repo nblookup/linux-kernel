@@ -8,8 +8,8 @@
  * Copyright (C) 1999-2000 VA Linux Systems
  * Copyright (C) 1999-2000 Walt Drummond <drummond@valinux.com>
  */
-#include <linux/config.h>
 
+#include <linux/cpu.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -18,229 +18,161 @@
 #include <linux/time.h>
 #include <linux/interrupt.h>
 #include <linux/efi.h>
-#include <linux/profile.h>
 #include <linux/timex.h>
+#include <linux/clocksource.h>
+#include <linux/platform_device.h>
 
+#include <asm/machvec.h>
 #include <asm/delay.h>
 #include <asm/hw_irq.h>
+#include <asm/paravirt.h>
 #include <asm/ptrace.h>
 #include <asm/sal.h>
 #include <asm/sections.h>
 #include <asm/system.h>
 
-extern unsigned long wall_jiffies;
+#include "fsyscall_gtod_data.h"
 
-u64 jiffies_64 = INITIAL_JIFFIES;
+static cycle_t itc_get_cycles(struct clocksource *cs);
 
-EXPORT_SYMBOL(jiffies_64);
+struct fsyscall_gtod_data_t fsyscall_gtod_data = {
+	.lock = SEQLOCK_UNLOCKED,
+};
 
-#define TIME_KEEPER_ID	0	/* smp_processor_id() of time-keeper */
+struct itc_jitter_data_t itc_jitter_data;
+
+volatile int time_keeper_id = 0; /* smp_processor_id() of time-keeper */
 
 #ifdef CONFIG_IA64_DEBUG_IRQ
 
 unsigned long last_cli_ip;
+EXPORT_SYMBOL(last_cli_ip);
 
 #endif
 
-unsigned long long
-sched_clock (void)
+#ifdef CONFIG_PARAVIRT
+/* We need to define a real function for sched_clock, to override the
+   weak default version */
+unsigned long long sched_clock(void)
 {
-	unsigned long offset = ia64_get_itc();
-
-	return (offset * local_cpu_data->nsec_per_cyc) >> IA64_NSEC_PER_CYC_SHIFT;
+        return paravirt_sched_clock();
 }
+#endif
 
+#ifdef CONFIG_PARAVIRT
 static void
-itc_reset (void)
+paravirt_clocksource_resume(struct clocksource *cs)
 {
+	if (pv_time_ops.clocksource_resume)
+		pv_time_ops.clocksource_resume();
 }
+#endif
 
-/*
- * Adjust for the fact that xtime has been advanced by delta_nsec (may be negative and/or
- * larger than NSEC_PER_SEC.
- */
-static void
-itc_update (long delta_nsec)
-{
-}
-
-/*
- * Return the number of nano-seconds that elapsed since the last
- * update to jiffy.  It is quite possible that the timer interrupt
- * will interrupt this and result in a race for any of jiffies,
- * wall_jiffies or itm_next.  Thus, the xtime_lock must be at least
- * read synchronised when calling this routine (see do_gettimeofday()
- * below for an example).
- */
-unsigned long
-itc_get_offset (void)
-{
-	unsigned long elapsed_cycles, lost = jiffies - wall_jiffies;
-	unsigned long now = ia64_get_itc(), last_tick;
-
-	last_tick = (cpu_data(TIME_KEEPER_ID)->itm_next
-		     - (lost + 1)*cpu_data(TIME_KEEPER_ID)->itm_delta);
-
-	elapsed_cycles = now - last_tick;
-	return (elapsed_cycles*local_cpu_data->nsec_per_cyc) >> IA64_NSEC_PER_CYC_SHIFT;
-}
-
-static struct time_interpolator itc_interpolator = {
-	.get_offset =	itc_get_offset,
-	.update =	itc_update,
-	.reset =	itc_reset
+static struct clocksource clocksource_itc = {
+	.name           = "itc",
+	.rating         = 350,
+	.read           = itc_get_cycles,
+	.mask           = CLOCKSOURCE_MASK(64),
+	.mult           = 0, /*to be calculated*/
+	.shift          = 16,
+	.flags          = CLOCK_SOURCE_IS_CONTINUOUS,
+#ifdef CONFIG_PARAVIRT
+	.resume		= paravirt_clocksource_resume,
+#endif
 };
+static struct clocksource *itc_clocksource;
 
-int
-do_settimeofday (struct timespec *tv)
-{
-	time_t wtm_sec, sec = tv->tv_sec;
-	long wtm_nsec, nsec = tv->tv_nsec;
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING
 
-	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
-		return -EINVAL;
+#include <linux/kernel_stat.h>
 
-	write_seqlock_irq(&xtime_lock);
-	{
-		/*
-		 * This is revolting. We need to set "xtime" correctly. However, the value
-		 * in this location is the value at the most recent update of wall time.
-		 * Discover what correction gettimeofday would have done, and then undo
-		 * it!
-		 */
-		nsec -= time_interpolator_get_offset();
-
-		wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
-		wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
-
-		set_normalized_timespec(&xtime, sec, nsec);
-		set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
-
-		time_adjust = 0;		/* stop active adjtime() */
-		time_status |= STA_UNSYNC;
-		time_maxerror = NTP_PHASE_LIMIT;
-		time_esterror = NTP_PHASE_LIMIT;
-		time_interpolator_reset();
-	}
-	write_sequnlock_irq(&xtime_lock);
-	clock_was_set();
-	return 0;
-}
-
-EXPORT_SYMBOL(do_settimeofday);
-
-void
-do_gettimeofday (struct timeval *tv)
-{
-	unsigned long seq, nsec, usec, sec, old, offset;
-
-	while (1) {
-		seq = read_seqbegin(&xtime_lock);
-		{
-			old = last_nsec_offset;
-			offset = time_interpolator_get_offset();
-			sec = xtime.tv_sec;
-			nsec = xtime.tv_nsec;
-		}
-		if (unlikely(read_seqretry(&xtime_lock, seq)))
-			continue;
-		/*
-		 * Ensure that for any pair of causally ordered gettimeofday() calls, time
-		 * never goes backwards (even when ITC on different CPUs are not perfectly
-		 * synchronized).  (A pair of concurrent calls to gettimeofday() is by
-		 * definition non-causal and hence it makes no sense to talk about
-		 * time-continuity for such calls.)
-		 *
-		 * Doing this in a lock-free and race-free manner is tricky.  Here is why
-		 * it works (most of the time): read_seqretry() just succeeded, which
-		 * implies we calculated a consistent (valid) value for "offset".  If the
-		 * cmpxchg() below succeeds, we further know that last_nsec_offset still
-		 * has the same value as at the beginning of the loop, so there was
-		 * presumably no timer-tick or other updates to last_nsec_offset in the
-		 * meantime.  This isn't 100% true though: there _is_ a possibility of a
-		 * timer-tick occurring right right after read_seqretry() and then getting
-		 * zero or more other readers which will set last_nsec_offset to the same
-		 * value as the one we read at the beginning of the loop.  If this
-		 * happens, we'll end up returning a slightly newer time than we ought to
-		 * (the jump forward is at most "offset" nano-seconds).  There is no
-		 * danger of causing time to go backwards, though, so we are safe in that
-		 * sense.  We could make the probability of this unlucky case occurring
-		 * arbitrarily small by encoding a version number in last_nsec_offset, but
-		 * even without versioning, the probability of this unlucky case should be
-		 * so small that we won't worry about it.
-		 */
-		if (offset <= old) {
-			offset = old;
-			break;
-		} else if (likely(cmpxchg(&last_nsec_offset, old, offset) == old))
-			break;
-
-		/* someone else beat us to updating last_nsec_offset; try again */
-	}
-
-	usec = (nsec + offset) / 1000;
-
-	while (unlikely(usec >= USEC_PER_SEC)) {
-		usec -= USEC_PER_SEC;
-		++sec;
-	}
-
-	tv->tv_sec = sec;
-	tv->tv_usec = usec;
-}
-
-EXPORT_SYMBOL(do_gettimeofday);
+extern cputime_t cycle_to_cputime(u64 cyc);
 
 /*
- * The profiling function is SMP safe. (nothing can mess
- * around with "current", and the profiling counters are
- * updated with atomic operations). This is especially
- * useful with a profiling multiplier != 1
+ * Called from the context switch with interrupts disabled, to charge all
+ * accumulated times to the current process, and to prepare accounting on
+ * the next process.
  */
-static inline void
-ia64_do_profile (struct pt_regs * regs)
+void ia64_account_on_switch(struct task_struct *prev, struct task_struct *next)
 {
-	unsigned long ip, slot;
-	extern cpumask_t prof_cpu_mask;
+	struct thread_info *pi = task_thread_info(prev);
+	struct thread_info *ni = task_thread_info(next);
+	cputime_t delta_stime, delta_utime;
+	__u64 now;
 
-	profile_hook(regs);
+	now = ia64_get_itc();
 
-	if (user_mode(regs))
-		return;
+	delta_stime = cycle_to_cputime(pi->ac_stime + (now - pi->ac_stamp));
+	if (idle_task(smp_processor_id()) != prev)
+		account_system_time(prev, 0, delta_stime, delta_stime);
+	else
+		account_idle_time(delta_stime);
 
-	if (!prof_buffer)
-		return;
+	if (pi->ac_utime) {
+		delta_utime = cycle_to_cputime(pi->ac_utime);
+		account_user_time(prev, delta_utime, delta_utime);
+	}
 
-	ip = instruction_pointer(regs);
-	/* Conserve space in histogram by encoding slot bits in address
-	 * bits 2 and 3 rather than bits 0 and 1.
-	 */
-	slot = ip & 3;
-	ip = (ip & ~3UL) + 4*slot;
-
-	/*
-	 * Only measure the CPUs specified by /proc/irq/prof_cpu_mask.
-	 * (default is all CPUs.)
-	 */
-	if (!cpu_isset(smp_processor_id(), prof_cpu_mask))
-		return;
-
-	ip -= (unsigned long) &_stext;
-	ip >>= prof_shift;
-	/*
-	 * Don't ignore out-of-bounds IP values silently,
-	 * put them into the last histogram slot, so if
-	 * present, they will show up as a sharp peak.
-	 */
-	if (ip > prof_len-1)
-		ip = prof_len-1;
-	atomic_inc((atomic_t *)&prof_buffer[ip]);
+	pi->ac_stamp = ni->ac_stamp = now;
+	ni->ac_stime = ni->ac_utime = 0;
 }
+
+/*
+ * Account time for a transition between system, hard irq or soft irq state.
+ * Note that this function is called with interrupts enabled.
+ */
+void account_system_vtime(struct task_struct *tsk)
+{
+	struct thread_info *ti = task_thread_info(tsk);
+	unsigned long flags;
+	cputime_t delta_stime;
+	__u64 now;
+
+	local_irq_save(flags);
+
+	now = ia64_get_itc();
+
+	delta_stime = cycle_to_cputime(ti->ac_stime + (now - ti->ac_stamp));
+	if (irq_count() || idle_task(smp_processor_id()) != tsk)
+		account_system_time(tsk, 0, delta_stime, delta_stime);
+	else
+		account_idle_time(delta_stime);
+	ti->ac_stime = 0;
+
+	ti->ac_stamp = now;
+
+	local_irq_restore(flags);
+}
+EXPORT_SYMBOL_GPL(account_system_vtime);
+
+/*
+ * Called from the timer interrupt handler to charge accumulated user time
+ * to the current process.  Must be called with interrupts disabled.
+ */
+void account_process_tick(struct task_struct *p, int user_tick)
+{
+	struct thread_info *ti = task_thread_info(p);
+	cputime_t delta_utime;
+
+	if (ti->ac_utime) {
+		delta_utime = cycle_to_cputime(ti->ac_utime);
+		account_user_time(p, delta_utime, delta_utime);
+		ti->ac_utime = 0;
+	}
+}
+
+#endif /* CONFIG_VIRT_CPU_ACCOUNTING */
 
 static irqreturn_t
-timer_interrupt (int irq, void *dev_id, struct pt_regs *regs)
+timer_interrupt (int irq, void *dev_id)
 {
 	unsigned long new_itm;
+
+	if (cpu_is_offline(smp_processor_id())) {
+		return IRQ_HANDLED;
+	}
+
+	platform_timer_interrupt(irq, dev_id);
 
 	new_itm = local_cpu_data->itm_next;
 
@@ -248,45 +180,47 @@ timer_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 		printk(KERN_ERR "Oops: timer tick before it's due (itc=%lx,itm=%lx)\n",
 		       ia64_get_itc(), new_itm);
 
-	ia64_do_profile(regs);
+	profile_tick(CPU_PROFILING);
+
+	if (paravirt_do_steal_accounting(&new_itm))
+		goto skip_process_time_accounting;
 
 	while (1) {
+		update_process_times(user_mode(get_irq_regs()));
 
-#ifdef CONFIG_SMP
-		smp_do_timer(regs);
-#endif
 		new_itm += local_cpu_data->itm_delta;
 
-		if (smp_processor_id() == TIME_KEEPER_ID) {
-			/*
-			 * Here we are in the timer irq handler. We have irqs locally
-			 * disabled, but we don't know if the timer_bh is running on
-			 * another CPU. We need to avoid to SMP race by acquiring the
-			 * xtime_lock.
-			 */
-			write_seqlock(&xtime_lock);
-			do_timer(regs);
-			local_cpu_data->itm_next = new_itm;
-			write_sequnlock(&xtime_lock);
-		} else
-			local_cpu_data->itm_next = new_itm;
+		if (smp_processor_id() == time_keeper_id)
+			xtime_update(1);
+
+		local_cpu_data->itm_next = new_itm;
 
 		if (time_after(new_itm, ia64_get_itc()))
 			break;
+
+		/*
+		 * Allow IPIs to interrupt the timer loop.
+		 */
+		local_irq_enable();
+		local_irq_disable();
 	}
 
+skip_process_time_accounting:
+
 	do {
-	    /*
-	     * If we're too close to the next clock tick for comfort, we increase the
-	     * safety margin by intentionally dropping the next tick(s).  We do NOT update
-	     * itm.next because that would force us to call do_timer() which in turn would
-	     * let our clock run too fast (with the potentially devastating effect of
-	     * losing monotony of time).
-	     */
-	    while (!time_after(new_itm, ia64_get_itc() + local_cpu_data->itm_delta/2))
-	      new_itm += local_cpu_data->itm_delta;
-	    ia64_set_itm(new_itm);
-	    /* double check, in case we got hit by a (slow) PMI: */
+		/*
+		 * If we're too close to the next clock tick for
+		 * comfort, we increase the safety margin by
+		 * intentionally dropping the next tick(s).  We do NOT
+		 * update itm.next because that would force us to call
+		 * xtime_update() which in turn would let our clock run
+		 * too fast (with the potentially devastating effect
+		 * of losing monotony of time).
+		 */
+		while (!time_after(new_itm, ia64_get_itc() + local_cpu_data->itm_delta/2))
+			new_itm += local_cpu_data->itm_delta;
+		ia64_set_itm(new_itm);
+		/* double check, in case we got hit by a (slow) PMI: */
 	} while (time_after_eq(ia64_get_itc(), new_itm));
 	return IRQ_HANDLED;
 }
@@ -316,7 +250,19 @@ ia64_cpu_local_tick (void)
 	ia64_set_itm(local_cpu_data->itm_next);
 }
 
-void __init
+static int nojitter;
+
+static int __init nojitter_setup(char *str)
+{
+	nojitter = 1;
+	printk("Jitter checking for ITC timers disabled\n");
+	return 1;
+}
+
+__setup("nojitter", nojitter_setup);
+
+
+void __devinit
 ia64_init_itm (void)
 {
 	unsigned long platform_base_freq, itc_freq;
@@ -333,7 +279,7 @@ ia64_init_itm (void)
 	if (status != 0) {
 		printk(KERN_ERR "SAL_FREQ_BASE_PLATFORM failed: %s\n", ia64_sal_strerror(status));
 	} else {
-		status = ia64_pal_freq_ratios(&proc_ratio, 0, &itc_ratio);
+		status = ia64_pal_freq_ratios(&proc_ratio, NULL, &itc_ratio);
 		if (status != 0)
 			printk(KERN_ERR "PAL_FREQ_RATIOS failed with status=%ld\n", status);
 	}
@@ -358,17 +304,20 @@ ia64_init_itm (void)
 		itc_ratio.den = 1;	/* avoid division by zero */
 
 	itc_freq = (platform_base_freq*itc_ratio.num)/itc_ratio.den;
-	if (platform_base_drift != -1)
-		itc_drift = platform_base_drift*itc_ratio.num/itc_ratio.den;
-	else
-		itc_drift = -1;
 
 	local_cpu_data->itm_delta = (itc_freq + HZ/2) / HZ;
-	printk(KERN_INFO "CPU %d: base freq=%lu.%03luMHz, ITC ratio=%lu/%lu, "
-	       "ITC freq=%lu.%03luMHz+/-%ldppm\n", smp_processor_id(),
+	printk(KERN_DEBUG "CPU %d: base freq=%lu.%03luMHz, ITC ratio=%u/%u, "
+	       "ITC freq=%lu.%03luMHz", smp_processor_id(),
 	       platform_base_freq / 1000000, (platform_base_freq / 1000) % 1000,
-	       itc_ratio.num, itc_ratio.den, itc_freq / 1000000, (itc_freq / 1000) % 1000,
-	       itc_drift);
+	       itc_ratio.num, itc_ratio.den, itc_freq / 1000000, (itc_freq / 1000) % 1000);
+
+	if (platform_base_drift != -1) {
+		itc_drift = platform_base_drift*itc_ratio.num/itc_ratio.den;
+		printk("+/-%ldppm\n", itc_drift);
+	} else {
+		itc_drift = -1;
+		printk("\n");
+	}
 
 	local_cpu_data->proc_freq = (platform_base_freq*proc_ratio.num)/proc_ratio.den;
 	local_cpu_data->itc_freq = itc_freq;
@@ -377,31 +326,170 @@ ia64_init_itm (void)
 					+ itc_freq/2)/itc_freq;
 
 	if (!(sal_platform_features & IA64_SAL_PLATFORM_FEATURE_ITC_DRIFT)) {
-		itc_interpolator.frequency = local_cpu_data->itc_freq;
-		itc_interpolator.drift = itc_drift;
-		register_time_interpolator(&itc_interpolator);
-	}
+#ifdef CONFIG_SMP
+		/* On IA64 in an SMP configuration ITCs are never accurately synchronized.
+		 * Jitter compensation requires a cmpxchg which may limit
+		 * the scalability of the syscalls for retrieving time.
+		 * The ITC synchronization is usually successful to within a few
+		 * ITC ticks but this is not a sure thing. If you need to improve
+		 * timer performance in SMP situations then boot the kernel with the
+		 * "nojitter" option. However, doing so may result in time fluctuating (maybe
+		 * even going backward) if the ITC offsets between the individual CPUs
+		 * are too large.
+		 */
+		if (!nojitter)
+			itc_jitter_data.itc_jitter = 1;
+#endif
+	} else
+		/*
+		 * ITC is drifty and we have not synchronized the ITCs in smpboot.c.
+		 * ITC values may fluctuate significantly between processors.
+		 * Clock should not be used for hrtimers. Mark itc as only
+		 * useful for boot and testing.
+		 *
+		 * Note that jitter compensation is off! There is no point of
+		 * synchronizing ITCs since they may be large differentials
+		 * that change over time.
+		 *
+		 * The only way to fix this would be to repeatedly sync the
+		 * ITCs. Until that time we have to avoid ITC.
+		 */
+		clocksource_itc.rating = 50;
+
+	paravirt_init_missing_ticks_accounting(smp_processor_id());
+
+	/* avoid softlock up message when cpu is unplug and plugged again. */
+	touch_softlockup_watchdog();
 
 	/* Setup the CPU local timer tick */
 	ia64_cpu_local_tick();
+
+	if (!itc_clocksource) {
+		/* Sort out mult/shift values: */
+		clocksource_itc.mult =
+			clocksource_hz2mult(local_cpu_data->itc_freq,
+						clocksource_itc.shift);
+		clocksource_register(&clocksource_itc);
+		itc_clocksource = &clocksource_itc;
+	}
 }
+
+static cycle_t itc_get_cycles(struct clocksource *cs)
+{
+	unsigned long lcycle, now, ret;
+
+	if (!itc_jitter_data.itc_jitter)
+		return get_cycles();
+
+	lcycle = itc_jitter_data.itc_lastcycle;
+	now = get_cycles();
+	if (lcycle && time_after(lcycle, now))
+		return lcycle;
+
+	/*
+	 * Keep track of the last timer value returned.
+	 * In an SMP environment, you could lose out in contention of
+	 * cmpxchg. If so, your cmpxchg returns new value which the
+	 * winner of contention updated to. Use the new value instead.
+	 */
+	ret = cmpxchg(&itc_jitter_data.itc_lastcycle, lcycle, now);
+	if (unlikely(ret != lcycle))
+		return ret;
+
+	return now;
+}
+
 
 static struct irqaction timer_irqaction = {
 	.handler =	timer_interrupt,
-	.flags =	SA_INTERRUPT,
+	.flags =	IRQF_DISABLED | IRQF_IRQPOLL,
 	.name =		"timer"
 };
+
+static struct platform_device rtc_efi_dev = {
+	.name = "rtc-efi",
+	.id = -1,
+};
+
+static int __init rtc_init(void)
+{
+	if (platform_device_register(&rtc_efi_dev) < 0)
+		printk(KERN_ERR "unable to register rtc device...\n");
+
+	/* not necessarily an error */
+	return 0;
+}
+module_init(rtc_init);
+
+void read_persistent_clock(struct timespec *ts)
+{
+	efi_gettimeofday(ts);
+}
 
 void __init
 time_init (void)
 {
 	register_percpu_irq(IA64_TIMER_VECTOR, &timer_irqaction);
-	efi_gettimeofday(&xtime);
 	ia64_init_itm();
-
-	/*
-	 * Initialize wall_to_monotonic such that adding it to xtime will yield zero, the
-	 * tv_nsec field must be normalized (i.e., 0 <= nsec < NSEC_PER_SEC).
-	 */
-	set_normalized_timespec(&wall_to_monotonic, -xtime.tv_sec, -xtime.tv_nsec);
 }
+
+/*
+ * Generic udelay assumes that if preemption is allowed and the thread
+ * migrates to another CPU, that the ITC values are synchronized across
+ * all CPUs.
+ */
+static void
+ia64_itc_udelay (unsigned long usecs)
+{
+	unsigned long start = ia64_get_itc();
+	unsigned long end = start + usecs*local_cpu_data->cyc_per_usec;
+
+	while (time_before(ia64_get_itc(), end))
+		cpu_relax();
+}
+
+void (*ia64_udelay)(unsigned long usecs) = &ia64_itc_udelay;
+
+void
+udelay (unsigned long usecs)
+{
+	(*ia64_udelay)(usecs);
+}
+EXPORT_SYMBOL(udelay);
+
+/* IA64 doesn't cache the timezone */
+void update_vsyscall_tz(void)
+{
+}
+
+void update_vsyscall(struct timespec *wall, struct timespec *wtm,
+			struct clocksource *c, u32 mult)
+{
+        unsigned long flags;
+
+        write_seqlock_irqsave(&fsyscall_gtod_data.lock, flags);
+
+        /* copy fsyscall clock data */
+        fsyscall_gtod_data.clk_mask = c->mask;
+        fsyscall_gtod_data.clk_mult = mult;
+        fsyscall_gtod_data.clk_shift = c->shift;
+        fsyscall_gtod_data.clk_fsys_mmio = c->fsys_mmio;
+        fsyscall_gtod_data.clk_cycle_last = c->cycle_last;
+
+	/* copy kernel time structures */
+        fsyscall_gtod_data.wall_time.tv_sec = wall->tv_sec;
+        fsyscall_gtod_data.wall_time.tv_nsec = wall->tv_nsec;
+	fsyscall_gtod_data.monotonic_time.tv_sec = wtm->tv_sec
+							+ wall->tv_sec;
+	fsyscall_gtod_data.monotonic_time.tv_nsec = wtm->tv_nsec
+							+ wall->tv_nsec;
+
+	/* normalize */
+	while (fsyscall_gtod_data.monotonic_time.tv_nsec >= NSEC_PER_SEC) {
+		fsyscall_gtod_data.monotonic_time.tv_nsec -= NSEC_PER_SEC;
+		fsyscall_gtod_data.monotonic_time.tv_sec++;
+	}
+
+        write_sequnlock_irqrestore(&fsyscall_gtod_data.lock, flags);
+}
+

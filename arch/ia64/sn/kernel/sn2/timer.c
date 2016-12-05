@@ -11,66 +11,55 @@
 #include <linux/sched.h>
 #include <linux/time.h>
 #include <linux/interrupt.h>
+#include <linux/clocksource.h>
 
 #include <asm/hw_irq.h>
 #include <asm/system.h>
+#include <asm/timex.h>
 
 #include <asm/sn/leds.h>
+#include <asm/sn/shub_mmr.h>
 #include <asm/sn/clksupport.h>
 
-
 extern unsigned long sn_rtc_cycles_per_second;
-static volatile unsigned long last_wall_rtc;
 
-static unsigned long rtc_offset;	/* updated only when xtime write-lock is held! */
-static long rtc_nsecs_per_cycle;
-static long rtc_per_timer_tick;
-
-static unsigned long
-getoffset(void)
+static cycle_t read_sn2(struct clocksource *cs)
 {
-	return rtc_offset + (GET_RTC_COUNTER() - last_wall_rtc)*rtc_nsecs_per_cycle;
+	return (cycle_t)readq(RTC_COUNTER_ADDR);
 }
 
-
-static void
-update(long delta_nsec)
-{
-	unsigned long rtc_counter = GET_RTC_COUNTER();
-	unsigned long offset = rtc_offset + (rtc_counter - last_wall_rtc)*rtc_nsecs_per_cycle;
-
-	/* Be careful about signed/unsigned comparisons here: */
-	if (delta_nsec < 0 || (unsigned long) delta_nsec < offset)
-		rtc_offset = offset - delta_nsec;
-	else
-		rtc_offset = 0;
-	last_wall_rtc = rtc_counter;
-}
-
-
-static void
-reset(void)
-{
-	rtc_offset = 0;
-	last_wall_rtc = GET_RTC_COUNTER();
-}
-
-
-static struct time_interpolator sn2_interpolator = {
-	.get_offset =	getoffset,
-	.update =	update,
-	.reset =	reset
+static struct clocksource clocksource_sn2 = {
+        .name           = "sn2_rtc",
+        .rating         = 450,
+        .read           = read_sn2,
+        .mask           = (1LL << 55) - 1,
+        .mult           = 0,
+        .shift          = 10,
+        .flags          = CLOCK_SOURCE_IS_CONTINUOUS,
 };
 
-void __init
-sn_timer_init(void)
+/*
+ * sn udelay uses the RTC instead of the ITC because the ITC is not
+ * synchronized across all CPUs, and the thread may migrate to another CPU
+ * if preemption is enabled.
+ */
+static void
+ia64_sn_udelay (unsigned long usecs)
 {
-	sn2_interpolator.frequency = sn_rtc_cycles_per_second;
-	sn2_interpolator.drift = -1;	/* unknown */
-	register_time_interpolator(&sn2_interpolator);
+	unsigned long start = rtc_time();
+	unsigned long end = start +
+			usecs * sn_rtc_cycles_per_second / 1000000;
 
-	rtc_per_timer_tick = sn_rtc_cycles_per_second / HZ;
-	rtc_nsecs_per_cycle = 1000000000 / sn_rtc_cycles_per_second;
+	while (time_before((unsigned long)rtc_time(), end))
+		cpu_relax();
+}
 
-	last_wall_rtc = GET_RTC_COUNTER();
+void __init sn_timer_init(void)
+{
+	clocksource_sn2.fsys_mmio = RTC_COUNTER_ADDR;
+	clocksource_sn2.mult = clocksource_hz2mult(sn_rtc_cycles_per_second,
+							clocksource_sn2.shift);
+	clocksource_register(&clocksource_sn2);
+
+	ia64_udelay = &ia64_sn_udelay;
 }

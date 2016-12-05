@@ -14,8 +14,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
  *
- * $Id: dilnetpc.c,v 1.12 2003/05/21 12:45:18 dwmw2 Exp $
- *
  * The DIL/Net PC is a tiny embedded PC board made by SSV Embedded Systems
  * featuring the AMD Elan SC410 processor. There are two variants of this
  * board: DNP/1486 and ADNP/1486. The DNP version has 2 megs of flash
@@ -25,16 +23,18 @@
  * and http://www.ssv-embedded.de/ssv/pc104/p170.htm
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <asm/io.h>
+#include <linux/string.h>
+
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/concat.h>
+
+#include <asm/io.h>
 
 /*
 ** The DIL/NetPC keeps its BIOS in two distinct flash blocks.
@@ -197,7 +197,7 @@ static void dnpc_unmap_flash(void)
 ************************************************************
 */
 
-static spinlock_t dnpc_spin   = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(dnpc_spin);
 static int        vpp_counter = 0;
 /*
 ** This is what has to be done for the DNP board ..
@@ -215,8 +215,8 @@ static void dnp_set_vpp(struct map_info *not_used, int on)
 	{
 		if(--vpp_counter == 0)
 			setcsc(CSC_RBWR, getcsc(CSC_RBWR) | 0x4);
-		else if(vpp_counter < 0)
-			BUG();
+		else
+			BUG_ON(vpp_counter < 0);
 	}
 	spin_unlock_irq(&dnpc_spin);
 }
@@ -237,8 +237,8 @@ static void adnp_set_vpp(struct map_info *not_used, int on)
 	{
 		if(--vpp_counter == 0)
 			setcsc(CSC_RBWR, getcsc(CSC_RBWR) | 0x8);
-		else if(vpp_counter < 0)
-			BUG();
+		else
+			BUG_ON(vpp_counter < 0);
 	}
 	spin_unlock_irq(&dnpc_spin);
 }
@@ -252,7 +252,7 @@ static void adnp_set_vpp(struct map_info *not_used, int on)
 static struct map_info dnpc_map = {
 	.name = "ADNP Flash Bank",
 	.size = ADNP_WINDOW_SIZE,
-	.buswidth = 1,
+	.bankwidth = 1,
 	.set_vpp = adnp_set_vpp,
 	.phys = WINDOW_ADDR
 };
@@ -269,13 +269,13 @@ static struct map_info dnpc_map = {
 
 static struct mtd_partition partition_info[]=
 {
-	{ 
-		.name =		"ADNP boot", 
-		.offset =	0, 
+	{
+		.name =		"ADNP boot",
+		.offset =	0,
 		.size =		0xf0000,
 	},
-	{ 
-		.name =		"ADNP system BIOS", 
+	{
+		.name =		"ADNP system BIOS",
 		.offset =	MTDPART_OFS_NXTBLK,
 		.size =		0x10000,
 #ifdef DNPC_BIOS_BLOCKS_WRITEPROTECTED
@@ -288,7 +288,7 @@ static struct mtd_partition partition_info[]=
 		.size =		0x2f0000,
 	},
 	{
-		.name =		"ADNP system BIOS entry", 
+		.name =		"ADNP system BIOS entry",
 		.offset =	MTDPART_OFS_NXTBLK,
 		.size =		MTDPART_SIZ_FULL,
 #ifdef DNPC_BIOS_BLOCKS_WRITEPROTECTED
@@ -297,7 +297,7 @@ static struct mtd_partition partition_info[]=
 	},
 };
 
-#define NUM_PARTITIONS (sizeof(partition_info)/sizeof(partition_info[0]))
+#define NUM_PARTITIONS ARRAY_SIZE(partition_info)
 
 static struct mtd_info *mymtd;
 static struct mtd_info *lowlvl_parts[NUM_PARTITIONS];
@@ -322,9 +322,9 @@ static struct mtd_info *merged_mtd;
 
 static struct mtd_partition higlvl_partition_info[]=
 {
-	{ 
-		.name =		"ADNP boot block", 
-		.offset =	0, 
+	{
+		.name =		"ADNP boot block",
+		.offset =	0,
 		.size =		CONFIG_MTD_DILNETPC_BOOTSIZE,
 	},
 	{
@@ -332,8 +332,8 @@ static struct mtd_partition higlvl_partition_info[]=
 		.offset =	MTDPART_OFS_NXTBLK,
 		.size =		ADNP_WINDOW_SIZE-CONFIG_MTD_DILNETPC_BOOTSIZE-0x20000,
 	},
-	{ 
-		.name =		"ADNP system BIOS + BIOS Entry", 
+	{
+		.name =		"ADNP system BIOS + BIOS Entry",
 		.offset =	MTDPART_OFS_NXTBLK,
 		.size =		MTDPART_SIZ_FULL,
 #ifdef DNPC_BIOS_BLOCKS_WRITEPROTECTED
@@ -342,7 +342,7 @@ static struct mtd_partition higlvl_partition_info[]=
 	},
 };
 
-#define NUM_HIGHLVL_PARTITIONS (sizeof(higlvl_partition_info)/sizeof(partition_info[0]))
+#define NUM_HIGHLVL_PARTITIONS ARRAY_SIZE(higlvl_partition_info)
 
 
 static int dnp_adnp_probe(void)
@@ -368,7 +368,7 @@ static int __init init_dnpc(void)
 
 	/*
 	** determine hardware (DNP/ADNP/invalid)
-	*/	
+	*/
 	if((is_dnp = dnp_adnp_probe()) < 0)
 		return -ENXIO;
 
@@ -394,16 +394,16 @@ static int __init init_dnpc(void)
 		++dnpc_map.name;
 		for(i = 0; i < NUM_PARTITIONS; i++)
 			++partition_info[i].name;
-		higlvl_partition_info[1].size = DNP_WINDOW_SIZE - 
+		higlvl_partition_info[1].size = DNP_WINDOW_SIZE -
 			CONFIG_MTD_DILNETPC_BOOTSIZE - 0x20000;
 		for(i = 0; i < NUM_HIGHLVL_PARTITIONS; i++)
 			++higlvl_partition_info[i].name;
 	}
 
-	printk(KERN_NOTICE "DIL/Net %s flash: 0x%lx at 0x%lx\n", 
-		is_dnp ? "DNPC" : "ADNP", dnpc_map.size, dnpc_map.phys);
+	printk(KERN_NOTICE "DIL/Net %s flash: 0x%lx at 0x%llx\n",
+		is_dnp ? "DNPC" : "ADNP", dnpc_map.size, (unsigned long long)dnpc_map.phys);
 
-	dnpc_map.virt = (unsigned long)ioremap_nocache(dnpc_map.phys, dnpc_map.size);
+	dnpc_map.virt = ioremap_nocache(dnpc_map.phys, dnpc_map.size);
 
 	dnpc_map_flash(dnpc_map.phys, dnpc_map.size);
 
@@ -413,7 +413,7 @@ static int __init init_dnpc(void)
 	}
 	simple_map_init(&dnpc_map);
 
-	printk("FLASH virtual address: 0x%lx\n", dnpc_map.virt);
+	printk("FLASH virtual address: 0x%p\n", dnpc_map.virt);
 
 	mymtd = do_map_probe("jedec_probe", &dnpc_map);
 
@@ -430,10 +430,10 @@ static int __init init_dnpc(void)
 			mymtd->erasesize = 0x10000;
 
 	if (!mymtd) {
-		iounmap((void *)dnpc_map.virt);
+		iounmap(dnpc_map.virt);
 		return -ENXIO;
 	}
-		
+
 	mymtd->owner = THIS_MODULE;
 
 	/*
@@ -481,9 +481,9 @@ static void __exit cleanup_dnpc(void)
 		map_destroy(mymtd);
 	}
 	if (dnpc_map.virt) {
-		iounmap((void *)dnpc_map.virt);
+		iounmap(dnpc_map.virt);
 		dnpc_unmap_flash();
-		dnpc_map.virt = 0;
+		dnpc_map.virt = NULL;
 	}
 }
 

@@ -7,9 +7,6 @@
 #
 # (C) Copyright 2002,2003 Yoshinori Sato <ysato@users.sourceforge.jp>
 #
-ifndef include-config
--include $(TOPDIR)/.config
-endif
 
 platform-$(CONFIG_CPU_H8300H)	:= h8300h
 platform-$(CONFIG_CPU_H8S)	:= h8s
@@ -33,23 +30,25 @@ ldflags-$(CONFIG_CPU_H8300H)	:= -mh8300helf
 cflags-$(CONFIG_CPU_H8S)	:= -ms
 ldflags-$(CONFIG_CPU_H8S)	:= -mh8300self
 
-CFLAGS += $(cflags-y)
-CFLAGS += -mint32 -fno-builtin -Os
-CFLAGS += -g
-CFLAGS += -D__linux__
-CFLAGS += -DUTS_SYSNAME=\"uClinux\"
-AFLAGS += -DPLATFORM=$(PLATFORM) -DMODEL=$(MODEL) $(cflags-y)
+KBUILD_CFLAGS += $(cflags-y)
+KBUILD_CFLAGS += -mint32 -fno-builtin
+KBUILD_CFLAGS += -g
+KBUILD_CFLAGS += -D__linux__
+KBUILD_CFLAGS += -DUTS_SYSNAME=\"uClinux\"
+KBUILD_AFLAGS += -DPLATFORM=$(PLATFORM) -DMODEL=$(MODEL) $(cflags-y)
 LDFLAGS += $(ldflags-y)
 
 CROSS_COMPILE = h8300-elf-
-LIBGCC := $(shell $(CROSS-COMPILE)$(CC) $(CFLAGS) -print-libgcc-file-name)
+LIBGCC := $(shell $(CROSS-COMPILE)$(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
 
-head-y := arch/$(ARCH)/platform/$(platform-y)/$(board-y)/crt0_$(model-y).o
+head-y := arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/crt0_$(MODEL).o
 
 core-y	+= arch/$(ARCH)/kernel/ \
-	   arch/$(ARCH)/mm/ \
-	   arch/$(ARCH)/platform/$(PLATFORM)/ \
+	   arch/$(ARCH)/mm/
+ifdef PLATFORM
+core-y	+= arch/$(ARCH)/platform/$(PLATFORM)/ \
 	   arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/
+endif
 
 libs-y	+= arch/$(ARCH)/lib/ $(LIBGCC)
 
@@ -62,23 +61,11 @@ archmrproper:
 archclean:
 	$(Q)$(MAKE) $(clean)=$(boot)
 
-prepare: include/asm-$(ARCH)/machine-depend.h include/asm-$(ARCH)/asm-offsets.h
-
-include/asm-$(ARCH)/machine-depend.h: include/asm-$(ARCH)/$(BOARD)/machine-depend.h
-	$(Q)ln -sf $(BOARD)/machine-depend.h \
-                   include/asm-$(ARCH)/machine-depend.h
-	@echo '  Create include/asm-$(ARCH)/machine-depend.h'
-
-include/asm-$(ARCH)/asm-offsets.h: arch/$(ARCH)/kernel/asm-offsets.s \
-				   include/asm include/linux/version.h
-	$(call filechk,gen-asm-offsets)
-
-vmlinux.srec vmlinux.bin: vmlinux
+vmlinux.srec vmlinux.bin zImage: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 define archhelp
-  echo  'vmlinux.bin  - Create raw binary'
-  echo  'vmlinux.srec - Create srec binary'
+  @echo  'vmlinux.bin  - Create raw binary'
+  @echo  'vmlinux.srec - Create srec binary'
+  @echo  'zImage       - Compressed kernel image'
 endef
-
-CLEAN_FILES += include/asm-$(ARCH)/asm-offsets.h include/asm-$(ARCH)/machine-depend.h

@@ -50,11 +50,12 @@ struct kbd_struct {
 #define VC_CAPSLOCK	2	/* capslock mode */
 #define VC_KANALOCK	3	/* kanalock mode */
 
-	unsigned char kbdmode:2;	/* one 2-bit value */
+	unsigned char kbdmode:3;	/* one 3-bit value */
 #define VC_XLATE	0	/* translate keycodes using keymap */
 #define VC_MEDIUMRAW	1	/* medium raw (keycode) mode */
 #define VC_RAW		2	/* raw (scancode) mode */
 #define VC_UNICODE	3	/* Unicode mode */
+#define VC_OFF		4	/* disabled mode */
 
 	unsigned char modeflags:5;
 #define VC_APPLIC	0	/* application key mode */
@@ -75,7 +76,7 @@ extern int do_poke_blanked_console;
 
 extern void (*kbd_ledfunc)(unsigned int led);
 
-extern void set_console(int nr);
+extern int set_console(int nr);
 extern void schedule_console_callback(void);
 
 static inline void set_leds(void)
@@ -135,6 +136,8 @@ static inline void chg_vc_kbd_led(struct kbd_struct * kbd, int flag)
 
 #define U(x) ((x) ^ 0xf000)
 
+#define BRL_UC_ROW 0x2800
+
 /* keyboard.c */
 
 struct console;
@@ -151,7 +154,12 @@ extern unsigned int keymap_count;
 
 static inline void con_schedule_flip(struct tty_struct *t)
 {
-	schedule_work(&t->flip.work);
+	unsigned long flags;
+	spin_lock_irqsave(&t->buf.lock, flags);
+	if (t->buf.tail != NULL)
+		t->buf.tail->commit = t->buf.tail->used;
+	spin_unlock_irqrestore(&t->buf.lock, flags);
+	schedule_work(&t->buf.work);
 }
 
 #endif

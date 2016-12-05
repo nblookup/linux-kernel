@@ -19,11 +19,11 @@
 
 #include <linux/module.h>
 
-#include <linux/sched.h>
 
 #include <linux/kernel.h>
 
 #include <linux/types.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -56,10 +56,10 @@ static char* pcbit_devname[MAX_PCBIT_CARDS] = {
  * prototypes
  */
 
-int pcbit_command(isdn_ctrl* ctl);
-int pcbit_stat(u_char* buf, int len, int user, int, int);
-int pcbit_xmit(int driver, int chan, int ack, struct sk_buff *skb);
-int pcbit_writecmd(const u_char*, int, int, int, int);
+static int pcbit_command(isdn_ctrl* ctl);
+static int pcbit_stat(u_char __user * buf, int len, int, int);
+static int pcbit_xmit(int driver, int chan, int ack, struct sk_buff *skb);
+static int pcbit_writecmd(const u_char __user *, int, int, int);
 
 static int set_protocol_running(struct pcbit_dev * dev);
 
@@ -68,22 +68,20 @@ static void pcbit_set_msn(struct pcbit_dev *dev, char *list);
 static int pcbit_check_msn(struct pcbit_dev *dev, char *msn);
 
 
-extern void pcbit_deliver(void * data);
-
 int pcbit_init_dev(int board, int mem_base, int irq)
 {
 	struct pcbit_dev *dev;
 	isdn_if *dev_if;
 
-	if ((dev=kmalloc(sizeof(struct pcbit_dev), GFP_KERNEL)) == NULL)
+	if ((dev=kzalloc(sizeof(struct pcbit_dev), GFP_KERNEL)) == NULL)
 	{
 		printk("pcbit_init: couldn't malloc pcbit_dev struct\n");
 		return -ENOMEM;
 	}
 
 	dev_pcbit[board] = dev;
-	memset(dev, 0, sizeof(struct pcbit_dev));
 	init_waitqueue_head(&dev->set_running_wq);
+	spin_lock_init(&dev->lock);
 
 	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF ) {
 		dev->ph_mem = mem_base;
@@ -95,7 +93,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 			dev_pcbit[board] = NULL;
 			return -EACCES;
 		}
-		dev->sh_mem = (unsigned char*)ioremap(dev->ph_mem, 4096);
+		dev->sh_mem = ioremap(dev->ph_mem, 4096);
 	}
 	else 
 	{
@@ -105,30 +103,28 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		return -EACCES;
 	}
 
-	dev->b1 = kmalloc(sizeof(struct pcbit_chan), GFP_KERNEL);
+	dev->b1 = kzalloc(sizeof(struct pcbit_chan), GFP_KERNEL);
 	if (!dev->b1) {
 		printk("pcbit_init: couldn't malloc pcbit_chan struct\n");
-		iounmap((unsigned char*)dev->sh_mem);
+		iounmap(dev->sh_mem);
 		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		return -ENOMEM;
 	}
     
-	dev->b2 = kmalloc(sizeof(struct pcbit_chan), GFP_KERNEL);
+	dev->b2 = kzalloc(sizeof(struct pcbit_chan), GFP_KERNEL);
 	if (!dev->b2) {
 		printk("pcbit_init: couldn't malloc pcbit_chan struct\n");
 		kfree(dev->b1);
-		iounmap((unsigned char*)dev->sh_mem);
+		iounmap(dev->sh_mem);
 		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		return -ENOMEM;
 	}
 
-	memset(dev->b1, 0, sizeof(struct pcbit_chan));
-	memset(dev->b2, 0, sizeof(struct pcbit_chan));
 	dev->b2->id = 1;
 
-	INIT_WORK(&dev->qdelivery, pcbit_deliver, dev);
+	INIT_WORK(&dev->qdelivery, pcbit_deliver);
 
 	/*
 	 *  interrupts
@@ -138,7 +134,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	{
 		kfree(dev->b1);
 		kfree(dev->b2);
-		iounmap((unsigned char*)dev->sh_mem);
+		iounmap(dev->sh_mem);
 		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		dev_pcbit[board] = NULL;
@@ -160,7 +156,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		free_irq(irq, dev);
 		kfree(dev->b1);
 		kfree(dev->b2);
-		iounmap((unsigned char*)dev->sh_mem);
+		iounmap(dev->sh_mem);
 		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		dev_pcbit[board] = NULL;
@@ -192,7 +188,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		free_irq(irq, dev);
 		kfree(dev->b1);
 		kfree(dev->b2);
-		iounmap((unsigned char*)dev->sh_mem);
+		iounmap(dev->sh_mem);
 		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		dev_pcbit[board] = NULL;
@@ -230,14 +226,14 @@ void pcbit_terminate(int board)
 			del_timer(&dev->b2->fsm_timer);
 		kfree(dev->b1);
 		kfree(dev->b2);
-		iounmap((unsigned char*)dev->sh_mem);
+		iounmap(dev->sh_mem);
 		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 	}
 }
 #endif
 
-int pcbit_command(isdn_ctrl* ctl)
+static int pcbit_command(isdn_ctrl* ctl)
 {
 	struct pcbit_dev  *dev;
 	struct pcbit_chan *chan;
@@ -329,7 +325,7 @@ static void pcbit_block_timer(unsigned long data)
 }
 #endif
 
-int pcbit_xmit(int driver, int chnum, int ack, struct sk_buff *skb)
+static int pcbit_xmit(int driver, int chnum, int ack, struct sk_buff *skb)
 {
 	ushort hdrlen;
 	int refnum, len;
@@ -388,12 +384,13 @@ int pcbit_xmit(int driver, int chnum, int ack, struct sk_buff *skb)
 	return len;
 }
 
-int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel)
+static int pcbit_writecmd(const u_char __user *buf, int len, int driver, int channel)
 {
 	struct pcbit_dev * dev;
 	int i, j;
 	const u_char * loadbuf;
 	u_char * ptr = NULL;
+	u_char *cbuf;
 
 	int errstat;
 
@@ -414,37 +411,24 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 			return -EINVAL;
 		}
 
-		if (user)
-		{
-			u_char *cbuf = kmalloc(len, GFP_KERNEL);
-			if (!cbuf)
-				return -ENOMEM;
+		cbuf = memdup_user(buf, len);
+		if (IS_ERR(cbuf))
+			return PTR_ERR(cbuf);
 
-			if (copy_from_user(cbuf, buf, len)) {
-				kfree(cbuf);
-				return -EFAULT;
-			}
-			memcpy_toio(dev->sh_mem, cbuf, len);
-			kfree(cbuf);
-		}
-		else
-			memcpy_toio(dev->sh_mem, buf, len);
+		memcpy_toio(dev->sh_mem, cbuf, len);
+		kfree(cbuf);
 		return len;
 	case L2_FWMODE:
 		/* this is the hard part */
 		/* dumb board */
-		if (user) {		
-			/* get it into kernel space */
-			if ((ptr = kmalloc(len, GFP_KERNEL))==NULL)
-				return -ENOMEM;
-			if (copy_from_user(ptr, buf, len)) {
-				kfree(ptr);
-				return -EFAULT;
-			}
-			loadbuf = ptr;
+		/* get it into kernel space */
+		if ((ptr = kmalloc(len, GFP_KERNEL))==NULL)
+			return -ENOMEM;
+		if (copy_from_user(ptr, buf, len)) {
+			kfree(ptr);
+			return -EFAULT;
 		}
-		else
-			loadbuf = buf;
+		loadbuf = ptr;
     
 		errstat = 0;
 
@@ -467,9 +451,7 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 			if (dev->loadptr > LOAD_ZONE_END)
 				dev->loadptr = LOAD_ZONE_START;
 		}
-
-		if (user)
-			kfree(ptr);
+		kfree(ptr);
 
 		return errstat ? errstat : len;
 	default:
@@ -570,10 +552,8 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 		else
 			pcbit_fsm_event(dev, chan, EV_USR_RELEASE_REQ, NULL);
 
-		if (cbdata.data.setup.CalledPN)
-			kfree(cbdata.data.setup.CalledPN);
-		if (cbdata.data.setup.CallingPN)
-			kfree(cbdata.data.setup.CallingPN);
+		kfree(cbdata.data.setup.CalledPN);
+		kfree(cbdata.data.setup.CallingPN);
 		break;
     
 	case MSG_CONN_CONF:
@@ -722,17 +702,7 @@ static char statbuf[STATBUF_LEN];
 static int stat_st = 0;
 static int stat_end = 0;
 
-
-static __inline void
-memcpy_to_COND(int flag, char *d, const char *s, int len) {
-	if (flag)
-		copy_to_user(d, s, len);
-	else
-		memcpy(d, s, len);
-}
-
-
-int pcbit_stat(u_char* buf, int len, int user, int driver, int channel)
+static int pcbit_stat(u_char __user *buf, int len, int driver, int channel)
 {
 	int stat_count;
 	stat_count = stat_end - stat_st;
@@ -746,24 +716,27 @@ int pcbit_stat(u_char* buf, int len, int user, int driver, int channel)
 
 	if (stat_st < stat_end)
 	{
-		memcpy_to_COND(user, buf, statbuf + stat_st, len);
+		if (copy_to_user(buf, statbuf + stat_st, len))
+			return -EFAULT;
 		stat_st += len;	   
 	}
 	else
 	{
 		if (len > STATBUF_LEN - stat_st)
 		{
-			memcpy_to_COND(user, buf, statbuf + stat_st, 
-				       STATBUF_LEN - stat_st);
-			memcpy_to_COND(user, buf, statbuf, 
-				       len - (STATBUF_LEN - stat_st));
+			if (copy_to_user(buf, statbuf + stat_st,
+				       STATBUF_LEN - stat_st))
+				return -EFAULT;
+			if (copy_to_user(buf, statbuf,
+				       len - (STATBUF_LEN - stat_st)))
+				return -EFAULT;
 
 			stat_st = len - (STATBUF_LEN - stat_st);
 		}
 		else
 		{
-			memcpy_to_COND(user, buf, statbuf + stat_st, 
-				       len);
+			if (copy_to_user(buf, statbuf + stat_st, len))
+				return -EFAULT;
 
 			stat_st += len;
 			
@@ -797,10 +770,6 @@ static void pcbit_logstat(struct pcbit_dev *dev, char *str)
 	dev->dev_if->statcallb(&ictl);
 }
 	
-extern char * isdn_state_table[];
-extern char * strisdnevent(unsigned short);
-
-
 void pcbit_state_change(struct pcbit_dev * dev, struct pcbit_chan * chan, 
 			unsigned short i, unsigned short ev, unsigned short f)
 {
@@ -879,7 +848,7 @@ static int set_protocol_running(struct pcbit_dev * dev)
 		printk(KERN_DEBUG "Bank3 = %02x\n", 
 		       readb(dev->sh_mem + BANK3));
 #endif
-		*(dev->sh_mem + BANK4) = 0x40U;
+		writeb(0x40, dev->sh_mem + BANK4);
 
 		/* warn the upper layer */
 		ctl.driver = dev->id;

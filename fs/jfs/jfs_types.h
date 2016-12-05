@@ -1,5 +1,5 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2004
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@
 /*
  *	jfs_types.h:
  *
- * basic type/utility  definitions
+ * basic type/utility definitions
  *
  * note: this header file must be the 1st include file
  * of JFS include list in all JFS .c file.
@@ -34,16 +34,19 @@
 
 /*
  * transaction and lock id's
+ *
+ * Don't change these without carefully considering the impact on the
+ * size and alignment of all of the linelock variants
  */
-typedef uint tid_t;
-typedef uint lid_t;
+typedef u16 tid_t;
+typedef u16 lid_t;
 
 /*
  * Almost identical to Linux's timespec, but not quite
  */
 struct timestruc_t {
-	u32 tv_sec;
-	u32 tv_nsec;
+	__le32 tv_sec;
+	__le32 tv_nsec;
 };
 
 /*
@@ -51,41 +54,8 @@ struct timestruc_t {
  */
 
 #define LEFTMOSTONE	0x80000000
-#define	HIGHORDER	0x80000000u	/* high order bit on            */
-#define	ONES		0xffffffffu	/* all bit on                   */
-
-typedef int boolean_t;
-#define TRUE 1
-#define FALSE 0
-
-/*
- *	logical xd (lxd)
- */
-typedef struct {
-	unsigned len:24;
-	unsigned off1:8;
-	u32 off2;
-} lxd_t;
-
-/* lxd_t field construction */
-#define	LXDlength(lxd, length32)	( (lxd)->len = length32 )
-#define	LXDoffset(lxd, offset64)\
-{\
-	(lxd)->off1 = ((s64)offset64) >> 32;\
-	(lxd)->off2 = (offset64) & 0xffffffff;\
-}
-
-/* lxd_t field extraction */
-#define	lengthLXD(lxd)	( (lxd)->len )
-#define	offsetLXD(lxd)\
-	( ((s64)((lxd)->off1)) << 32 | (lxd)->off2 )
-
-/* lxd list */
-struct lxdlist {
-	s16 maxnlxd;
-	s16 nlxd;
-	lxd_t *lxd;
-};
+#define	HIGHORDER	0x80000000u	/* high order bit on	*/
+#define	ONES		0xffffffffu	/* all bit on		*/
 
 /*
  *	physical xd (pxd)
@@ -93,7 +63,7 @@ struct lxdlist {
 typedef struct {
 	unsigned len:24;
 	unsigned addr1:8;
-	u32 addr2;
+	__le32 addr2;
 } pxd_t;
 
 /* xd_t field construction */
@@ -110,11 +80,12 @@ typedef struct {
 #define	addressPXD(pxd)\
 	( ((s64)((pxd)->addr1)) << 32 | __le32_to_cpu((pxd)->addr2))
 
+#define MAXTREEHEIGHT 8
 /* pxd list */
 struct pxdlist {
 	s16 maxnpxd;
 	s16 npxd;
-	pxd_t pxd[8];
+	pxd_t pxd[MAXTREEHEIGHT];
 };
 
 
@@ -123,11 +94,11 @@ struct pxdlist {
  */
 typedef struct {
 	unsigned flag:8;	/* 1: flags */
-	unsigned rsrvd:24;	/* 3: */
-	u32 size;		/* 4: size in byte */
+	unsigned rsrvd:24;
+	__le32 size;		/* 4: size in byte */
 	unsigned len:24;	/* 3: length in unit of fsblksize */
 	unsigned addr1:8;	/* 1: address in unit of fsblksize */
-	u32 addr2;		/* 4: address in unit of fsblksize */
+	__le32 addr2;		/* 4: address in unit of fsblksize */
 } dxd_t;			/* - 16 - */
 
 /* dxd_t flags */
@@ -148,7 +119,7 @@ typedef struct {
 #define sizeDXD(dxd)	le32_to_cpu((dxd)->size)
 
 /*
- *      directory entry argument
+ *	directory entry argument
  */
 struct component_name {
 	int namlen;
@@ -160,14 +131,14 @@ struct component_name {
  *	DASD limit information - stored in directory inode
  */
 struct dasd {
-	u8 thresh;		/* Alert Threshold (in percent) */
-	u8 delta;		/* Alert Threshold delta (in percent)   */
+	u8 thresh;		/* Alert Threshold (in percent)		*/
+	u8 delta;		/* Alert Threshold delta (in percent)	*/
 	u8 rsrvd1;
-	u8 limit_hi;		/* DASD limit (in logical blocks)       */
-	u32 limit_lo;		/* DASD limit (in logical blocks)       */
+	u8 limit_hi;		/* DASD limit (in logical blocks)	*/
+	__le32 limit_lo;	/* DASD limit (in logical blocks)	*/
 	u8 rsrvd2[3];
-	u8 used_hi;		/* DASD usage (in logical blocks)       */
-	u32 used_lo;		/* DASD usage (in logical blocks)       */
+	u8 used_hi;		/* DASD usage (in logical blocks)	*/
+	__le32 used_lo;		/* DASD usage (in logical blocks)	*/
 };
 
 #define DASDLIMIT(dasdp) \

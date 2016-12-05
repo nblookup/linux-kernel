@@ -1,104 +1,79 @@
 
-menu "Fusion MPT device support"
-
-config FUSION
-	tristate "Fusion MPT (base + ScsiHost) drivers"
-	depends on BLK_DEV_SD
+menuconfig FUSION
+	bool "Fusion MPT device support"
+	depends on PCI
 	---help---
-	  LSI Logic Fusion(TM) Message Passing Technology (MPT) device support
-	  provides high performance SCSI host initiator, and LAN [1] interface
-	  services to a host system.  The Fusion architecture is capable of
-	  duplexing these protocols on high-speed Fibre Channel
-	  (up to 2 GHz x 2 ports = 4 GHz) and parallel SCSI (up to Ultra-320)
-	  physical medium.
+	Say Y here to get to see options for Fusion Message
+	Passing Technology (MPT) drivers.
+	This option alone does not add any kernel code.
 
-	  [1] LAN is not supported on parallel SCSI medium.
+	If you say N, all options in this submenu will be skipped and disabled.
 
-	  These drivers require a Fusion MPT compatible PCI adapter installed
-	  in the host system.  MPT adapters contain specialized I/O processors
-	  to handle I/O workload, and more importantly to offload this work
-	  from the host CPU(s).
+if FUSION
 
-	  If you have Fusion MPT hardware and want to use it, you can say
-	  Y or M here to add MPT (base + ScsiHost) drivers.
-	  <Y> = build lib (fusion), and link [static] into the kernel [2]
-	  proper
-	  <M> = compiled as [dynamic] modules [3] named: (mptbase,
-	  mptscsih)
+config FUSION_SPI
+	tristate "Fusion MPT ScsiHost drivers for SPI"
+	depends on PCI && SCSI
+	select SCSI_SPI_ATTRS
+	---help---
+	  SCSI HOST support for a parallel SCSI host adapters.
 
-	  [2] In order enable capability to boot the linux kernel
-	  natively from a Fusion MPT target device, you MUST
-	  answer Y here! (currently requires CONFIG_BLK_DEV_SD)
-	  [3] To compile this support as modules, choose M here.
+	  List of supported controllers:
 
-	  If unsure, say N.
+	  LSI53C1020
+	  LSI53C1020A
+	  LSI53C1030
+	  LSI53C1035
+	  ATTO UL4D
 
-	  If you say Y or M here you will get a choice of these
-	  additional protocol and support module options:         Module Name:
-	  <M>   Enhanced SCSI error reporting                     (isense)
-	  <M>   Fusion MPT misc device (ioctl) driver             (mptctl)
-	  <M>   Fusion MPT LAN driver                             (mptlan)
+config FUSION_FC
+	tristate "Fusion MPT ScsiHost drivers for FC"
+	depends on PCI && SCSI
+	select SCSI_FC_ATTRS
+	---help---
+	  SCSI HOST support for a Fiber Channel host adapters.
 
-	  ---
-	  Fusion MPT is trademark of LSI Logic Corporation, and its
-	  architecture is based on LSI Logic's Message Passing Interface (MPI)
-	  specification.
+	  List of supported controllers:
 
-config FUSION_BOOT
-	bool
-	depends on FUSION=y
-	default y
+	  LSIFC909
+	  LSIFC919
+	  LSIFC919X
+	  LSIFC929
+	  LSIFC929X
+	  LSIFC929XL
+	  LSIFC949X
+	  LSIFC949E
+	  Brocade FC 410/420
+
+config FUSION_SAS
+	tristate "Fusion MPT ScsiHost drivers for SAS"
+	depends on PCI && SCSI
+	select SCSI_SAS_ATTRS
+	---help---
+	  SCSI HOST support for a SAS host adapters.
+
+	  List of supported controllers:
+
+	  LSISAS1064
+	  LSISAS1068
+	  LSISAS1064E
+	  LSISAS1068E
+	  LSISAS1078
 
 config FUSION_MAX_SGE
-	int "Maximum number of scatter gather entries"
-	depends on FUSION
-	default "40"
+	int "Maximum number of scatter gather entries (16 - 128)"
+	default "128"
+	range 16 128
 	help
 	  This option allows you to specify the maximum number of scatter-
-	  gather entries per I/O. The driver defaults to 40, a reasonable number
-	  for most systems. However, the user may increase this up to 128.
-	  Increasing this parameter will require significantly more memory 
-	  on a per controller instance. Increasing the parameter is not
-	  necessary (or recommended) unless the user will be running 
-	  large I/O's via the raw interface.
-
-#  How can we force these options to module or nothing?
-config FUSION_ISENSE
-	tristate "Enhanced SCSI error reporting"
-	depends on MODULES && FUSION && m
-	---help---
-	  The isense module (roughly stands for Interpret SENSE data) is
-	  completely optional.  It simply provides extra English readable
-	  strings in SCSI Error Report(s) that might be generated from the
-	  Fusion MPT SCSI Host driver, for example when a target device
-	  returns a SCSI check condition on a I/O.  Without this module
-	  loaded you might see:
-
-	  SCSI Error Report =-=-= (ioc0,scsi5:0)
-	  SCSI_Status=02h (CHECK_CONDITION)
-	  Original_CDB[]: 2A 00 00 00 00 41 00 00 02 00
-	  SenseData[12h]: 70 00 02 00 00 00 00 0A 00 00 00 00 04 02 02 00 00 00
-	  SenseKey=2h (NOT READY); FRU=02h
-	  ASC/ASCQ=29h/00h
-
-	  Where otherwise, if this module had been loaded, you would see:
-
-	  SCSI Error Report =-=-= (ioc0,scsi5:0)
-	  SCSI_Status=02h (CHECK_CONDITION)
-	  Original_CDB[]: 2A 00 00 00 00 41 00 00 02 00 - "WRITE(10)"
-	  SenseData[12h]: 70 00 02 00 00 00 00 0A 00 00 00 00 04 02 02 00 00 00
-	  SenseKey=2h (NOT READY); FRU=02h
-	  ASC/ASCQ=29h/00h "LOGICAL UNIT NOT READY, INITIALIZING CMD. REQUIRED"
-
-	  Say M for "Enhanced SCSI error reporting" to compile this optional module,
-	  creating a driver named: isense.
-
-	  NOTE: Support for building this feature into the kernel is not
-	  available, due to kernel size considerations.
+	  gather entries per I/O. The driver default is 128, which matches
+	  SCSI_MAX_PHYS_SEGMENTS. However, it may decreased down to 16.
+	  Decreasing this parameter will reduce memory requirements
+	  on a per controller instance.
 
 config FUSION_CTL
 	tristate "Fusion MPT misc device (ioctl) driver"
-	depends on MODULES && FUSION && m
+	depends on FUSION_SPI || FUSION_FC || FUSION_SAS
 	---help---
 	  The Fusion MPT misc device driver provides specialized control
 	  of MPT adapters via system ioctl calls.  Use of ioctl calls to
@@ -117,7 +92,7 @@ config FUSION_CTL
 
 config FUSION_LAN
 	tristate "Fusion MPT LAN driver"
-	depends on FUSION && NET_FC
+	depends on FUSION_FC && NET_FC
 	---help---
 	  This module supports LAN IP traffic over Fibre Channel port(s)
 	  on Fusion MPT compatible hardware (LSIFC9xx chips).
@@ -132,17 +107,17 @@ config FUSION_LAN
 
 	  If unsure whether you really want or need this, say N.
 
-	  NOTES: This feature is NOT available nor supported for linux-2.2.x
-	  kernels.  You must be building a linux-2.3.x or linux-2.4.x kernel
-	  in order to configure this option.
-	  Support for building this feature into the linux kernel is not
-	  yet available.
+config FUSION_LOGGING
+	bool "Fusion MPT logging facility"
+	---help---
+	  This turns on a logging facility that can be used to debug a number
+	  of Fusion MPT related problems.
 
-#  if [ "$CONFIG_FUSION_LAN" != "n" ]; then
-#    define_bool CONFIG_NET_FC y
-#  fi
-# These <should> be define_tristate, but we leave them define_bool
-# for backward compatibility with pre-linux-2.2.15 kernels.
-# (Bugzilla:fibrebugs, #384)
-endmenu
+	  The debug level can be programmed on the fly via SysFS (hex values)
 
+	  echo [level] > /sys/class/scsi_host/host#/debug_level
+
+	  There are various debug levels that can be found in the source:
+	  file:drivers/message/fusion/mptdebug.h
+
+endif # FUSION

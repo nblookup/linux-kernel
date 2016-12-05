@@ -1,5 +1,5 @@
 /*
- * sound/v_midi.c
+ * sound/oss/v_midi.c
  *
  * The low level driver for the Sound Blaster DS chips.
  *
@@ -21,6 +21,7 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include "sound_config.h"
 
@@ -38,8 +39,6 @@ static void *midi_mem = NULL;
  * future version of this driver.
  */
 
-
-void            (*midi_input_intr) (int dev, unsigned char data);
 
 static int v_midi_open (int dev, int mode,
 	      void            (*input) (int dev, unsigned char data),
@@ -90,11 +89,12 @@ static void v_midi_close (int dev)
 static int v_midi_out (int dev, unsigned char midi_byte)
 {
 	vmidi_devc *devc = midi_devs[dev]->devc;
-	vmidi_devc *pdevc = midi_devs[devc->pair_mididev]->devc;
+	vmidi_devc *pdevc;
 
 	if (devc == NULL)
-		return -(ENXIO);
+		return -ENXIO;
 
+	pdevc = midi_devs[devc->pair_mididev]->devc;
 	if (pdevc->input_opened > 0){
 		if (MIDIbuf_avail(pdevc->my_mididev) > 500)
 			return 0;
@@ -120,7 +120,7 @@ static int v_midi_end_read (int dev)
 
 /* why -EPERM and not -EINVAL?? */
 
-static inline int v_midi_ioctl (int dev, unsigned cmd, caddr_t arg)
+static inline int v_midi_ioctl (int dev, unsigned cmd, void __user *arg)
 {
 	return -EPERM;
 }
@@ -184,7 +184,7 @@ static void __init attach_v_midi (struct address_info *hw_config)
 		return;
 	}
 	
-	m=(struct vmidi_memory *)kmalloc(sizeof(struct vmidi_memory), GFP_KERNEL);
+	m = kmalloc(sizeof(struct vmidi_memory), GFP_KERNEL);
 	if (m == NULL)
 	{
 		printk(KERN_WARNING "Loopback MIDI: Failed to allocate memory\n");

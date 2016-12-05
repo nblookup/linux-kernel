@@ -1,5 +1,5 @@
 /*
- * VIA AGPGART routines. 
+ * VIA AGPGART routines.
  */
 
 #include <linux/types.h>
@@ -8,6 +8,17 @@
 #include <linux/init.h>
 #include <linux/agp_backend.h>
 #include "agp.h"
+
+static const struct pci_device_id agp_via_pci_table[];
+
+#define VIA_GARTCTRL	0x80
+#define VIA_APSIZE	0x84
+#define VIA_ATTBASE	0x88
+
+#define VIA_AGP3_GARTCTRL	0x90
+#define VIA_AGP3_APSIZE		0x94
+#define VIA_AGP3_ATTBASE	0x98
+#define VIA_AGPSEL		0xfd
 
 static int via_fetch_size(void)
 {
@@ -25,6 +36,7 @@ static int via_fetch_size(void)
 			return values[i].size;
 		}
 	}
+	printk(KERN_ERR PFX "Unknown aperture size from AGP bridge (0x%x)\n", temp);
 	return 0;
 }
 
@@ -67,12 +79,17 @@ static void via_cleanup(void)
 
 static void via_tlbflush(struct agp_memory *mem)
 {
-	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, 0x0000008f);
-	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, 0x0000000f);
+	u32 temp;
+
+	pci_read_config_dword(agp_bridge->dev, VIA_GARTCTRL, &temp);
+	temp |= (1<<7);
+	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, temp);
+	temp &= ~(1<<7);
+	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, temp);
 }
 
 
-static struct aper_size_info_8 via_generic_sizes[7] =
+static const struct aper_size_info_8 via_generic_sizes[9] =
 {
 	{256, 65536, 6, 0},
 	{128, 32768, 5, 128},
@@ -80,7 +97,9 @@ static struct aper_size_info_8 via_generic_sizes[7] =
 	{32, 8192, 3, 224},
 	{16, 4096, 2, 240},
 	{8, 2048, 1, 248},
-	{4, 1024, 0, 252}
+	{4, 1024, 0, 252},
+	{2, 512, 0, 254},
+	{1, 256, 0, 255}
 };
 
 
@@ -110,7 +129,7 @@ static int via_configure_agp3(void)
 {
 	u32 temp;
 	struct aper_size_info_16 *current_size;
-    
+
 	current_size = A_SIZE_16(agp_bridge->current_size);
 
 	/* address to map too */
@@ -121,13 +140,13 @@ static int via_configure_agp3(void)
 	pci_write_config_dword(agp_bridge->dev, VIA_AGP3_ATTBASE,
 		agp_bridge->gatt_bus_addr & 0xfffff000);
 
-	/* 1. Enable GTLB in RX90<7>, all AGP aperture access needs to fetch 
+	/* 1. Enable GTLB in RX90<7>, all AGP aperture access needs to fetch
 	 *    translation table first.
 	 * 2. Enable AGP aperture in RX91<0>. This bit controls the enabling of the
 	 *    graphics AGP aperture for the AGP3.0 port.
 	 */
 	pci_read_config_dword(agp_bridge->dev, VIA_AGP3_GARTCTRL, &temp);
-	pci_write_config_dword(agp_bridge->dev, VIA_AGP3_GARTCTRL, temp | (3<<7));		
+	pci_write_config_dword(agp_bridge->dev, VIA_AGP3_GARTCTRL, temp | (3<<7));
 	return 0;
 }
 
@@ -151,25 +170,12 @@ static void via_tlbflush_agp3(struct agp_memory *mem)
 }
 
 
-static struct aper_size_info_16 via_generic_agp3_sizes[11] =
-{
-	{ 4,     1024,  0, 1<<11|1<<10|1<<9|1<<8|1<<5|1<<4|1<<3|1<<2|1<<1|1<<0 },
-	{ 8,     2048,  1, 1<<11|1<<10|1<<9|1<<8|1<<5|1<<4|1<<3|1<<2|1<<1},
-	{ 16,    4096,  2, 1<<11|1<<10|1<<9|1<<8|1<<5|1<<4|1<<3|1<<2},
-	{ 32,    8192,  3, 1<<11|1<<10|1<<9|1<<8|1<<5|1<<4|1<<3},
-	{ 64,   16384,  4, 1<<11|1<<10|1<<9|1<<8|1<<5|1<<4},
-	{ 128,  32768,  5, 1<<11|1<<10|1<<9|1<<8|1<<5},
-	{ 256,  65536,  6, 1<<11|1<<10|1<<9|1<<8},
-	{ 512,  131072, 7, 1<<11|1<<10|1<<9},
-	{ 1024, 262144, 8, 1<<11|1<<10},
-	{ 2048, 524288, 9, 1<<11}	/* 2GB <- Max supported */
-};
-
-struct agp_bridge_driver via_agp3_driver = {
+static const struct agp_bridge_driver via_agp3_driver = {
 	.owner			= THIS_MODULE,
-	.aperture_sizes		= via_generic_agp3_sizes,
+	.aperture_sizes		= agp3_generic_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 10,
+	.needs_scratch_page	= true,
 	.configure		= via_configure_agp3,
 	.fetch_size		= via_fetch_size_agp3,
 	.cleanup		= via_cleanup_agp3,
@@ -185,14 +191,18 @@ struct agp_bridge_driver via_agp3_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver via_driver = {
+static const struct agp_bridge_driver via_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= via_generic_sizes,
 	.size_type		= U8_APER_SIZE,
-	.num_aperture_sizes	= 7,
+	.num_aperture_sizes	= 9,
+	.needs_scratch_page	= true,
 	.configure		= via_configure,
 	.fetch_size		= via_fetch_size,
 	.cleanup		= via_cleanup,
@@ -208,7 +218,10 @@ struct agp_bridge_driver via_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
 static struct agp_device_ids via_agp_device_ids[] __devinitdata =
@@ -340,6 +353,12 @@ static struct agp_device_ids via_agp_device_ids[] __devinitdata =
 		.chipset_name	= "PT880",
 	},
 
+	/* PT880 Ultra */
+	{
+		.device_id	= PCI_DEVICE_ID_VIA_PT880ULTRA,
+		.chipset_name	= "PT880 Ultra",
+	},
+
 	/* PT890 */
 	{
 		.device_id	= PCI_DEVICE_ID_VIA_8783_0,
@@ -351,7 +370,55 @@ static struct agp_device_ids via_agp_device_ids[] __devinitdata =
 		.device_id	= PCI_DEVICE_ID_VIA_PX8X0_0,
 		.chipset_name	= "PM800/PN800/PM880/PN880",
 	},
-
+	/* KT880 */
+	{
+		.device_id	= PCI_DEVICE_ID_VIA_3269_0,
+		.chipset_name	= "KT880",
+	},
+	/* KTxxx/Px8xx */
+	{
+		.device_id	= PCI_DEVICE_ID_VIA_83_87XX_1,
+		.chipset_name	= "VT83xx/VT87xx/KTxxx/Px8xx",
+	},
+	/* P4M800 */
+	{
+		.device_id	= PCI_DEVICE_ID_VIA_3296_0,
+		.chipset_name	= "P4M800",
+	},
+	/* P4M800CE */
+	{
+		.device_id	= PCI_DEVICE_ID_VIA_P4M800CE,
+		.chipset_name	= "VT3314",
+	},
+	/* VT3324 / CX700 */
+	{
+		.device_id  = PCI_DEVICE_ID_VIA_VT3324,
+		.chipset_name   = "CX700",
+	},
+	/* VT3336 - this is a chipset for AMD Athlon/K8 CPU. Due to K8's unique
+	 * architecture, the AGP resource and behavior are different from
+	 * the traditional AGP which resides only in chipset. AGP is used
+	 * by 3D driver which wasn't available for the VT3336 and VT3364
+	 * generation until now.  Unfortunately, by testing, VT3364 works
+	 * but VT3336 doesn't. - explanation from via, just leave this as
+	 * as a placeholder to avoid future patches adding it back in.
+	 */
+#if 0
+	{
+		.device_id  = PCI_DEVICE_ID_VIA_VT3336,
+		.chipset_name   = "VT3336",
+	},
+#endif
+	/* P4M890 */
+	{
+		.device_id  = PCI_DEVICE_ID_VIA_P4M890,
+		.chipset_name   = "P4M890",
+	},
+	/* P4M900 */
+	{
+		.device_id  = PCI_DEVICE_ID_VIA_VT3364,
+		.chipset_name   = "P4M900",
+	},
 	{ }, /* dummy final entry, always present */
 };
 
@@ -383,20 +450,9 @@ static int __devinit agp_via_probe(struct pci_dev *pdev,
 	if (!cap_ptr)
 		return -ENODEV;
 
-	/* probe for known chipsets */
-	for (j = 0; devs[j].chipset_name; j++) {
-		if (pdev->device == devs[j].device_id) {
-			printk (KERN_INFO PFX "Detected VIA %s chipset\n",
-					devs[j].chipset_name);
-			goto found;
-		}
-	}
+	j = ent - agp_via_pci_table;
+	printk (KERN_INFO PFX "Detected VIA %s chipset\n", devs[j].chipset_name);
 
-	printk(KERN_ERR PFX "Unsupported VIA chipset (device id: %04x)\n",
-		    pdev->device);
-	return -ENODEV;
-
-found:
 	bridge = agp_alloc_bridge();
 	if (!bridge)
 		return -ENOMEM;
@@ -437,15 +493,76 @@ static void __devexit agp_via_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_via_pci_table[] = {
-	{
-	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
-	.class_mask	= ~0,
-	.vendor		= PCI_VENDOR_ID_VIA,
-	.device		= PCI_ANY_ID,
-	.subvendor	= PCI_ANY_ID,
-	.subdevice	= PCI_ANY_ID,
-	},
+#ifdef CONFIG_PM
+
+static int agp_via_suspend(struct pci_dev *pdev, pm_message_t state)
+{
+	pci_save_state (pdev);
+	pci_set_power_state (pdev, PCI_D3hot);
+
+	return 0;
+}
+
+static int agp_via_resume(struct pci_dev *pdev)
+{
+	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
+
+	pci_set_power_state (pdev, PCI_D0);
+	pci_restore_state(pdev);
+
+	if (bridge->driver == &via_agp3_driver)
+		return via_configure_agp3();
+	else if (bridge->driver == &via_driver)
+		return via_configure();
+
+	return 0;
+}
+
+#endif /* CONFIG_PM */
+
+/* must be the same order as name table above */
+static const struct pci_device_id agp_via_pci_table[] = {
+#define ID(x) \
+	{						\
+	.class		= (PCI_CLASS_BRIDGE_HOST << 8),	\
+	.class_mask	= ~0,				\
+	.vendor		= PCI_VENDOR_ID_VIA,		\
+	.device		= x,				\
+	.subvendor	= PCI_ANY_ID,			\
+	.subdevice	= PCI_ANY_ID,			\
+	}
+	ID(PCI_DEVICE_ID_VIA_82C597_0),
+	ID(PCI_DEVICE_ID_VIA_82C598_0),
+	ID(PCI_DEVICE_ID_VIA_8501_0),
+	ID(PCI_DEVICE_ID_VIA_8601_0),
+	ID(PCI_DEVICE_ID_VIA_82C691_0),
+	ID(PCI_DEVICE_ID_VIA_8371_0),
+	ID(PCI_DEVICE_ID_VIA_8633_0),
+	ID(PCI_DEVICE_ID_VIA_XN266),
+	ID(PCI_DEVICE_ID_VIA_8361),
+	ID(PCI_DEVICE_ID_VIA_8363_0),
+	ID(PCI_DEVICE_ID_VIA_8753_0),
+	ID(PCI_DEVICE_ID_VIA_8367_0),
+	ID(PCI_DEVICE_ID_VIA_8653_0),
+	ID(PCI_DEVICE_ID_VIA_XM266),
+	ID(PCI_DEVICE_ID_VIA_862X_0),
+	ID(PCI_DEVICE_ID_VIA_8377_0),
+	ID(PCI_DEVICE_ID_VIA_8605_0),
+	ID(PCI_DEVICE_ID_VIA_8703_51_0),
+	ID(PCI_DEVICE_ID_VIA_8754C_0),
+	ID(PCI_DEVICE_ID_VIA_8763_0),
+	ID(PCI_DEVICE_ID_VIA_8378_0),
+	ID(PCI_DEVICE_ID_VIA_PT880),
+	ID(PCI_DEVICE_ID_VIA_PT880ULTRA),
+	ID(PCI_DEVICE_ID_VIA_8783_0),
+	ID(PCI_DEVICE_ID_VIA_PX8X0_0),
+	ID(PCI_DEVICE_ID_VIA_3269_0),
+	ID(PCI_DEVICE_ID_VIA_83_87XX_1),
+	ID(PCI_DEVICE_ID_VIA_3296_0),
+	ID(PCI_DEVICE_ID_VIA_P4M800CE),
+	ID(PCI_DEVICE_ID_VIA_VT3324),
+	ID(PCI_DEVICE_ID_VIA_P4M890),
+	ID(PCI_DEVICE_ID_VIA_VT3364),
 	{ }
 };
 
@@ -457,12 +574,18 @@ static struct pci_driver agp_via_pci_driver = {
 	.id_table	= agp_via_pci_table,
 	.probe		= agp_via_probe,
 	.remove		= agp_via_remove,
+#ifdef CONFIG_PM
+	.suspend	= agp_via_suspend,
+	.resume		= agp_via_resume,
+#endif
 };
 
 
 static int __init agp_via_init(void)
 {
-	return pci_module_init(&agp_via_pci_driver);
+	if (agp_off)
+		return -EINVAL;
+	return pci_register_driver(&agp_via_pci_driver);
 }
 
 static void __exit agp_via_cleanup(void)
@@ -473,5 +596,5 @@ static void __exit agp_via_cleanup(void)
 module_init(agp_via_init);
 module_exit(agp_via_cleanup);
 
-MODULE_LICENSE("GPL and additional rights");
-MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Dave Jones <davej@redhat.com>");

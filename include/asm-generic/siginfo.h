@@ -6,7 +6,7 @@
 
 typedef union sigval {
 	int sival_int;
-	void *sival_ptr;
+	void __user *sival_ptr;
 } sigval_t;
 
 /*
@@ -23,11 +23,16 @@ typedef union sigval {
 #endif
 
 #ifndef __ARCH_SI_UID_T
-#define __ARCH_SI_UID_T	uid_t
+#define __ARCH_SI_UID_T	__kernel_uid32_t
 #endif
 
+/*
+ * The default "si_band" type is "long", as specified by POSIX.
+ * However, some architectures want to override this to "int"
+ * for historical compatibility reasons, so we allow that.
+ */
 #ifndef __ARCH_SI_BAND_T
-#define __ARCH_SI_BAND_T int
+#define __ARCH_SI_BAND_T long
 #endif
 
 #ifndef HAVE_ARCH_SIGINFO_T
@@ -42,13 +47,13 @@ typedef struct siginfo {
 
 		/* kill() */
 		struct {
-			pid_t _pid;		/* sender's pid */
+			__kernel_pid_t _pid;	/* sender's pid */
 			__ARCH_SI_UID_T _uid;	/* sender's uid */
 		} _kill;
 
 		/* POSIX.1b timers */
 		struct {
-			timer_t _tid;		/* timer id */
+			__kernel_timer_t _tid;	/* timer id */
 			int _overrun;		/* overrun count */
 			char _pad[sizeof( __ARCH_SI_UID_T) - sizeof(int)];
 			sigval_t _sigval;	/* same as below */
@@ -57,26 +62,27 @@ typedef struct siginfo {
 
 		/* POSIX.1b signals */
 		struct {
-			pid_t _pid;		/* sender's pid */
+			__kernel_pid_t _pid;	/* sender's pid */
 			__ARCH_SI_UID_T _uid;	/* sender's uid */
 			sigval_t _sigval;
 		} _rt;
 
 		/* SIGCHLD */
 		struct {
-			pid_t _pid;		/* which child */
+			__kernel_pid_t _pid;	/* which child */
 			__ARCH_SI_UID_T _uid;	/* sender's uid */
 			int _status;		/* exit code */
-			clock_t _utime;
-			clock_t _stime;
+			__kernel_clock_t _utime;
+			__kernel_clock_t _stime;
 		} _sigchld;
 
 		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS */
 		struct {
-			void *_addr; /* faulting insn/memory ref. */
+			void __user *_addr; /* faulting insn/memory ref. */
 #ifdef __ARCH_SI_TRAPNO
 			int _trapno;	/* TRAP # which caused the signal */
 #endif
+			short _addr_lsb; /* LSB of the reported address */
 		} _sigfault;
 
 		/* SIGPOLL */
@@ -107,6 +113,7 @@ typedef struct siginfo {
 #ifdef __ARCH_SI_TRAPNO
 #define si_trapno	_sifields._sigfault._trapno
 #endif
+#define si_addr_lsb	_sifields._sigfault._addr_lsb
 #define si_band		_sifields._sigpoll._band
 #define si_fd		_sifields._sigpoll._fd
 
@@ -118,6 +125,7 @@ typedef struct siginfo {
 #define __SI_FAULT	(3 << 16)
 #define __SI_CHLD	(4 << 16)
 #define __SI_RT		(5 << 16)
+#define __SI_MESGQ	(6 << 16)
 #define __SI_CODE(T,N)	((T) | ((N) & 0xffff))
 #else
 #define __SI_KILL	0
@@ -126,6 +134,7 @@ typedef struct siginfo {
 #define __SI_FAULT	0
 #define __SI_CHLD	0
 #define __SI_RT		0
+#define __SI_MESGQ	0
 #define __SI_CODE(T,N)	(N)
 #endif
 
@@ -137,7 +146,7 @@ typedef struct siginfo {
 #define SI_KERNEL	0x80		/* sent by the kernel from somewhere */
 #define SI_QUEUE	-1		/* sent by sigqueue */
 #define SI_TIMER __SI_CODE(__SI_TIMER,-2) /* sent by timer expiration */
-#define SI_MESGQ	-3		/* sent by real time mesq state change */
+#define SI_MESGQ __SI_CODE(__SI_MESGQ,-3) /* sent by real time mesq state change */
 #define SI_ASYNCIO	-4		/* sent by AIO completion */
 #define SI_SIGIO	-5		/* sent by queued SIGIO */
 #define SI_TKILL	-6		/* sent by tkill system call */
@@ -146,7 +155,6 @@ typedef struct siginfo {
 #define SI_FROMUSER(siptr)	((siptr)->si_code <= 0)
 #define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0)
 
-#ifndef HAVE_ARCH_SI_CODES
 /*
  * SIGILL si_codes
  */
@@ -184,16 +192,22 @@ typedef struct siginfo {
  * SIGBUS si_codes
  */
 #define BUS_ADRALN	(__SI_FAULT|1)	/* invalid address alignment */
-#define BUS_ADRERR	(__SI_FAULT|2)	/* non-existant physical address */
+#define BUS_ADRERR	(__SI_FAULT|2)	/* non-existent physical address */
 #define BUS_OBJERR	(__SI_FAULT|3)	/* object specific hardware error */
-#define NSIGBUS		3
+/* hardware memory error consumed on a machine check: action required */
+#define BUS_MCEERR_AR	(__SI_FAULT|4)
+/* hardware memory error detected in process but not consumed: action optional*/
+#define BUS_MCEERR_AO	(__SI_FAULT|5)
+#define NSIGBUS		5
 
 /*
  * SIGTRAP si_codes
  */
 #define TRAP_BRKPT	(__SI_FAULT|1)	/* process breakpoint */
 #define TRAP_TRACE	(__SI_FAULT|2)	/* process trace trap */
-#define NSIGTRAP	2
+#define TRAP_BRANCH     (__SI_FAULT|3)  /* process taken branch trap */
+#define TRAP_HWBKPT     (__SI_FAULT|4)  /* hardware breakpoint/watchpoint */
+#define NSIGTRAP	4
 
 /*
  * SIGCHLD si_codes
@@ -217,8 +231,6 @@ typedef struct siginfo {
 #define POLL_HUP	(__SI_POLL|6)	/* device disconnected */
 #define NSIGPOLL	6
 
-#endif
-
 /*
  * sigevent definitions
  * 
@@ -232,12 +244,17 @@ typedef struct siginfo {
 #define SIGEV_THREAD	2	/* deliver via thread creation */
 #define SIGEV_THREAD_ID 4	/* deliver to thread */
 
-#define SIGEV_MAX_SIZE	64
-#ifndef SIGEV_PAD_SIZE
-#define SIGEV_PAD_SIZE	((SIGEV_MAX_SIZE/sizeof(int)) - 3)
+/*
+ * This works because the alignment is ok on all current architectures
+ * but we leave open this being overridden in the future
+ */
+#ifndef __ARCH_SIGEV_PREAMBLE_SIZE
+#define __ARCH_SIGEV_PREAMBLE_SIZE	(sizeof(int) * 2 + sizeof(sigval_t))
 #endif
 
-#ifndef HAVE_ARCH_SIGEVENT_T
+#define SIGEV_MAX_SIZE	64
+#define SIGEV_PAD_SIZE	((SIGEV_MAX_SIZE - __ARCH_SIGEV_PREAMBLE_SIZE) \
+		/ sizeof(int))
 
 typedef struct sigevent {
 	sigval_t sigev_value;
@@ -253,8 +270,6 @@ typedef struct sigevent {
 		} _sigev_thread;
 	} _sigev_un;
 } sigevent_t;
-
-#endif
 
 #define sigev_notify_function	_sigev_un._sigev_thread._function
 #define sigev_notify_attributes	_sigev_un._sigev_thread._attribute

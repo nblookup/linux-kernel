@@ -1,57 +1,64 @@
 /*
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
- * Copyright (C) 2001, 2002 Red Hat, Inc.
+ * Copyright © 2001-2007 Red Hat, Inc.
  *
- * Created by David Woodhouse <dwmw2@redhat.com>
+ * Created by David Woodhouse <dwmw2@infradead.org>
  *
  * For licensing information, see the file 'LICENCE' in this directory.
  *
- * $Id: symlink.c,v 1.12 2003/10/04 08:33:07 dwmw2 Exp $
- *
  */
 
-
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/fs.h>
+#include <linux/namei.h>
 #include "nodelist.h"
 
-int jffs2_readlink(struct dentry *dentry, char *buffer, int buflen);
-int jffs2_follow_link(struct dentry *dentry, struct nameidata *nd);
+static void *jffs2_follow_link(struct dentry *dentry, struct nameidata *nd);
 
-struct inode_operations jffs2_symlink_inode_operations =
-{	
-	.readlink =	jffs2_readlink,
+const struct inode_operations jffs2_symlink_inode_operations =
+{
+	.readlink =	generic_readlink,
 	.follow_link =	jffs2_follow_link,
-	.setattr =	jffs2_setattr
+	.check_acl =	jffs2_check_acl,
+	.setattr =	jffs2_setattr,
+	.setxattr =	jffs2_setxattr,
+	.getxattr =	jffs2_getxattr,
+	.listxattr =	jffs2_listxattr,
+	.removexattr =	jffs2_removexattr
 };
 
-int jffs2_readlink(struct dentry *dentry, char *buffer, int buflen)
+static void *jffs2_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	unsigned char *kbuf;
-	int ret;
+	struct jffs2_inode_info *f = JFFS2_INODE_INFO(dentry->d_inode);
+	char *p = (char *)f->target;
 
-	kbuf = jffs2_getlink(JFFS2_SB_INFO(dentry->d_inode->i_sb), JFFS2_INODE_INFO(dentry->d_inode));
-	if (IS_ERR(kbuf))
-		return PTR_ERR(kbuf);
+	/*
+	 * We don't acquire the f->sem mutex here since the only data we
+	 * use is f->target.
+	 *
+	 * 1. If we are here the inode has already built and f->target has
+	 * to point to the target path.
+	 * 2. Nobody uses f->target (if the inode is symlink's inode). The
+	 * exception is inode freeing function which frees f->target. But
+	 * it can't be called while we are here and before VFS has
+	 * stopped using our f->target string which we provide by means of
+	 * nd_set_link() call.
+	 */
 
-	ret = vfs_readlink(dentry, buffer, buflen, kbuf);
-	kfree(kbuf);
-	return ret;
+	if (!p) {
+		printk(KERN_ERR "jffs2_follow_link(): can't find symlink target\n");
+		p = ERR_PTR(-EIO);
+	}
+	D1(printk(KERN_DEBUG "jffs2_follow_link(): target path is '%s'\n", (char *) f->target));
+
+	nd_set_link(nd, p);
+
+	/*
+	 * We will unlock the f->sem mutex but VFS will use the f->target string. This is safe
+	 * since the only way that may cause f->target to be changed is iput() operation.
+	 * But VFS will not use f->target after iput() has been called.
+	 */
+	return NULL;
 }
 
-int jffs2_follow_link(struct dentry *dentry, struct nameidata *nd)
-{
-	unsigned char *buf;
-	int ret;
-
-	buf = jffs2_getlink(JFFS2_SB_INFO(dentry->d_inode->i_sb), JFFS2_INODE_INFO(dentry->d_inode));
-
-	if (IS_ERR(buf))
-		return PTR_ERR(buf);
-
-	ret = vfs_follow_link(nd, buf);
-	kfree(buf);
-	return ret;
-}

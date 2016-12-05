@@ -2,6 +2,7 @@
  *  linux/arch/arm/mm/proc-sa110.S
  *
  *  Copyright (C) 1997-2002 Russell King
+ *  hacked for non-paged-MM by Hyok S. Choi, 2003.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -15,32 +16,20 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <asm/assembler.h>
-#include <asm/constants.h>
-#include <asm/procinfo.h>
-#include <asm/hardware.h>
+#include <asm/asm-offsets.h>
+#include <asm/hwcap.h>
+#include <mach/hardware.h>
+#include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
 #include <asm/ptrace.h>
+
+#include "proc-macros.S"
 
 /*
  * the cache line size of the I and D cache
  */
 #define DCACHELINESIZE	32
-#define FLUSH_OFFSET	32768
 
-	.macro flush_110_dcache	rd, ra, re
-	ldr	\rd, =flush_base
-	ldr	\ra, [\rd]
-	eor	\ra, \ra, #FLUSH_OFFSET
-	str	\ra, [\rd]
-	add	\re, \ra, #16384		@ only necessary for 16k
-1001:	ldr	\rd, [\ra], #DCACHELINESIZE
-	teq	\re, \ra
-	bne	1001b
-	.endm
-
-	.data
-flush_base:
-	.long	FLUSH_BASE
 	.text
 
 /*
@@ -55,17 +44,13 @@ ENTRY(cpu_sa110_proc_init)
  * cpu_sa110_proc_fin()
  */
 ENTRY(cpu_sa110_proc_fin)
-	stmfd	sp!, {lr}
-	mov	ip, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
-	msr	cpsr_c, ip
-	bl	v4wb_flush_kern_cache_all	@ clean caches
-1:	mov	r0, #0
+	mov	r0, #0
 	mcr	p15, 0, r0, c15, c2, 2		@ Disable clock switching
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x1000			@ ...i............
 	bic	r0, r0, #0x000e			@ ............wca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	ldmfd	sp!, {pc}
+	mov	pc, lr
 
 /*
  * cpu_sa110_reset(loc)
@@ -81,7 +66,9 @@ ENTRY(cpu_sa110_reset)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c7, 0		@ invalidate I,D caches
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+#ifdef CONFIG_MMU
 	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
+#endif
 	mrc	p15, 0, ip, c1, c0, 0		@ ctrl register
 	bic	ip, ip, #0x000f			@ ............wcam
 	bic	ip, ip, #0x1100			@ ...i...s........
@@ -144,62 +131,59 @@ ENTRY(cpu_sa110_dcache_clean_area)
  */
 	.align	5
 ENTRY(cpu_sa110_switch_mm)
-	flush_110_dcache	r3, ip, r1
-	mov	r1, #0
-	mcr	p15, 0, r1, c7, c5, 0		@ invalidate I cache
-	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
+#ifdef CONFIG_MMU
+	str	lr, [sp, #-4]!
+	bl	v4wb_flush_kern_cache_all	@ clears IP
 	mcr	p15, 0, r0, c2, c0, 0		@ load page table pointer
-	mcr	p15, 0, r1, c8, c7, 0		@ invalidate I & D TLBs
+	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
+	ldr	pc, [sp], #4
+#else
 	mov	pc, lr
+#endif
 
 /*
- * cpu_sa110_set_pte(ptep, pte)
+ * cpu_sa110_set_pte_ext(ptep, pte, ext)
  *
  * Set a PTE and flush it out
  */
 	.align	5
-ENTRY(cpu_sa110_set_pte)
-	str	r1, [r0], #-2048		@ linux version
-
-	eor	r1, r1, #L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_WRITE | L_PTE_DIRTY
-
-	bic	r2, r1, #PTE_SMALL_AP_MASK
-	bic	r2, r2, #PTE_TYPE_MASK
-	orr	r2, r2, #PTE_TYPE_SMALL
-
-	tst	r1, #L_PTE_USER			@ User?
-	orrne	r2, r2, #PTE_SMALL_AP_URO_SRW
-
-	tst	r1, #L_PTE_WRITE | L_PTE_DIRTY	@ Write and Dirty?
-	orreq	r2, r2, #PTE_SMALL_AP_UNO_SRW
-
-	tst	r1, #L_PTE_PRESENT | L_PTE_YOUNG	@ Present and Young?
-	movne	r2, #0
-
-	str	r2, [r0]			@ hardware version
+ENTRY(cpu_sa110_set_pte_ext)
+#ifdef CONFIG_MMU
+	armv3_set_pte_ext wc_disable=0
 	mov	r0, r0
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+#endif
 	mov	pc, lr
 
-	__INIT
+	__CPUINIT
 
 	.type	__sa110_setup, #function
 __sa110_setup:
-	mrc	p15, 0, r0, c1, c0		@ get control register v4
-	bic	r0, r0, #0x2e00			@ ..VI ZFRS BLDP WCAM
-	bic	r0, r0, #0x0002			@ ..0. 000. .... ..0.
-	orr	r0, r0, #0x003d
-	orr	r0, r0, #0x1100			@ ...1 ...1 ..11 11.1
 	mov	r10, #0
 	mcr	p15, 0, r10, c7, c7		@ invalidate I,D caches on v4
 	mcr	p15, 0, r10, c7, c10, 4		@ drain write buffer on v4
+#ifdef CONFIG_MMU
 	mcr	p15, 0, r10, c8, c7		@ invalidate I,D TLBs on v4
-	mcr	p15, 0, r4, c2, c0		@ load page table pointer
-	mov	r10, #0x1f			@ Domains 0, 1 = client
-	mcr	p15, 0, r10, c3, c0		@ load domain access register
+#endif
+
+	adr	r5, sa110_crval
+	ldmia	r5, {r5, r6}
+	mrc	p15, 0, r0, c1, c0		@ get control register v4
+	bic	r0, r0, r5
+	orr	r0, r0, r6
 	mov	pc, lr
 	.size	__sa110_setup, . - __sa110_setup
+
+	/*
+	 *  R
+	 * .RVI ZFRS BLDP WCAM
+	 * ..01 0001 ..11 1101
+	 * 
+	 */
+	.type	sa110_crval, #object
+sa110_crval:
+	crval	clear=0x00003f3f, mmuset=0x0000113d, ucset=0x00001130
 
 	__INITDATA
 
@@ -211,13 +195,17 @@ __sa110_setup:
 	.type	sa110_processor_functions, #object
 ENTRY(sa110_processor_functions)
 	.word	v4_early_abort
+	.word	legacy_pabort
 	.word	cpu_sa110_proc_init
 	.word	cpu_sa110_proc_fin
 	.word	cpu_sa110_reset
 	.word	cpu_sa110_do_idle
 	.word	cpu_sa110_dcache_clean_area
 	.word	cpu_sa110_switch_mm
-	.word	cpu_sa110_set_pte
+	.word	cpu_sa110_set_pte_ext
+	.word	0
+	.word	0
+	.word	0
 	.size	sa110_processor_functions, . - sa110_processor_functions
 
 	.section ".rodata"
@@ -239,13 +227,20 @@ cpu_sa110_name:
 
 	.align
 
-	.section ".proc.info", #alloc, #execinstr
+	.section ".proc.info.init", #alloc, #execinstr
 
 	.type	__sa110_proc_info,#object
 __sa110_proc_info:
 	.long	0x4401a100
 	.long	0xfffffff0
-	.long	0x00000c0e
+	.long   PMD_TYPE_SECT | \
+		PMD_SECT_BUFFERABLE | \
+		PMD_SECT_CACHEABLE | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
+	.long   PMD_TYPE_SECT | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
 	b	__sa110_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name

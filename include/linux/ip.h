@@ -16,6 +16,7 @@
  */
 #ifndef _LINUX_IP_H
 #define _LINUX_IP_H
+#include <linux/types.h>
 #include <asm/byteorder.h>
 
 #define IPTOS_TOS_MASK		0x1E
@@ -56,6 +57,7 @@
 #define IPOPT_SEC	(2 |IPOPT_CONTROL|IPOPT_COPY)
 #define IPOPT_LSRR	(3 |IPOPT_CONTROL|IPOPT_COPY)
 #define IPOPT_TIMESTAMP	(4 |IPOPT_MEASUREMENT)
+#define IPOPT_CIPSO	(6 |IPOPT_CONTROL|IPOPT_COPY)
 #define IPOPT_RR	(7 |IPOPT_CONTROL)
 #define IPOPT_SID	(8 |IPOPT_CONTROL|IPOPT_COPY)
 #define IPOPT_SSRR	(9 |IPOPT_CONTROL|IPOPT_COPY)
@@ -78,90 +80,7 @@
 #define	IPOPT_TS_TSANDADDR	1		/* timestamps and addresses */
 #define	IPOPT_TS_PRESPEC	3		/* specified modules only */
 
-#ifdef __KERNEL__
-#include <linux/config.h>
-#include <linux/types.h>
-#include <net/sock.h>
-#include <linux/igmp.h>
-#include <net/flow.h>
-
-struct ip_options {
-  __u32		faddr;				/* Saved first hop address */
-  unsigned char	optlen;
-  unsigned char srr;
-  unsigned char rr;
-  unsigned char ts;
-  unsigned char is_setbyuser:1,			/* Set by setsockopt?			*/
-                is_data:1,			/* Options in __data, rather than skb	*/
-                is_strictroute:1,		/* Strict source route			*/
-                srr_is_hit:1,			/* Packet destination addr was our one	*/
-                is_changed:1,			/* IP checksum more not valid		*/	
-                rr_needaddr:1,			/* Need to record addr of outgoing dev	*/
-                ts_needtime:1,			/* Need to record timestamp		*/
-                ts_needaddr:1;			/* Need to record addr of outgoing dev  */
-  unsigned char router_alert;
-  unsigned char __pad1;
-  unsigned char __pad2;
-  unsigned char __data[0];
-};
-
-#define optlength(opt) (sizeof(struct ip_options) + opt->optlen)
-
-struct inet_opt {
-	/* Socket demultiplex comparisons on incoming packets. */
-	__u32			daddr;		/* Foreign IPv4 addr */
-	__u32			rcv_saddr;	/* Bound local IPv4 addr */
-	__u16			dport;		/* Destination port */
-	__u16			num;		/* Local port */
-	__u32			saddr;		/* Sending source */
-	int			uc_ttl;		/* Unicast TTL */
-	int			tos;		/* TOS */
-	unsigned	   	cmsg_flags;
-	struct ip_options	*opt;
-	__u16			sport;		/* Source port */
-	unsigned char		hdrincl;	/* Include headers ? */
-	__u8			mc_ttl;		/* Multicasting TTL */
-	__u8			mc_loop;	/* Loopback */
-	__u8			pmtudisc;
-	__u16			id;		/* ID counter for DF pkts */
-	unsigned		recverr : 1,
-				freebind : 1;
-	int			mc_index;	/* Multicast device index */
-	__u32			mc_addr;
-	struct ip_mc_socklist	*mc_list;	/* Group array */
-	struct page		*sndmsg_page;	/* Cached page for sendmsg */
-	u32			sndmsg_off;	/* Cached offset for sendmsg */
-	/*
-	 * Following members are used to retain the infomation to build
-	 * an ip header on each ip fragmentation while the socket is corked.
-	 */
-	struct {
-		unsigned int		flags;
-		unsigned int		fragsize;
-		struct ip_options	*opt;
-		struct rtable		*rt;
-		int			length; /* Total length of all frames */
-		u32			addr;
-		struct flowi		fl;
-	} cork;
-};
-
-#define IPCORK_OPT	1	/* ip-options has been held in ipcork.opt */
-
-struct ipv6_pinfo;
-
-/* WARNING: don't change the layout of the members in inet_sock! */
-struct inet_sock {
-	struct sock	  sk;
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
-	struct ipv6_pinfo *pinet6;
-#endif
-	struct inet_opt   inet;
-};
-
-#define inet_sk(__sk) (&((struct inet_sock *)__sk)->inet)
-
-#endif
+#define IPV4_BEET_PHMAXLEN 8
 
 struct iphdr {
 #if defined(__LITTLE_ENDIAN_BITFIELD)
@@ -174,36 +93,57 @@ struct iphdr {
 #error	"Please fix <asm/byteorder.h>"
 #endif
 	__u8	tos;
-	__u16	tot_len;
-	__u16	id;
-	__u16	frag_off;
+	__be16	tot_len;
+	__be16	id;
+	__be16	frag_off;
 	__u8	ttl;
 	__u8	protocol;
-	__u16	check;
-	__u32	saddr;
-	__u32	daddr;
+	__sum16	check;
+	__be32	saddr;
+	__be32	daddr;
 	/*The options start here. */
 };
+
+#ifdef __KERNEL__
+#include <linux/skbuff.h>
+
+static inline struct iphdr *ip_hdr(const struct sk_buff *skb)
+{
+	return (struct iphdr *)skb_network_header(skb);
+}
+
+static inline struct iphdr *ipip_hdr(const struct sk_buff *skb)
+{
+	return (struct iphdr *)skb_transport_header(skb);
+}
+#endif
 
 struct ip_auth_hdr {
 	__u8  nexthdr;
 	__u8  hdrlen;		/* This one is measured in 32 bit units! */
-	__u16 reserved;
-	__u32 spi;
-	__u32 seq_no;		/* Sequence number */
+	__be16 reserved;
+	__be32 spi;
+	__be32 seq_no;		/* Sequence number */
 	__u8  auth_data[0];	/* Variable len but >=4. Mind the 64 bit alignment! */
 };
 
 struct ip_esp_hdr {
-	__u32 spi;
-	__u32 seq_no;		/* Sequence number */
+	__be32 spi;
+	__be32 seq_no;		/* Sequence number */
 	__u8  enc_data[0];	/* Variable len but >=8. Mind the 64 bit alignment! */
 };
 
 struct ip_comp_hdr {
 	__u8 nexthdr;
 	__u8 flags;
-	__u16 cpi;
+	__be16 cpi;
+};
+
+struct ip_beet_phdr {
+	__u8 nexthdr;
+	__u8 hdrlen;
+	__u8 padlen;
+	__u8 reserved;
 };
 
 #endif	/* _LINUX_IP_H */

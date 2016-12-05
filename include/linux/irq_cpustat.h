@@ -9,7 +9,6 @@
  * Keith Owens <kaos@ocs.com.au> July 2000.
  */
 
-#include <linux/config.h>
 
 /*
  * Simple wrappers reducing source bloat.  Define all irq_stat fields
@@ -19,16 +18,12 @@
 
 #ifndef __ARCH_IRQ_STAT
 extern irq_cpustat_t irq_stat[];		/* defined in asm/hardirq.h */
-#ifdef CONFIG_SMP
 #define __IRQ_STAT(cpu, member)	(irq_stat[cpu].member)
-#else
-#define __IRQ_STAT(cpu, member)	((void)(cpu), irq_stat[0].member)
-#endif	
 #endif
 
   /* arch independent irq_stat fields */
-#define softirq_pending(cpu)	__IRQ_STAT((cpu), __softirq_pending)
-#define local_softirq_pending()	softirq_pending(smp_processor_id())
+#define local_softirq_pending() \
+	__IRQ_STAT(smp_processor_id(), __softirq_pending)
 
   /* arch dependent irq_stat fields */
 #define nmi_count(cpu)		__IRQ_STAT((cpu), __nmi_count)	/* i386 */

@@ -33,7 +33,6 @@ typedef struct isdnloop_sdef {
 #ifdef __KERNEL__
 /* Kernel includes */
 
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
@@ -95,6 +94,7 @@ typedef struct isdnloop_card {
 	struct sk_buff_head
 	 bqueue[ISDNLOOP_BCH];  /* B-Channel queues                 */
 	struct sk_buff_head dqueue;	/* D-Channel queue                  */
+	spinlock_t isdnloop_lock;
 } isdnloop_card;
 
 /*

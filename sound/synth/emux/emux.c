@@ -18,10 +18,9 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
 #include <linux/wait.h>
-#include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <sound/core.h>
 #include <sound/emux_synth.h>
 #include <linux/init.h>
@@ -34,17 +33,17 @@ MODULE_LICENSE("GPL");
 /*
  * create a new hardware dependent device for Emu8000/Emu10k1
  */
-int snd_emux_new(snd_emux_t **remu)
+int snd_emux_new(struct snd_emux **remu)
 {
-	snd_emux_t *emu;
+	struct snd_emux *emu;
 
 	*remu = NULL;
-	emu = snd_magic_kcalloc(snd_emux_t, 0, GFP_KERNEL);
+	emu = kzalloc(sizeof(*emu), GFP_KERNEL);
 	if (emu == NULL)
 		return -ENOMEM;
 
 	spin_lock_init(&emu->voice_lock);
-	init_MUTEX(&emu->register_mutex);
+	mutex_init(&emu->register_mutex);
 
 	emu->client = -1;
 #ifdef CONFIG_SND_SEQUENCER_OSS
@@ -62,33 +61,65 @@ int snd_emux_new(snd_emux_t **remu)
 	return 0;
 }
 
+EXPORT_SYMBOL(snd_emux_new);
 
 /*
  */
-int snd_emux_register(snd_emux_t *emu, snd_card_t *card, int index, char *name)
+static int sf_sample_new(void *private_data, struct snd_sf_sample *sp,
+				  struct snd_util_memhdr *hdr,
+				  const void __user *buf, long count)
 {
-	snd_sf_callback_t sf_cb;
+	struct snd_emux *emu = private_data;
+	return emu->ops.sample_new(emu, sp, hdr, buf, count);
+	
+}
 
-	snd_assert(emu->hw != NULL, return -EINVAL);
-	snd_assert(emu->max_voices > 0, return -EINVAL);
-	snd_assert(card != NULL, return -EINVAL);
-	snd_assert(name != NULL, return -EINVAL);
+static int sf_sample_free(void *private_data, struct snd_sf_sample *sp,
+				   struct snd_util_memhdr *hdr)
+{
+	struct snd_emux *emu = private_data;
+	return emu->ops.sample_free(emu, sp, hdr);
+	
+}
+
+static void sf_sample_reset(void *private_data)
+{
+	struct snd_emux *emu = private_data;
+	emu->ops.sample_reset(emu);
+}
+
+int snd_emux_register(struct snd_emux *emu, struct snd_card *card, int index, char *name)
+{
+	int err;
+	struct snd_sf_callback sf_cb;
+
+	if (snd_BUG_ON(!emu->hw || emu->max_voices <= 0))
+		return -EINVAL;
+	if (snd_BUG_ON(!card || !name))
+		return -EINVAL;
 
 	emu->card = card;
-	emu->name = snd_kmalloc_strdup(name, GFP_KERNEL);
-	emu->voices = snd_kcalloc(sizeof(snd_emux_voice_t) * emu->max_voices, GFP_KERNEL);
+	emu->name = kstrdup(name, GFP_KERNEL);
+	emu->voices = kcalloc(emu->max_voices, sizeof(struct snd_emux_voice),
+			      GFP_KERNEL);
 	if (emu->voices == NULL)
 		return -ENOMEM;
 
 	/* create soundfont list */
 	memset(&sf_cb, 0, sizeof(sf_cb));
 	sf_cb.private_data = emu;
-	sf_cb.sample_new = (snd_sf_sample_new_t)emu->ops.sample_new;
-	sf_cb.sample_free = (snd_sf_sample_free_t)emu->ops.sample_free;
-	sf_cb.sample_reset = (snd_sf_sample_reset_t)emu->ops.sample_reset;
+	if (emu->ops.sample_new)
+		sf_cb.sample_new = sf_sample_new;
+	if (emu->ops.sample_free)
+		sf_cb.sample_free = sf_sample_free;
+	if (emu->ops.sample_reset)
+		sf_cb.sample_reset = sf_sample_reset;
 	emu->sflist = snd_sf_new(&sf_cb, emu->memhdr);
 	if (emu->sflist == NULL)
 		return -ENOMEM;
+
+	if ((err = snd_emux_init_hwdep(emu)) < 0)
+		return err;
 
 	snd_emux_init_voices(emu);
 
@@ -104,10 +135,11 @@ int snd_emux_register(snd_emux_t *emu, snd_card_t *card, int index, char *name)
 	return 0;
 }
 
+EXPORT_SYMBOL(snd_emux_register);
 
 /*
  */
-int snd_emux_free(snd_emux_t *emu)
+int snd_emux_free(struct snd_emux *emu)
 {
 	unsigned long flags;
 
@@ -128,30 +160,18 @@ int snd_emux_free(snd_emux_t *emu)
 #endif
 	snd_emux_detach_seq(emu);
 
+	snd_emux_delete_hwdep(emu);
+
 	if (emu->sflist)
 		snd_sf_free(emu->sflist);
 
-	if (emu->voices)
-		kfree(emu->voices);
-
-	if (emu->name)
-		kfree(emu->name);
-
-	snd_magic_kfree(emu);
+	kfree(emu->voices);
+	kfree(emu->name);
+	kfree(emu);
 	return 0;
 }
 
-
-EXPORT_SYMBOL(snd_emux_new);
-EXPORT_SYMBOL(snd_emux_register);
 EXPORT_SYMBOL(snd_emux_free);
-
-EXPORT_SYMBOL(snd_emux_terminate_all);
-EXPORT_SYMBOL(snd_emux_lock_voice);
-EXPORT_SYMBOL(snd_emux_unlock_voice);
-
-/* soundfont.c */
-EXPORT_SYMBOL(snd_sf_linear_to_log);
 
 
 /*

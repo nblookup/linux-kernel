@@ -1,4 +1,4 @@
-/* $Id: b1.c,v 1.1.4.1.2.1 2001/12/21 15:00:17 kai Exp $
+/* $Id: b1.c,v 1.1.2.2 2004/01/16 21:09:27 keil Exp $
  * 
  * Common module for AVM B1 cards.
  * 
@@ -12,6 +12,8 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
@@ -19,6 +21,7 @@
 #include <linux/ioport.h>
 #include <linux/capi.h>
 #include <linux/kernelcapi.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 #include <linux/init.h>
 #include <asm/uaccess.h>
@@ -28,7 +31,7 @@
 #include <linux/isdn/capicmd.h>
 #include <linux/isdn/capiutil.h>
 
-static char *revision = "$Revision: 1.1.4.1.2.1 $";
+static char *revision = "$Revision: 1.1.2.2 $";
 
 /* ------------------------------------------------------------- */
 
@@ -65,18 +68,15 @@ avmcard *b1_alloc_card(int nr_controllers)
 	avmctrl_info *cinfo;
 	int i;
 
-	card = kmalloc(sizeof(*card), GFP_KERNEL);
+	card = kzalloc(sizeof(*card), GFP_KERNEL);
 	if (!card)
-		return 0;
+		return NULL;
 
-	memset(card, 0, sizeof(*card));
-
-        cinfo = kmalloc(sizeof(*cinfo) * nr_controllers, GFP_KERNEL);
+	cinfo = kzalloc(sizeof(*cinfo) * nr_controllers, GFP_KERNEL);
 	if (!cinfo) {
 		kfree(card);
-		return 0;
+		return NULL;
 	}
-	memset(cinfo, 0, sizeof(*cinfo));
 
 	card->ctrlinfo = cinfo;
 	for (i = 0; i < nr_controllers; i++) {
@@ -308,14 +308,13 @@ int b1_load_firmware(struct capi_ctr *ctrl, capiloaddata *data)
 		return -EIO;
 	}
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&card->lock, flags);
 	b1_setinterrupt(port, card->irq, card->cardtype);
 	b1_put_byte(port, SEND_INIT);
 	b1_put_word(port, CAPI_MAXAPPL);
 	b1_put_word(port, AVM_NCCI_PER_CHANNEL*2);
 	b1_put_word(port, ctrl->cnr - 1);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&card->lock, flags);
 
 	return 0;
 }
@@ -325,13 +324,16 @@ void b1_reset_ctr(struct capi_ctr *ctrl)
 	avmctrl_info *cinfo = (avmctrl_info *)(ctrl->driverdata);
 	avmcard *card = cinfo->card;
 	unsigned int port = card->port;
+	unsigned long flags;
 
 	b1_reset(port);
 	b1_reset(port);
 
 	memset(cinfo->version, 0, sizeof(cinfo->version));
+	spin_lock_irqsave(&card->lock, flags);
 	capilib_release(&cinfo->ncci_head);
-	capi_ctr_reseted(ctrl);
+	spin_unlock_irqrestore(&card->lock, flags);
+	capi_ctr_down(ctrl);
 }
 
 void b1_register_appl(struct capi_ctr *ctrl,
@@ -348,15 +350,14 @@ void b1_register_appl(struct capi_ctr *ctrl,
 	else nconn = ctrl->profile.nbchannel * -want;
 	if (nconn == 0) nconn = ctrl->profile.nbchannel;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&card->lock, flags);
 	b1_put_byte(port, SEND_REGISTER);
 	b1_put_word(port, appl);
 	b1_put_word(port, 1024 * (nconn+1));
 	b1_put_word(port, nconn);
 	b1_put_word(port, rp->datablkcnt);
 	b1_put_word(port, rp->datablklen);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&card->lock, flags);
 }
 
 void b1_release_appl(struct capi_ctr *ctrl, u16 appl)
@@ -366,13 +367,11 @@ void b1_release_appl(struct capi_ctr *ctrl, u16 appl)
 	unsigned int port = card->port;
 	unsigned long flags;
 
+	spin_lock_irqsave(&card->lock, flags);
 	capilib_release_appl(&cinfo->ncci_head, appl);
-
-	save_flags(flags);
-	cli();
 	b1_put_byte(port, SEND_RELEASE);
 	b1_put_word(port, appl);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&card->lock, flags);
 }
 
 u16 b1_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
@@ -386,34 +385,30 @@ u16 b1_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 	u8 subcmd = CAPIMSG_SUBCOMMAND(skb->data);
 	u16 dlen, retval;
 
+	spin_lock_irqsave(&card->lock, flags);
 	if (CAPICMD(cmd, subcmd) == CAPI_DATA_B3_REQ) {
 		retval = capilib_data_b3_req(&cinfo->ncci_head,
 					     CAPIMSG_APPID(skb->data),
 					     CAPIMSG_NCCI(skb->data),
 					     CAPIMSG_MSGID(skb->data));
-		if (retval != CAPI_NOERROR) 
-			goto out;
+		if (retval != CAPI_NOERROR) {
+			spin_unlock_irqrestore(&card->lock, flags);
+			return retval;
+		}
 
 		dlen = CAPIMSG_DATALEN(skb->data);
 
-		save_flags(flags);
-		cli();
 		b1_put_byte(port, SEND_DATA_B3_REQ);
 		b1_put_slice(port, skb->data, len);
 		b1_put_slice(port, skb->data + len, dlen);
-		restore_flags(flags);
 	} else {
-		retval = CAPI_NOERROR;
-
-		save_flags(flags);
-		cli();
 		b1_put_byte(port, SEND_MESSAGE);
 		b1_put_slice(port, skb->data, len);
-		restore_flags(flags);
 	}
- out:
+	spin_unlock_irqrestore(&card->lock, flags);
+
 	dev_kfree_skb_any(skb);
-	return retval;
+	return CAPI_NOERROR;
 }
 
 /* ------------------------------------------------------------- */
@@ -492,7 +487,7 @@ void b1_parse_version(avmctrl_info *cinfo)
 
 /* ------------------------------------------------------------- */
 
-irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
+irqreturn_t b1_interrupt(int interrupt, void *devptr)
 {
 	avmcard *card = devptr;
 	avmctrl_info *cinfo = &card->ctrlinfo[0];
@@ -505,9 +500,14 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 	unsigned DataB3Len;
 	unsigned NCCI;
 	unsigned WindowSize;
+	unsigned long flags;
 
-	if (!b1_rx_full(card->port))
-	   return IRQ_NONE;
+	spin_lock_irqsave(&card->lock, flags);
+
+	if (!b1_rx_full(card->port)) {
+		spin_unlock_irqrestore(&card->lock, flags);
+		return IRQ_NONE;
+	}
 
 	b1cmd = b1_get_byte(card->port);
 
@@ -518,6 +518,7 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 		ApplId = (unsigned) b1_get_word(card->port);
 		MsgLen = b1_get_slice(card->port, card->msgbuf);
 		DataB3Len = b1_get_slice(card->port, card->databuf);
+		spin_unlock_irqrestore(&card->lock, flags);
 
 		if (MsgLen < 30) { /* not CAPI 64Bit */
 			memset(card->msgbuf+MsgLen, 0, 30-MsgLen);
@@ -541,13 +542,14 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 		if (!(skb = alloc_skb(MsgLen, GFP_ATOMIC))) {
 			printk(KERN_ERR "%s: incoming packet dropped\n",
 					card->name);
+			spin_unlock_irqrestore(&card->lock, flags);
 		} else {
 			memcpy(skb_put(skb, MsgLen), card->msgbuf, MsgLen);
 			if (CAPIMSG_CMD(skb->data) == CAPI_DATA_B3_CONF)
 				capilib_data_b3_conf(&cinfo->ncci_head, ApplId,
 						     CAPIMSG_NCCI(skb->data),
 						     CAPIMSG_MSGID(skb->data));
-
+			spin_unlock_irqrestore(&card->lock, flags);
 			capi_ctr_handle_message(ctrl, ApplId, skb);
 		}
 		break;
@@ -557,33 +559,34 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 		ApplId = b1_get_word(card->port);
 		NCCI = b1_get_word(card->port);
 		WindowSize = b1_get_word(card->port);
-
 		capilib_new_ncci(&cinfo->ncci_head, ApplId, NCCI, WindowSize);
-
+		spin_unlock_irqrestore(&card->lock, flags);
 		break;
 
 	case RECEIVE_FREE_NCCI:
 
 		ApplId = b1_get_word(card->port);
 		NCCI = b1_get_word(card->port);
-
 		if (NCCI != 0xffffffff)
 			capilib_free_ncci(&cinfo->ncci_head, ApplId, NCCI);
-	       
+		spin_unlock_irqrestore(&card->lock, flags);
 		break;
 
 	case RECEIVE_START:
 	   	/* b1_put_byte(card->port, SEND_POLLACK); */
+		spin_unlock_irqrestore(&card->lock, flags);
 		capi_ctr_resume_output(ctrl);
 		break;
 
 	case RECEIVE_STOP:
+		spin_unlock_irqrestore(&card->lock, flags);
 		capi_ctr_suspend_output(ctrl);
 		break;
 
 	case RECEIVE_INIT:
 
 		cinfo->versionlen = b1_get_slice(card->port, cinfo->versionbuf);
+		spin_unlock_irqrestore(&card->lock, flags);
 		b1_parse_version(cinfo);
 		printk(KERN_INFO "%s: %s-card (%s) now active\n",
 		       card->name,
@@ -595,6 +598,7 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 	case RECEIVE_TASK_READY:
 		ApplId = (unsigned) b1_get_word(card->port);
 		MsgLen = b1_get_slice(card->port, card->msgbuf);
+		spin_unlock_irqrestore(&card->lock, flags);
 		card->msgbuf[MsgLen] = 0;
 		while (    MsgLen > 0
 		       && (   card->msgbuf[MsgLen-1] == '\n'
@@ -608,6 +612,7 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 
 	case RECEIVE_DEBUGMSG:
 		MsgLen = b1_get_slice(card->port, card->msgbuf);
+		spin_unlock_irqrestore(&card->lock, flags);
 		card->msgbuf[MsgLen] = 0;
 		while (    MsgLen > 0
 		       && (   card->msgbuf[MsgLen-1] == '\n'
@@ -619,9 +624,11 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 		break;
 
 	case 0xff:
+		spin_unlock_irqrestore(&card->lock, flags);
 		printk(KERN_ERR "%s: card removed ?\n", card->name);
 		return IRQ_NONE;
 	default:
+		spin_unlock_irqrestore(&card->lock, flags);
 		printk(KERN_ERR "%s: b1_interrupt: 0x%x ???\n",
 				card->name, b1cmd);
 		return IRQ_HANDLED;
@@ -630,18 +637,17 @@ irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 }
 
 /* ------------------------------------------------------------- */
-int b1ctl_read_proc(char *page, char **start, off_t off,
-        		int count, int *eof, struct capi_ctr *ctrl)
+static int b1ctl_proc_show(struct seq_file *m, void *v)
 {
+	struct capi_ctr *ctrl = m->private;
 	avmctrl_info *cinfo = (avmctrl_info *)(ctrl->driverdata);
 	avmcard *card = cinfo->card;
 	u8 flag;
-	int len = 0;
 	char *s;
 
-	len += sprintf(page+len, "%-16s %s\n", "name", card->name);
-	len += sprintf(page+len, "%-16s 0x%x\n", "io", card->port);
-	len += sprintf(page+len, "%-16s %d\n", "irq", card->irq);
+	seq_printf(m, "%-16s %s\n", "name", card->name);
+	seq_printf(m, "%-16s 0x%x\n", "io", card->port);
+	seq_printf(m, "%-16s %d\n", "irq", card->irq);
 	switch (card->cardtype) {
 	case avm_b1isa: s = "B1 ISA"; break;
 	case avm_b1pci: s = "B1 PCI"; break;
@@ -654,20 +660,20 @@ int b1ctl_read_proc(char *page, char **start, off_t off,
 	case avm_c2: s = "C2"; break;
 	default: s = "???"; break;
 	}
-	len += sprintf(page+len, "%-16s %s\n", "type", s);
+	seq_printf(m, "%-16s %s\n", "type", s);
 	if (card->cardtype == avm_t1isa)
-	   len += sprintf(page+len, "%-16s %d\n", "cardnr", card->cardnr);
-	if ((s = cinfo->version[VER_DRIVER]) != 0)
-	   len += sprintf(page+len, "%-16s %s\n", "ver_driver", s);
-	if ((s = cinfo->version[VER_CARDTYPE]) != 0)
-	   len += sprintf(page+len, "%-16s %s\n", "ver_cardtype", s);
-	if ((s = cinfo->version[VER_SERIAL]) != 0)
-	   len += sprintf(page+len, "%-16s %s\n", "ver_serial", s);
+		seq_printf(m, "%-16s %d\n", "cardnr", card->cardnr);
+	if ((s = cinfo->version[VER_DRIVER]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_driver", s);
+	if ((s = cinfo->version[VER_CARDTYPE]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_cardtype", s);
+	if ((s = cinfo->version[VER_SERIAL]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_serial", s);
 
 	if (card->cardtype != avm_m1) {
         	flag = ((u8 *)(ctrl->profile.manu))[3];
         	if (flag)
-			len += sprintf(page+len, "%-16s%s%s%s%s%s%s%s\n",
+			seq_printf(m, "%-16s%s%s%s%s%s%s%s\n",
 			"protocol",
 			(flag & 0x01) ? " DSS1" : "",
 			(flag & 0x02) ? " CT1" : "",
@@ -681,7 +687,7 @@ int b1ctl_read_proc(char *page, char **start, off_t off,
 	if (card->cardtype != avm_m1) {
         	flag = ((u8 *)(ctrl->profile.manu))[5];
 		if (flag)
-			len += sprintf(page+len, "%-16s%s%s%s%s\n",
+			seq_printf(m, "%-16s%s%s%s%s\n",
 			"linetype",
 			(flag & 0x01) ? " point to point" : "",
 			(flag & 0x02) ? " point to multipoint" : "",
@@ -689,15 +695,24 @@ int b1ctl_read_proc(char *page, char **start, off_t off,
 			(flag & 0x04) ? " leased line with D-channel" : ""
 			);
 	}
-	len += sprintf(page+len, "%-16s %s\n", "cardname", cinfo->cardname);
+	seq_printf(m, "%-16s %s\n", "cardname", cinfo->cardname);
 
-	if (off+count >= len)
-	   *eof = 1;
-	if (len < off)
-           return 0;
-	*start = page + off;
-	return ((count < len-off) ? count : len-off);
+	return 0;
 }
+
+static int b1ctl_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, b1ctl_proc_show, PDE(inode)->data);
+}
+
+const struct file_operations b1ctl_proc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= b1ctl_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+EXPORT_SYMBOL(b1ctl_proc_fops);
 
 /* ------------------------------------------------------------- */
 
@@ -709,12 +724,11 @@ avmcard_dma_alloc(char *name, struct pci_dev *pdev, long rsize, long ssize)
 	avmcard_dmainfo *p;
 	void *buf;
 
-	p = kmalloc(sizeof(avmcard_dmainfo), GFP_KERNEL);
+	p = kzalloc(sizeof(avmcard_dmainfo), GFP_KERNEL);
 	if (!p) {
 		printk(KERN_WARNING "%s: no memory.\n", name);
 		goto err;
 	}
-	memset(p, 0, sizeof(avmcard_dmainfo));
 
 	p->recvbuf.size = rsize;
 	buf = pci_alloc_consistent(pdev, rsize, &p->recvbuf.dmaaddr);
@@ -742,7 +756,7 @@ avmcard_dma_alloc(char *name, struct pci_dev *pdev, long rsize, long ssize)
  err_kfree:
 	kfree(p);
  err:
-	return 0;
+	return NULL;
 }
 
 void avmcard_dma_free(avmcard_dmainfo *p)
@@ -778,16 +792,14 @@ EXPORT_SYMBOL(b1_send_message);
 EXPORT_SYMBOL(b1_parse_version);
 EXPORT_SYMBOL(b1_interrupt);
 
-EXPORT_SYMBOL(b1ctl_read_proc);
-
 static int __init b1_init(void)
 {
 	char *p;
 	char rev[32];
 
-	if ((p = strchr(revision, ':')) != 0 && p[1]) {
+	if ((p = strchr(revision, ':')) != NULL && p[1]) {
 		strlcpy(rev, p + 2, 32);
-		if ((p = strchr(rev, '$')) != 0 && p > rev)
+		if ((p = strchr(rev, '$')) != NULL && p > rev)
 		   *(p-1) = 0;
 	} else
 		strcpy(rev, "1.0");

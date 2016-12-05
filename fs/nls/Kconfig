@@ -1,21 +1,21 @@
 #
 # Native language support configuration
 #
-# smb wants NLS
-config SMB_NLS
-	bool
-	depends on SMB_FS
-	default y
 
-# msdos and Joliet want NLS
-config NLS
-	bool
-	depends on JOLIET || FAT_FS || NTFS_FS || NCPFS_NLS || SMB_NLS || JFS_FS || CIFS || BEFS_FS
-	default y
+menuconfig NLS
+	tristate "Native language support"
+	---help---
+	  The base Native Language Support. A number of filesystems
+	  depend on it (e.g. FAT, JOLIET, NT, BEOS filesystems), as well
+	  as the ability of some filesystems to use native languages
+	  (NCP, SMB).
 
+	  If unsure, say Y.
 
-menu "Native Language Support"
-	depends on NLS
+	  To compile this code as a module, choose M here: the module
+	  will be called nls_base.
+
+if NLS
 
 config NLS_DEFAULT
 	string "Default NLS Option"
@@ -308,6 +308,13 @@ config NLS_CODEPAGE_1251
 	  say Y here if you want to include the DOS codepage for Russian and
 	  Bulgarian and Belarusian.
 
+config NLS_ASCII
+	tristate "ASCII (United States)"
+	help
+	  An ASCII NLS module is needed if you want to override the
+	  DEFAULT NLS with this very basic charset and don't want any
+	  non-ASCII characters to be translated.
+
 config NLS_ISO8859_1
 	tristate "NLS ISO 8859-1  (Latin 1; Western European Languages)"
 	help
@@ -446,7 +453,7 @@ config NLS_KOI8_U
 	  (koi8-u) and Belarusian (koi8-ru) character sets.
 
 config NLS_UTF8
-	tristate "NLS UTF8"
+	tristate "NLS UTF-8"
 	help
 	  If you want to display filenames with native language characters
 	  from the Microsoft FAT file system family or from JOLIET CD-ROMs
@@ -454,5 +461,4 @@ config NLS_UTF8
 	  input/output character sets. Say Y here for the UTF-8 encoding of
 	  the Unicode/ISO9646 universal character set.
 
-endmenu
-
+endif # NLS

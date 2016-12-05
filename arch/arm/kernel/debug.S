@@ -1,5 +1,5 @@
 /*
- *  linux/arch/arm/kernel/debug-armv.S
+ *  linux/arch/arm/kernel/debug.S
  *
  *  Copyright (C) 1994-1999 Russell King
  *
@@ -9,9 +9,7 @@
  *
  *  32-bit debugging code
  */
-#include <linux/config.h>
 #include <linux/linkage.h>
-#include <asm/hardware.h>
 
 		.text
 
@@ -20,456 +18,107 @@
  * printk isn't working).  For DEBUGGING ONLY!!!  Do not leave
  * references to these in a production kernel!
  */
-#if defined(CONFIG_ARCH_RPC)
-		.macro	addruart,rx
-		mov	\rx, #0xe0000000
-		orr	\rx, \rx, #0x00010000
-		orr	\rx, \rx, #0x00000fe0
+
+#if defined(CONFIG_DEBUG_ICEDCC)
+		@@ debug using ARM EmbeddedICE DCC channel
+
+		.macro	addruart, rp, rv
 		.endm
 
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx]
+#if defined(CONFIG_CPU_V6) || defined(CONFIG_CPU_V6K) || defined(CONFIG_CPU_V7)
+
+		.macro	senduart, rd, rx
+		mcr	p14, 0, \rd, c0, c5, 0
 		.endm
 
-		.macro	busyuart,rd,rx
-1001:		ldrb	\rd, [\rx, #0x14]
-		and	\rd, \rd, #0x60
-		teq	\rd, #0x60
-		bne	1001b
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldrb	\rd, [\rx, #0x18]
-		tst	\rd, #0x10
+		.macro	busyuart, rd, rx
+1001:
+		mrc	p14, 0, \rx, c0, c1, 0
+		tst	\rx, #0x20000000
 		beq	1001b
 		.endm
 
-#elif defined(CONFIG_ARCH_EBSA110)
-		.macro	addruart,rx
-		mov	\rx, #0xf0000000
-		orr	\rx, \rx, #0x00000be0
-		.endm
-
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx]
-		.endm
-
-		.macro	busyuart,rd,rx
-1002:		ldrb	\rd, [\rx, #0x14]
-		and	\rd, \rd, #0x60
-		teq	\rd, #0x60
-		bne	1002b
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldrb	\rd, [\rx, #0x18]
-		tst	\rd, #0x10
-		beq	1001b
-		.endm
- 	
-#elif defined(CONFIG_ARCH_SHARK)
-		.macro	addruart,rx
-		mov	\rx, #0xe0000000
-		orr	\rx, \rx, #0x000003f8
-		.endm
-
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx]
-		.endm
-
-		.macro	busyuart,rd,rx
-		mov	\rd, #0
-1001:		add	\rd, \rd, #1
-		teq	\rd, #0x10000
-		bne	1001b
-		.endm
-
-		.macro	waituart,rd,rx
-		.endm
-
-#elif defined(CONFIG_FOOTBRIDGE)
-
-#include <asm/hardware/dec21285.h>
-
-#ifndef CONFIG_DEBUG_DC21285_PORT
-	/* For NetWinder debugging */
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		moveq	\rx, #0x7c000000	@ physical
-		movne	\rx, #0xff000000	@ virtual
-		orr	\rx, \rx, #0x000003f8
-		.endm
-
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx]
-		.endm
-
-		.macro	busyuart,rd,rx
-1002:		ldrb	\rd, [\rx, #0x5]
-		and	\rd, \rd, #0x60
-		teq	\rd, #0x60
-		bne	1002b
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldrb	\rd, [\rx, #0x6]
-		tst	\rd, #0x10
-		beq	1001b
-		.endm
-#else
-	/* For EBSA285 debugging */
-		.equ	dc21285_high, ARMCSR_BASE & 0xff000000
-		.equ	dc21285_low,  ARMCSR_BASE & 0x00ffffff
-
-		.macro	addruart,rx
-		mov	\rx, #dc21285_high
-		.if	dc21285_low
-		orr	\rx, \rx, #dc21285_low
-		.endif
-		.endm
-
-		.macro	senduart,rd,rx
-		str	\rd, [\rx, #0x160]	@ UARTDR
-		.endm
-
-		.macro	busyuart,rd,rx
-1001:		ldr	\rd, [\rx, #0x178]	@ UARTFLG
-		tst	\rd, #1 << 3
-		bne	1001b
-		.endm
-
-		.macro	waituart,rd,rx
-		.endm
-#endif
-#elif defined(CONFIG_ARCH_FTVPCI)
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		movne	\rx, #0xe0000000
-		moveq	\rx, #0x10000000
-		.endm
-
-		.macro	senduart,rd,rx
-		str	\rd, [\rx, #0xc]
-		.endm
-
-		.macro	busyuart,rd,rx
-1001:		ldr	\rd, [\rx, #0x4]
-		tst	\rd, #1 << 2
-		beq	1001b
-		.endm
-
-		.macro	waituart,rd,rx
-		.endm
-
-#elif defined(CONFIG_ARCH_SA1100)
-
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		moveq	\rx, #0x80000000	@ physical base address
-		movne	\rx, #0xf8000000	@ virtual address
-
-		@ We probe for the active serial port here, coherently with
-		@ the comment in include/asm-arm/arch-sa1100/uncompress.h.
-		@ We assume r1 can be clobbered.
-
-		@ see if Ser3 is active
-		add	\rx, \rx, #0x00050000
-		ldr	r1, [\rx, #UTCR3]
-		tst	r1, #UTCR3_TXE
-
-		@ if Ser3 is inactive, then try Ser1
-		addeq	\rx, \rx, #(0x00010000 - 0x00050000)
-		ldreq	r1, [\rx, #UTCR3]
-		tsteq	r1, #UTCR3_TXE
-
-		@ if Ser1 is inactive, then try Ser2
-		addeq	\rx, \rx, #(0x00030000 - 0x00010000)
-		ldreq	r1, [\rx, #UTCR3]
-		tsteq	r1, #UTCR3_TXE
-
-		@ if all ports are inactive, then there is nothing we can do
-		moveq	pc, lr
-		.endm
-
-		.macro	senduart,rd,rx
-		str	\rd, [\rx, #UTDR]
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldr	\rd, [\rx, #UTSR1]
-		tst	\rd, #UTSR1_TNF
-		beq	1001b
-		.endm
-
-		.macro	busyuart,rd,rx
-1001:		ldr	\rd, [\rx, #UTSR1]
-		tst	\rd, #UTSR1_TBY
-		bne	1001b
-		.endm
-
-#elif defined(CONFIG_ARCH_PXA)
-
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		moveq	\rx, #0x40000000		@ physical
-		movne	\rx, #io_p2v(0x40000000)	@ virtual
-		orr	\rx, \rx, #0x00100000
-		.endm
-
-		.macro	senduart,rd,rx
-		str	\rd, [\rx, #0]
-		.endm
-
-		.macro	busyuart,rd,rx
-1002:		ldr	\rd, [\rx, #0x14]
-		tst	\rd, #(1 << 6)
-		beq	1002b
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldr	\rd, [\rx, #0x14]
-		tst	\rd, #(1 << 5)
-		beq	1001b
-		.endm
-#elif defined(CONFIG_ARCH_CLPS7500)
-		.macro	addruart,rx
-		mov	\rx, #0xe0000000
-		orr	\rx, \rx, #0x00010000
-		orr	\rx, \rx, #0x00000be0
-		.endm
-
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx]
-		.endm
-
-		.macro	busyuart,rd,rx
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldrb	\rd, [\rx, #0x14]
-		tst	\rd, #0x20
-		beq	1001b
-		.endm
-
-#elif defined(CONFIG_ARCH_L7200)
-
-		.equ	io_virt, IO_BASE
-		.equ	io_phys, IO_START
-
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		moveq	\rx, #io_phys		@ physical base address
-		movne	\rx, #io_virt		@ virtual address
-		add	\rx, \rx, #0x00044000	@ UART1
-@		add	\rx, \rx, #0x00045000	@ UART2
-		.endm
-
-		.macro	senduart,rd,rx
-		str	\rd, [\rx, #0x0]	@ UARTDR
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldr	\rd, [\rx, #0x18]	@ UARTFLG
-		tst	\rd, #1 << 5		@ UARTFLGUTXFF - 1 when full
-		bne	1001b
-		.endm
-
-		.macro	busyuart,rd,rx
-1001:		ldr	\rd, [\rx, #0x18]	@ UARTFLG
-		tst	\rd, #1 << 3		@ UARTFLGUBUSY - 1 when busy
-		bne	1001b
-		.endm
-
-#elif defined(CONFIG_ARCH_INTEGRATOR)
-
-#include <asm/hardware/serial_amba.h>
-
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		moveq	\rx, #0x16000000	@ physical base address
-		movne	\rx, #0xf0000000	@ virtual base
-		addne	\rx, \rx, #0x16000000 >> 4
-		.endm
-
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx, #AMBA_UARTDR]
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldr	\rd, [\rx, #0x18]	@ UARTFLG
-		tst	\rd, #1 << 5		@ UARTFLGUTXFF - 1 when full
-		bne	1001b
-		.endm
-
-		.macro	busyuart,rd,rx
-1001:		ldr	\rd, [\rx, #0x18]	@ UARTFLG
-		tst	\rd, #1 << 3		@ UARTFLGUBUSY - 1 when busy
-		bne	1001b
-		.endm
-
-#elif defined(CONFIG_ARCH_CLPS711X)
-
-#include <asm/hardware/clps7111.h>
-
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		moveq	\rx, #CLPS7111_PHYS_BASE
-		movne	\rx, #CLPS7111_VIRT_BASE
-#ifndef CONFIG_DEBUG_CLPS711X_UART2
-		add	\rx, \rx, #0x0000	@ UART1
-#else
-		add	\rx, \rx, #0x1000	@ UART2
-#endif
-		.endm
-
-		.macro	senduart,rd,rx
-		str	\rd, [\rx, #0x0480]	@ UARTDR
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldr	\rd, [\rx, #0x0140]	@ SYSFLGx
-		tst	\rd, #1 << 11		@ UBUSYx
-		bne	1001b
-		.endm
-
-		.macro	busyuart,rd,rx
-		tst	\rx, #0x1000		@ UART2 does not have CTS here
-		bne	1002f
-1001:		ldr	\rd, [\rx, #0x0140]	@ SYSFLGx
-		tst	\rd, #1 << 8		@ CTS
+		.macro	waituart, rd, rx
+		mov	\rd, #0x2000000
+1001:
+		subs	\rd, \rd, #1
+		bmi	1002f
+		mrc	p14, 0, \rx, c0, c1, 0
+		tst	\rx, #0x20000000
 		bne	1001b
 1002:
 		.endm
 
-#elif defined(CONFIG_ARCH_ANAKIN)
+#elif defined(CONFIG_CPU_XSCALE)
 
-//#//include <asm/arch/serial_reg.h>
-
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		moveq	\rx, #IO_START
-		movne	\rx, #IO_BASE
-		add	\rx, \rx, #UART0
+		.macro	senduart, rd, rx
+		mcr	p14, 0, \rd, c8, c0, 0
 		.endm
 
-		.macro	senduart,rd,rx
-		str	\rd, [\rx, #0x14]	@ tx
-		ldr	\rd, [\rx, #0x18]
-		orr	\rd, \rd, #SENDREQUEST
-		str	\rd, [\rx, #0x18]
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldr	\rd, [\rx, #0x10]
-		tst	\rd, #TXEMPTY
+		.macro	busyuart, rd, rx
+1001:
+		mrc	p14, 0, \rx, c14, c0, 0
+		tst	\rx, #0x10000000
 		beq	1001b
 		.endm
 
-		.macro	busyuart,rd,rx
-1001:		ldr	\rd, [\rx, #0x10]
-		tst	\rd, #CTS
+		.macro	waituart, rd, rx
+		mov	\rd, #0x10000000
+1001:
+		subs	\rd, \rd, #1
+		bmi	1002f
+		mrc	p14, 0, \rx, c14, c0, 0
+		tst	\rx, #0x10000000
 		bne	1001b
+1002:
 		.endm
 
-#elif defined(CONFIG_ARCH_CAMELOT)
+#else
 
-#include <asm/arch/excalibur.h>
-#define UART00_TYPE
-#include <asm/arch/uart00.h>
-
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		ldr	\rx, =EXC_UART00_BASE	@ physical base address
-		orrne	\rx, \rx, #0xff000000	@ virtual base
-		orrne	\rx, \rx, #0x00f00000	
+		.macro	senduart, rd, rx
+		mcr	p14, 0, \rd, c1, c0, 0
 		.endm
 
-		.macro	senduart,rd,rx
-		str	\rd, [\rx, #UART_TD(0)]
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldr	\rd, [\rx, #UART_TSR(0)]
-		and 	\rd, \rd,  #UART_TSR_TX_LEVEL_MSK
-		cmp	\rd, #15
+		.macro	busyuart, rd, rx
+1001:
+		mrc	p14, 0, \rx, c0, c0, 0
+		tst	\rx, #2
 		beq	1001b
+
 		.endm
 
-		.macro	busyuart,rd,rx
-1001:		ldr	\rd, [\rx, #UART_TSR(0)]
-		ands 	\rd, \rd,  #UART_TSR_TX_LEVEL_MSK
+		.macro	waituart, rd, rx
+		mov	\rd, #0x2000000
+1001:
+		subs	\rd, \rd, #1
+		bmi	1002f
+		mrc	p14, 0, \rx, c0, c0, 0
+		tst	\rx, #2
 		bne	1001b
+1002:
 		.endm
 
-#elif defined(CONFIG_ARCH_IOP3XX)
+#endif	/* CONFIG_CPU_V6 */
 
-		.macro	addruart,rx
-		mov	\rx, #0xfe000000	@ physical
-#ifdef CONFIG_ARCH_IQ80310
-		orr	\rx, \rx, #0x00810000	@ location of the UART
-#elif defined(CONFIG_ARCH_IQ80321)
-		orr	\rx, \rx, #0x00800000	@ location of the UART
 #else
-#error Unknown IOP3XX implementation
-#endif
+#include <mach/debug-macro.S>
+#endif	/* CONFIG_DEBUG_ICEDCC */
+
+#ifdef CONFIG_MMU
+		.macro	addruart_current, rx, tmp1, tmp2
+		addruart	\tmp1, \tmp2
+		mrc		p15, 0, \rx, c1, c0
+		tst		\rx, #1
+		moveq		\rx, \tmp1
+		movne		\rx, \tmp2
 		.endm
 
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx]
+#else /* !CONFIG_MMU */
+		.macro	addruart_current, rx, tmp1, tmp2
+		addruart	\rx, \tmp1
 		.endm
 
-		.macro	busyuart,rd,rx
-1002:		ldrb	\rd, [\rx, #0x5]
-		and	\rd, \rd, #0x60
-		teq	\rd, #0x60
-		bne	1002b
-		.endm
-
-		.macro	waituart,rd,rx
-#ifndef	CONFIG_ARCH_IQ80321
-1001:		ldrb	\rd, [\rx, #0x6]
-		tst	\rd, #0x10
-		beq	1001b
-#endif
-		.endm
-
-#elif defined(CONFIG_ARCH_ADI_EVB)
-
-		.macro	addruart,rx
-		mrc	p15, 0, \rx, c1, c0
-		tst	\rx, #1			@ MMU enabled?
-		mov	\rx, #0x00400000	@ physical base address
-		orrne	\rx, \rx, #0xff000000	@ virtual base
-		.endm
-
-		.macro	senduart,rd,rx
-		strb	\rd, [\rx]
-		.endm
-
-		.macro	busyuart,rd,rx
-1002:		ldrb	\rd, [\rx, #0x5]
-		and	\rd, \rd, #0x60
-		teq	\rd, #0x60
-		bne	1002b
-		.endm
-
-		.macro	waituart,rd,rx
-1001:		ldrb	\rd, [\rx, #0x6]
-		tst	\rd, #0x10
-		beq	1001b
-		.endm
-#else
-#error Unknown architecture
-#endif
+#endif /* CONFIG_MMU */
 
 /*
  * Useful debugging routines
@@ -477,10 +126,12 @@
 ENTRY(printhex8)
 		mov	r1, #8
 		b	printhex
+ENDPROC(printhex8)
 
 ENTRY(printhex4)
 		mov	r1, #4
 		b	printhex
+ENDPROC(printhex4)
 
 ENTRY(printhex2)
 		mov	r1, #2
@@ -498,11 +149,12 @@ printhex:	adr	r2, hexbuf
 		bne	1b
 		mov	r0, r2
 		b	printascii
+ENDPROC(printhex2)
 
 		.ltorg
 
 ENTRY(printascii)
-		addruart r3
+		addruart_current r3, r1, r2
 		b	2f
 1:		waituart r2, r3
 		senduart r1, r3
@@ -515,11 +167,13 @@ ENTRY(printascii)
 		teqne	r1, #0
 		bne	1b
 		mov	pc, lr
+ENDPROC(printascii)
 
 ENTRY(printch)
-		addruart r3
+		addruart_current r3, r1, r2
 		mov	r1, r0
 		mov	r0, #0
 		b	1b
+ENDPROC(printch)
 
 hexbuf:		.space 16

@@ -20,35 +20,37 @@
 #include <linux/fs.h>
 #include <linux/jbd.h>
 #include <linux/ext3_fs.h>
+#include <linux/namei.h>
 #include "xattr.h"
 
-static int
-ext3_readlink(struct dentry *dentry, char __user *buffer, int buflen)
+static void * ext3_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	struct ext3_inode_info *ei = EXT3_I(dentry->d_inode);
-	return vfs_readlink(dentry, buffer, buflen, (char*)ei->i_data);
+	nd_set_link(nd, (char*)ei->i_data);
+	return NULL;
 }
 
-static int ext3_follow_link(struct dentry *dentry, struct nameidata *nd)
-{
-	struct ext3_inode_info *ei = EXT3_I(dentry->d_inode);
-	return vfs_follow_link(nd, (char*)ei->i_data);
-}
-
-struct inode_operations ext3_symlink_inode_operations = {
-	.readlink	= page_readlink,
-	.follow_link	= page_follow_link,
-	.setxattr	= ext3_setxattr,
-	.getxattr	= ext3_getxattr,
+const struct inode_operations ext3_symlink_inode_operations = {
+	.readlink	= generic_readlink,
+	.follow_link	= page_follow_link_light,
+	.put_link	= page_put_link,
+	.setattr	= ext3_setattr,
+#ifdef CONFIG_EXT3_FS_XATTR
+	.setxattr	= generic_setxattr,
+	.getxattr	= generic_getxattr,
 	.listxattr	= ext3_listxattr,
-	.removexattr	= ext3_removexattr,
+	.removexattr	= generic_removexattr,
+#endif
 };
 
-struct inode_operations ext3_fast_symlink_inode_operations = {
-	.readlink	= ext3_readlink,	/* BKL not held.  Don't need */
-	.follow_link	= ext3_follow_link,	/* BKL not held.  Don't need */
-	.setxattr	= ext3_setxattr,
-	.getxattr	= ext3_getxattr,
+const struct inode_operations ext3_fast_symlink_inode_operations = {
+	.readlink	= generic_readlink,
+	.follow_link	= ext3_follow_link,
+	.setattr	= ext3_setattr,
+#ifdef CONFIG_EXT3_FS_XATTR
+	.setxattr	= generic_setxattr,
+	.getxattr	= generic_getxattr,
 	.listxattr	= ext3_listxattr,
-	.removexattr	= ext3_removexattr,
+	.removexattr	= generic_removexattr,
+#endif
 };

@@ -53,7 +53,7 @@
 // is redefined by linux, but we need our definition
 #undef ADDR
 #ifdef MEM_MAPPED_IO
-#define	ADDR(a) (char far *) smc->hw.iop+(a)
+#define	ADDR(a) (smc->hw.iop+(a))
 #else
 #define	ADDR(a) (((a)>>7) ? (outp(smc->hw.iop+B0_RAP,(a)>>7), (smc->hw.iop+( ((a)&0x7F) | ((a)>>7 ? 0x80:0)) )) : (smc->hw.iop+(((a)&0x7F)|((a)>>7 ? 0x80:0))))
 #endif
@@ -110,7 +110,7 @@
 struct s_skfp_ioctl {
 	unsigned short cmd;                /* Command to run */
 	unsigned short len;                /* Length of the data buffer */
-	unsigned char  *data;              /* Pointer to the data buffer */
+	unsigned char __user *data;        /* Pointer to the data buffer */
 };
 
 /* 

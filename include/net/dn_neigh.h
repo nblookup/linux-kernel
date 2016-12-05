@@ -7,18 +7,17 @@
  */
 struct dn_neigh {
         struct neighbour n;
-	dn_address addr;
+	__le16 addr;
         unsigned long flags;
 #define DN_NDFLAG_R1    0x0001 /* Router L1      */
 #define DN_NDFLAG_R2    0x0002 /* Router L2      */
 #define DN_NDFLAG_P3    0x0004 /* Phase III Node */
         unsigned long blksize;
-	unsigned char priority;
+	__u8 priority;
 };
 
 extern void dn_neigh_init(void);
 extern void dn_neigh_cleanup(void);
-extern struct neighbour *dn_neigh_lookup(struct neigh_table *tbl, const void *ptr);
 extern int dn_neigh_router_hello(struct sk_buff *skb);
 extern int dn_neigh_endnode_hello(struct sk_buff *skb);
 extern void dn_neigh_pointopoint_hello(struct sk_buff *skb);

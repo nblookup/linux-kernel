@@ -1,19 +1,19 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
- *   Portions Copyright (c) Christoph Hellwig, 2001-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2004
+ *   Portions Copyright (C) Christoph Hellwig, 2001-2002
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or 
+ *   the Free Software Foundation; either version 2 of the License, or
  *   (at your option) any later version.
- * 
+ *
  *   This program is distributed in the hope that it will be useful,
  *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
  *   the GNU General Public License for more details.
  *
  *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software 
+ *   along with this program;  if not, write to the Free Software
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
@@ -21,7 +21,10 @@
 #include <linux/mpage.h>
 #include <linux/buffer_head.h>
 #include <linux/pagemap.h>
+#include <linux/quotaops.h>
+#include <linux/writeback.h>
 #include "jfs_incore.h"
+#include "jfs_inode.h"
 #include "jfs_filsys.h"
 #include "jfs_imap.h"
 #include "jfs_extent.h"
@@ -29,19 +32,21 @@
 #include "jfs_debug.h"
 
 
-extern struct inode_operations jfs_dir_inode_operations;
-extern struct inode_operations jfs_file_inode_operations;
-extern struct inode_operations jfs_symlink_inode_operations;
-extern struct file_operations jfs_dir_operations;
-extern struct file_operations jfs_file_operations;
-struct address_space_operations jfs_aops;
-extern int freeZeroLink(struct inode *);
-
-void jfs_read_inode(struct inode *inode)
+struct inode *jfs_iget(struct super_block *sb, unsigned long ino)
 {
-	if (diRead(inode)) { 
-		make_bad_inode(inode);
-		return;
+	struct inode *inode;
+	int ret;
+
+	inode = iget_locked(sb, ino);
+	if (!inode)
+		return ERR_PTR(-ENOMEM);
+	if (!(inode->i_state & I_NEW))
+		return inode;
+
+	ret = diRead(inode);
+	if (ret < 0) {
+		iget_failed(inode);
+		return ERR_PTR(ret);
 	}
 
 	if (S_ISREG(inode->i_mode)) {
@@ -51,18 +56,24 @@ void jfs_read_inode(struct inode *inode)
 	} else if (S_ISDIR(inode->i_mode)) {
 		inode->i_op = &jfs_dir_inode_operations;
 		inode->i_fop = &jfs_dir_operations;
-		inode->i_mapping->a_ops = &jfs_aops;
-		mapping_set_gfp_mask(inode->i_mapping, GFP_NOFS);
 	} else if (S_ISLNK(inode->i_mode)) {
 		if (inode->i_size >= IDATASIZE) {
 			inode->i_op = &page_symlink_inode_operations;
 			inode->i_mapping->a_ops = &jfs_aops;
-		} else
-			inode->i_op = &jfs_symlink_inode_operations;
+		} else {
+			inode->i_op = &jfs_fast_symlink_inode_operations;
+			/*
+			 * The inline data should be null-terminated, but
+			 * don't let on-disk corruption crash the kernel
+			 */
+			JFS_IP(inode)->i_inline[inode->i_size] = '\0';
+		}
 	} else {
 		inode->i_op = &jfs_file_inode_operations;
 		init_special_inode(inode, inode->i_mode, inode->i_rdev);
 	}
+	unlock_new_inode(inode);
+	return inode;
 }
 
 /*
@@ -80,8 +91,7 @@ int jfs_commit_inode(struct inode *inode, int wait)
 	 * Don't commit if inode has been committed since last being
 	 * marked dirty, or if it has been deleted.
 	 */
-	if (test_cflag(COMMIT_Nolink, inode) ||
-	    !test_cflag(COMMIT_Dirty, inode))
+	if (inode->i_nlink == 0 || !test_cflag(COMMIT_Dirty, inode))
 		return 0;
 
 	if (isReadOnly(inode)) {
@@ -98,17 +108,25 @@ int jfs_commit_inode(struct inode *inode, int wait)
 	}
 
 	tid = txBegin(inode->i_sb, COMMIT_INODE);
-	down(&JFS_IP(inode)->commit_sem);
-	rc = txCommit(tid, 1, &inode, wait ? COMMIT_SYNC : 0);
+	mutex_lock(&JFS_IP(inode)->commit_mutex);
+
+	/*
+	 * Retest inode state after taking commit_mutex
+	 */
+	if (inode->i_nlink && test_cflag(COMMIT_Dirty, inode))
+		rc = txCommit(tid, 1, &inode, wait ? COMMIT_SYNC : 0);
+
 	txEnd(tid);
-	up(&JFS_IP(inode)->commit_sem);
+	mutex_unlock(&JFS_IP(inode)->commit_mutex);
 	return rc;
 }
 
-void jfs_write_inode(struct inode *inode, int wait)
+int jfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
+	int wait = wbc->sync_mode == WB_SYNC_ALL;
+
 	if (test_cflag(COMMIT_Nolink, inode))
-		return;
+		return 0;
 	/*
 	 * If COMMIT_DIRTY is not set, the inode isn't really dirty.
 	 * It has been committed since the last change, but was still
@@ -117,24 +135,42 @@ void jfs_write_inode(struct inode *inode, int wait)
 	 if (!test_cflag(COMMIT_Dirty, inode)) {
 		/* Make sure committed changes hit the disk */
 		jfs_flush_journal(JFS_SBI(inode->i_sb)->log, wait);
-		return;
+		return 0;
 	 }
 
 	if (jfs_commit_inode(inode, wait)) {
 		jfs_err("jfs_write_inode: jfs_commit_inode failed!");
-	}
+		return -EIO;
+	} else
+		return 0;
 }
 
-void jfs_delete_inode(struct inode *inode)
+void jfs_evict_inode(struct inode *inode)
 {
-	jfs_info("In jfs_delete_inode, inode = 0x%p", inode);
+	jfs_info("In jfs_evict_inode, inode = 0x%p", inode);
 
-	if (test_cflag(COMMIT_Freewmap, inode))
-		freeZeroLink(inode);
+	if (!inode->i_nlink && !is_bad_inode(inode)) {
+		dquot_initialize(inode);
 
-	diFree(inode);
+		if (JFS_IP(inode)->fileset == FILESYSTEM_I) {
+			truncate_inode_pages(&inode->i_data, 0);
 
-	clear_inode(inode);
+			if (test_cflag(COMMIT_Freewmap, inode))
+				jfs_free_zero_link(inode);
+
+			diFree(inode);
+
+			/*
+			 * Free the inode from the quota allocation.
+			 */
+			dquot_initialize(inode);
+			dquot_free_inode(inode);
+		}
+	} else {
+		truncate_inode_pages(&inode->i_data, 0);
+	}
+	end_writeback(inode);
+	dquot_drop(inode);
 }
 
 void jfs_dirty_inode(struct inode *inode)
@@ -156,46 +192,27 @@ void jfs_dirty_inode(struct inode *inode)
 	set_cflag(COMMIT_Dirty, inode);
 }
 
-static int
-jfs_get_blocks(struct inode *ip, sector_t lblock, unsigned long max_blocks,
-			struct buffer_head *bh_result, int create)
+int jfs_get_block(struct inode *ip, sector_t lblock,
+		  struct buffer_head *bh_result, int create)
 {
 	s64 lblock64 = lblock;
-	int no_size_check = 0;
 	int rc = 0;
-	int take_locks;
 	xad_t xad;
 	s64 xaddr;
 	int xflag;
-	s32 xlen;
+	s32 xlen = bh_result->b_size >> ip->i_blkbits;
 
-	/*
-	 * If this is a special inode (imap, dmap) or directory,
-	 * the lock should already be taken
-	 */
-	take_locks = ((JFS_IP(ip)->fileset != AGGREGATE_I) &&
-		      !S_ISDIR(ip->i_mode));
 	/*
 	 * Take appropriate lock on inode
 	 */
-	if (take_locks) {
-		if (create)
-			IWRITE_LOCK(ip);
-		else
-			IREAD_LOCK(ip);
-	}
+	if (create)
+		IWRITE_LOCK(ip, RDWRLOCK_NORMAL);
+	else
+		IREAD_LOCK(ip, RDWRLOCK_NORMAL);
 
-	/*
-	 * A directory's "data" is the inode index table, but i_size is the
-	 * size of the d-tree, so don't check the offset against i_size
-	 */
-	if (S_ISDIR(ip->i_mode))
-		no_size_check = 1;
-
-	if ((no_size_check ||
-	     ((lblock64 << ip->i_sb->s_blocksize_bits) < ip->i_size)) &&
-	    (xtLookup(ip, lblock64, max_blocks, &xflag, &xaddr, &xlen, no_size_check)
-	     == 0) && xlen) {
+	if (((lblock64 << ip->i_sb->s_blocksize_bits) < ip->i_size) &&
+	    (!xtLookup(ip, lblock64, xlen, &xflag, &xaddr, &xlen, 0)) &&
+	    xaddr) {
 		if (xflag & XAD_NOTRECORDED) {
 			if (!create)
 				/*
@@ -234,7 +251,7 @@ jfs_get_blocks(struct inode *ip, sector_t lblock, unsigned long max_blocks,
 #ifdef _JFS_4K
 	if ((rc = extHint(ip, lblock64 << ip->i_sb->s_blocksize_bits, &xad)))
 		goto unlock;
-	rc = extAlloc(ip, max_blocks, lblock64, &xad, FALSE);
+	rc = extAlloc(ip, xlen, lblock64, &xad, false);
 	if (rc)
 		goto unlock;
 
@@ -254,19 +271,11 @@ jfs_get_blocks(struct inode *ip, sector_t lblock, unsigned long max_blocks,
 	/*
 	 * Release lock on inode
 	 */
-	if (take_locks) {
-		if (create)
-			IWRITE_UNLOCK(ip);
-		else
-			IREAD_UNLOCK(ip);
-	}
+	if (create)
+		IWRITE_UNLOCK(ip);
+	else
+		IREAD_UNLOCK(ip);
 	return rc;
-}
-
-static int jfs_get_block(struct inode *ip, sector_t lblock,
-			 struct buffer_head *bh_result, int create)
-{
-	return jfs_get_blocks(ip, lblock, 1, bh_result, create);
 }
 
 static int jfs_writepage(struct page *page, struct writeback_control *wbc)
@@ -291,10 +300,21 @@ static int jfs_readpages(struct file *file, struct address_space *mapping,
 	return mpage_readpages(mapping, pages, nr_pages, jfs_get_block);
 }
 
-static int jfs_prepare_write(struct file *file,
-			     struct page *page, unsigned from, unsigned to)
+static int jfs_write_begin(struct file *file, struct address_space *mapping,
+				loff_t pos, unsigned len, unsigned flags,
+				struct page **pagep, void **fsdata)
 {
-	return nobh_prepare_write(page, from, to, jfs_get_block);
+	int ret;
+
+	ret = nobh_write_begin(mapping, pos, len, flags, pagep, fsdata,
+				jfs_get_block);
+	if (unlikely(ret)) {
+		loff_t isize = mapping->host->i_size;
+		if (pos + len > isize)
+			vmtruncate(mapping->host, isize);
+	}
+
+	return ret;
 }
 
 static sector_t jfs_bmap(struct address_space *mapping, sector_t block)
@@ -302,24 +322,38 @@ static sector_t jfs_bmap(struct address_space *mapping, sector_t block)
 	return generic_block_bmap(mapping, block, jfs_get_block);
 }
 
-static int jfs_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
-			loff_t offset, unsigned long nr_segs)
+static ssize_t jfs_direct_IO(int rw, struct kiocb *iocb,
+	const struct iovec *iov, loff_t offset, unsigned long nr_segs)
 {
 	struct file *file = iocb->ki_filp;
-	struct inode *inode = file->f_dentry->d_inode->i_mapping->host;
+	struct inode *inode = file->f_mapping->host;
+	ssize_t ret;
 
-	return blockdev_direct_IO(rw, iocb, inode, inode->i_sb->s_bdev, iov,
-				offset, nr_segs, jfs_get_blocks, NULL);
+	ret = blockdev_direct_IO(rw, iocb, inode, inode->i_sb->s_bdev, iov,
+				offset, nr_segs, jfs_get_block, NULL);
+
+	/*
+	 * In case of error extending write may have instantiated a few
+	 * blocks outside i_size. Trim these off again.
+	 */
+	if (unlikely((rw & WRITE) && ret < 0)) {
+		loff_t isize = i_size_read(inode);
+		loff_t end = offset + iov_length(iov, nr_segs);
+
+		if (end > isize)
+			vmtruncate(inode, isize);
+	}
+
+	return ret;
 }
 
-struct address_space_operations jfs_aops = {
+const struct address_space_operations jfs_aops = {
 	.readpage	= jfs_readpage,
 	.readpages	= jfs_readpages,
 	.writepage	= jfs_writepage,
 	.writepages	= jfs_writepages,
-	.sync_page	= block_sync_page,
-	.prepare_write	= jfs_prepare_write,
-	.commit_write	= nobh_commit_write,
+	.write_begin	= jfs_write_begin,
+	.write_end	= nobh_write_end,
 	.bmap		= jfs_bmap,
 	.direct_IO	= jfs_direct_IO,
 };
@@ -344,18 +378,18 @@ void jfs_truncate_nolock(struct inode *ip, loff_t length)
 		tid = txBegin(ip->i_sb, 0);
 
 		/*
-		 * The commit_sem cannot be taken before txBegin.
+		 * The commit_mutex cannot be taken before txBegin.
 		 * txBegin may block and there is a chance the inode
 		 * could be marked dirty and need to be committed
 		 * before txBegin unblocks
 		 */
-		down(&JFS_IP(ip)->commit_sem);
+		mutex_lock(&JFS_IP(ip)->commit_mutex);
 
 		newsize = xtTruncate(tid, ip, length,
 				     COMMIT_TRUNCATE | COMMIT_PWMAP);
 		if (newsize < 0) {
 			txEnd(tid);
-			up(&JFS_IP(ip)->commit_sem);
+			mutex_unlock(&JFS_IP(ip)->commit_mutex);
 			break;
 		}
 
@@ -364,7 +398,7 @@ void jfs_truncate_nolock(struct inode *ip, loff_t length)
 
 		txCommit(tid, 1, &ip, 0);
 		txEnd(tid);
-		up(&JFS_IP(ip)->commit_sem);
+		mutex_unlock(&JFS_IP(ip)->commit_mutex);
 	} while (newsize > length);	/* Truncate isn't always atomic */
 }
 
@@ -372,9 +406,9 @@ void jfs_truncate(struct inode *ip)
 {
 	jfs_info("jfs_truncate: size = 0x%lx", (ulong) ip->i_size);
 
-	nobh_truncate_page(ip->i_mapping, ip->i_size);
+	nobh_truncate_page(ip->i_mapping, ip->i_size, jfs_get_block);
 
-	IWRITE_LOCK(ip);
+	IWRITE_LOCK(ip, RDWRLOCK_NORMAL);
 	jfs_truncate_nolock(ip, ip->i_size);
 	IWRITE_UNLOCK(ip);
 }

@@ -1,4 +1,4 @@
-/* $Id: b1pcmcia.c,v 1.12.6.5 2001/09/23 22:24:33 kai Exp $
+/* $Id: b1pcmcia.c,v 1.1.2.2 2004/01/16 21:09:27 keil Exp $
  * 
  * Module for AVM B1/M1/M2 PCMCIA-card.
  * 
@@ -24,6 +24,10 @@
 #include <linux/isdn/capiutil.h>
 #include <linux/isdn/capilli.h>
 #include "avmcard.h"
+
+/* ------------------------------------------------------------- */
+
+static char *revision = "$Revision: 1.1.2.2 $";
 
 /* ------------------------------------------------------------- */
 
@@ -78,7 +82,7 @@ static int b1pcmcia_add_card(unsigned int port, unsigned irq,
 	card->irq = irq;
 	card->cardtype = cardtype;
 
-	retval = request_irq(card->irq, b1_interrupt, 0, card->name, card);
+	retval = request_irq(card->irq, b1_interrupt, IRQF_SHARED, card->name, card);
 	if (retval) {
 		printk(KERN_ERR "b1pcmcia: unable to get IRQ %d.\n",
 		       card->irq);
@@ -104,7 +108,7 @@ static int b1pcmcia_add_card(unsigned int port, unsigned irq,
 	cinfo->capi_ctrl.load_firmware = b1_load_firmware;
 	cinfo->capi_ctrl.reset_ctr     = b1_reset_ctr;
 	cinfo->capi_ctrl.procinfo      = b1pcmcia_procinfo;
-	cinfo->capi_ctrl.ctr_read_proc = b1ctl_read_proc;
+	cinfo->capi_ctrl.proc_fops = &b1ctl_proc_fops;
 	strcpy(cinfo->capi_ctrl.name, card->name);
 
 	retval = attach_capi_ctr(&cinfo->capi_ctrl);
@@ -186,3 +190,35 @@ EXPORT_SYMBOL(b1pcmcia_addcard_b1);
 EXPORT_SYMBOL(b1pcmcia_addcard_m1);
 EXPORT_SYMBOL(b1pcmcia_addcard_m2);
 EXPORT_SYMBOL(b1pcmcia_delcard);
+
+static struct capi_driver capi_driver_b1pcmcia = {
+	.name		= "b1pcmcia",
+	.revision	= "1.0",
+};
+
+static int __init b1pcmcia_init(void)
+{
+	char *p;
+	char rev[32];
+
+	if ((p = strchr(revision, ':')) != NULL && p[1]) {
+		strlcpy(rev, p + 2, 32);
+		if ((p = strchr(rev, '$')) != NULL && p > rev)
+		   *(p-1) = 0;
+	} else
+		strcpy(rev, "1.0");
+
+	strlcpy(capi_driver_b1pcmcia.revision, rev, 32);
+	register_capi_driver(&capi_driver_b1pcmcia);
+	printk(KERN_INFO "b1pci: revision %s\n", rev);
+
+	return 0;
+}
+
+static void __exit b1pcmcia_exit(void)
+{
+	unregister_capi_driver(&capi_driver_b1pcmcia);
+}
+
+module_init(b1pcmcia_init);
+module_exit(b1pcmcia_exit);

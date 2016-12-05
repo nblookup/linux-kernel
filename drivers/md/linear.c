@@ -16,54 +16,62 @@
    Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.  
 */
 
-#include <linux/module.h>
-
-#include <linux/raid/md.h>
+#include <linux/blkdev.h>
+#include <linux/raid/md_u.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
-#include <linux/raid/linear.h>
-
-#define MAJOR_NR MD_MAJOR
-#define MD_DRIVER
-#define MD_PERSONALITY
+#include "md.h"
+#include "linear.h"
 
 /*
  * find which device holds a particular offset 
  */
 static inline dev_info_t *which_dev(mddev_t *mddev, sector_t sector)
 {
-	struct linear_hash *hash;
-	linear_conf_t *conf = mddev_to_conf(mddev);
-	sector_t block = sector >> 1;
+	int lo, mid, hi;
+	linear_conf_t *conf;
+
+	lo = 0;
+	hi = mddev->raid_disks - 1;
+	conf = rcu_dereference(mddev->private);
 
 	/*
-	 * sector_div(a,b) returns the remainer and sets a to a/b
+	 * Binary Search
 	 */
-	(void)sector_div(block, conf->smallest->size);
-	hash = conf->hash_table + block;
 
-	if ((sector>>1) >= (hash->dev0->size + hash->dev0->offset))
-		return hash->dev1;
-	else
-		return hash->dev0;
+	while (hi > lo) {
+
+		mid = (hi + lo) / 2;
+		if (sector < conf->disks[mid].end_sector)
+			hi = mid;
+		else
+			lo = mid + 1;
+	}
+
+	return conf->disks + lo;
 }
 
-
 /**
- *	linear_mergeable_bvec -- tell bio layer if a two requests can be merged
+ *	linear_mergeable_bvec -- tell bio layer if two requests can be merged
  *	@q: request queue
- *	@bio: the buffer head that's been built up so far
+ *	@bvm: properties of new bio
  *	@biovec: the request that could be merged to it.
  *
  *	Return amount of bytes we can take at this offset
  */
-static int linear_mergeable_bvec(request_queue_t *q, struct bio *bio, struct bio_vec *biovec)
+static int linear_mergeable_bvec(struct request_queue *q,
+				 struct bvec_merge_data *bvm,
+				 struct bio_vec *biovec)
 {
 	mddev_t *mddev = q->queuedata;
 	dev_info_t *dev0;
-	unsigned long maxsectors, bio_sectors = bio->bi_size >> 9;
+	unsigned long maxsectors, bio_sectors = bvm->bi_size >> 9;
+	sector_t sector = bvm->bi_sector + get_start_sect(bvm->bi_bdev);
 
-	dev0 = which_dev(mddev, bio->bi_sector);
-	maxsectors = (dev0->size << 1) - (bio->bi_sector - (dev0->offset<<1));
+	rcu_read_lock();
+	dev0 = which_dev(mddev, sector);
+	maxsectors = dev0->end_sector - sector;
+	rcu_read_unlock();
 
 	if (maxsectors < bio_sectors)
 		maxsectors = 0;
@@ -79,167 +87,244 @@ static int linear_mergeable_bvec(request_queue_t *q, struct bio *bio, struct bio
 	return maxsectors << 9;
 }
 
-static int linear_run (mddev_t *mddev)
+static int linear_congested(void *data, int bits)
+{
+	mddev_t *mddev = data;
+	linear_conf_t *conf;
+	int i, ret = 0;
+
+	if (mddev_congested(mddev, bits))
+		return 1;
+
+	rcu_read_lock();
+	conf = rcu_dereference(mddev->private);
+
+	for (i = 0; i < mddev->raid_disks && !ret ; i++) {
+		struct request_queue *q = bdev_get_queue(conf->disks[i].rdev->bdev);
+		ret |= bdi_congested(&q->backing_dev_info, bits);
+	}
+
+	rcu_read_unlock();
+	return ret;
+}
+
+static sector_t linear_size(mddev_t *mddev, sector_t sectors, int raid_disks)
 {
 	linear_conf_t *conf;
-	struct linear_hash *table;
-	mdk_rdev_t *rdev;
-	int size, i, nb_zone, cnt;
-	unsigned int curr_offset;
-	struct list_head *tmp;
+	sector_t array_sectors;
 
-	conf = kmalloc (sizeof (*conf) + mddev->raid_disks*sizeof(dev_info_t),
+	rcu_read_lock();
+	conf = rcu_dereference(mddev->private);
+	WARN_ONCE(sectors || raid_disks,
+		  "%s does not support generic reshape\n", __func__);
+	array_sectors = conf->array_sectors;
+	rcu_read_unlock();
+
+	return array_sectors;
+}
+
+static linear_conf_t *linear_conf(mddev_t *mddev, int raid_disks)
+{
+	linear_conf_t *conf;
+	mdk_rdev_t *rdev;
+	int i, cnt;
+
+	conf = kzalloc (sizeof (*conf) + raid_disks*sizeof(dev_info_t),
 			GFP_KERNEL);
 	if (!conf)
-		goto out;
-	memset(conf, 0, sizeof(*conf) + mddev->raid_disks*sizeof(dev_info_t));
-	mddev->private = conf;
+		return NULL;
 
-	/*
-	 * Find the smallest device.
-	 */
-
-	conf->smallest = NULL;
 	cnt = 0;
-	mddev->array_size = 0;
+	conf->array_sectors = 0;
 
-	ITERATE_RDEV(mddev,rdev,tmp) {
+	list_for_each_entry(rdev, &mddev->disks, same_set) {
 		int j = rdev->raid_disk;
 		dev_info_t *disk = conf->disks + j;
+		sector_t sectors;
 
-		if (j < 0 || j > mddev->raid_disks || disk->rdev) {
-			printk("linear: disk numbering problem. Aborting!\n");
+		if (j < 0 || j >= raid_disks || disk->rdev) {
+			printk(KERN_ERR "md/linear:%s: disk numbering problem. Aborting!\n",
+			       mdname(mddev));
 			goto out;
 		}
 
 		disk->rdev = rdev;
-		blk_queue_stack_limits(mddev->queue,
-				       rdev->bdev->bd_disk->queue);
-		disk->size = rdev->size;
-		mddev->array_size += rdev->size;
+		if (mddev->chunk_sectors) {
+			sectors = rdev->sectors;
+			sector_div(sectors, mddev->chunk_sectors);
+			rdev->sectors = sectors * mddev->chunk_sectors;
+		}
 
-		if (!conf->smallest || (disk->size < conf->smallest->size))
-			conf->smallest = disk;
+		disk_stack_limits(mddev->gendisk, rdev->bdev,
+				  rdev->data_offset << 9);
+		/* as we don't honour merge_bvec_fn, we must never risk
+		 * violating it, so limit max_segments to 1 lying within
+		 * a single page.
+		 */
+		if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
+			blk_queue_max_segments(mddev->queue, 1);
+			blk_queue_segment_boundary(mddev->queue,
+						   PAGE_CACHE_SIZE - 1);
+		}
+
+		conf->array_sectors += rdev->sectors;
 		cnt++;
+
 	}
-	if (cnt != mddev->raid_disks) {
-		printk("linear: not enough drives present. Aborting!\n");
+	if (cnt != raid_disks) {
+		printk(KERN_ERR "md/linear:%s: not enough drives present. Aborting!\n",
+		       mdname(mddev));
 		goto out;
 	}
 
 	/*
-	 * This code was restructured to work around a gcc-2.95.3 internal
-	 * compiler error.  Alter it with care.
+	 * Here we calculate the device offsets.
 	 */
-	{
-		sector_t sz;
-		unsigned round;
-		unsigned long base;
+	conf->disks[0].end_sector = conf->disks[0].rdev->sectors;
 
-		sz = mddev->array_size;
-		base = conf->smallest->size;
-		round = sector_div(sz, base);
-		nb_zone = conf->nr_zones = sz + (round ? 1 : 0);
-	}
-			
-	conf->hash_table = kmalloc (sizeof (struct linear_hash) * nb_zone,
-					GFP_KERNEL);
-	if (!conf->hash_table)
-		goto out;
+	for (i = 1; i < raid_disks; i++)
+		conf->disks[i].end_sector =
+			conf->disks[i-1].end_sector +
+			conf->disks[i].rdev->sectors;
 
-	/*
-	 * Here we generate the linear hash table
-	 */
-	table = conf->hash_table;
-	size = 0;
-	curr_offset = 0;
-	for (i = 0; i < cnt; i++) {
-		dev_info_t *disk = conf->disks + i;
-
-		disk->offset = curr_offset;
-		curr_offset += disk->size;
-
-		if (size < 0) {
-			table[-1].dev1 = disk;
-		}
-		size += disk->size;
-
-		while (size>0) {
-			table->dev0 = disk;
-			table->dev1 = NULL;
-			size -= conf->smallest->size;
-			table++;
-		}
-	}
-	if (table-conf->hash_table != nb_zone)
-		BUG();
-
-	blk_queue_merge_bvec(mddev->queue, linear_mergeable_bvec);
-	return 0;
+	return conf;
 
 out:
-	if (conf)
-		kfree(conf);
-	return 1;
+	kfree(conf);
+	return NULL;
+}
+
+static int linear_run (mddev_t *mddev)
+{
+	linear_conf_t *conf;
+
+	if (md_check_no_bitmap(mddev))
+		return -EINVAL;
+	conf = linear_conf(mddev, mddev->raid_disks);
+
+	if (!conf)
+		return 1;
+	mddev->private = conf;
+	md_set_array_sectors(mddev, linear_size(mddev, 0, 0));
+
+	blk_queue_merge_bvec(mddev->queue, linear_mergeable_bvec);
+	mddev->queue->backing_dev_info.congested_fn = linear_congested;
+	mddev->queue->backing_dev_info.congested_data = mddev;
+	return md_integrity_register(mddev);
+}
+
+static void free_conf(struct rcu_head *head)
+{
+	linear_conf_t *conf = container_of(head, linear_conf_t, rcu);
+	kfree(conf);
+}
+
+static int linear_add(mddev_t *mddev, mdk_rdev_t *rdev)
+{
+	/* Adding a drive to a linear array allows the array to grow.
+	 * It is permitted if the new drive has a matching superblock
+	 * already on it, with raid_disk equal to raid_disks.
+	 * It is achieved by creating a new linear_private_data structure
+	 * and swapping it in in-place of the current one.
+	 * The current one is never freed until the array is stopped.
+	 * This avoids races.
+	 */
+	linear_conf_t *newconf, *oldconf;
+
+	if (rdev->saved_raid_disk != mddev->raid_disks)
+		return -EINVAL;
+
+	rdev->raid_disk = rdev->saved_raid_disk;
+
+	newconf = linear_conf(mddev,mddev->raid_disks+1);
+
+	if (!newconf)
+		return -ENOMEM;
+
+	oldconf = rcu_dereference(mddev->private);
+	mddev->raid_disks++;
+	rcu_assign_pointer(mddev->private, newconf);
+	md_set_array_sectors(mddev, linear_size(mddev, 0, 0));
+	set_capacity(mddev->gendisk, mddev->array_sectors);
+	revalidate_disk(mddev->gendisk);
+	call_rcu(&oldconf->rcu, free_conf);
+	return 0;
 }
 
 static int linear_stop (mddev_t *mddev)
 {
-	linear_conf_t *conf = mddev_to_conf(mddev);
-  
-	kfree(conf->hash_table);
+	linear_conf_t *conf = mddev->private;
+
+	/*
+	 * We do not require rcu protection here since
+	 * we hold reconfig_mutex for both linear_add and
+	 * linear_stop, so they cannot race.
+	 * We should make sure any old 'conf's are properly
+	 * freed though.
+	 */
+	rcu_barrier();
+	blk_sync_queue(mddev->queue); /* the unplug fn references 'conf'*/
 	kfree(conf);
+	mddev->private = NULL;
 
 	return 0;
 }
 
-static int linear_make_request (request_queue_t *q, struct bio *bio)
+static int linear_make_request (mddev_t *mddev, struct bio *bio)
 {
-	mddev_t *mddev = q->queuedata;
 	dev_info_t *tmp_dev;
-	sector_t block;
+	sector_t start_sector;
 
-	tmp_dev = which_dev(mddev, bio->bi_sector);
-	block = bio->bi_sector >> 1;
-  
-	if (unlikely(!tmp_dev)) {
-		printk("linear_make_request: hash->dev1==NULL for block %llu\n",
-			(unsigned long long)block);
-		bio_io_error(bio, bio->bi_size);
+	if (unlikely(bio->bi_rw & REQ_FLUSH)) {
+		md_flush_request(mddev, bio);
 		return 0;
 	}
-    
-	if (unlikely(block >= (tmp_dev->size + tmp_dev->offset)
-		     || block < tmp_dev->offset)) {
+
+	rcu_read_lock();
+	tmp_dev = which_dev(mddev, bio->bi_sector);
+	start_sector = tmp_dev->end_sector - tmp_dev->rdev->sectors;
+
+
+	if (unlikely(bio->bi_sector >= (tmp_dev->end_sector)
+		     || (bio->bi_sector < start_sector))) {
 		char b[BDEVNAME_SIZE];
 
-		printk("linear_make_request: Block %llu out of bounds on "
-			"dev %s size %ld offset %ld\n",
-			(unsigned long long)block,
-			bdevname(tmp_dev->rdev->bdev, b),
-			tmp_dev->size, tmp_dev->offset);
-		bio_io_error(bio, bio->bi_size);
+		printk(KERN_ERR
+		       "md/linear:%s: make_request: Sector %llu out of bounds on "
+		       "dev %s: %llu sectors, offset %llu\n",
+		       mdname(mddev),
+		       (unsigned long long)bio->bi_sector,
+		       bdevname(tmp_dev->rdev->bdev, b),
+		       (unsigned long long)tmp_dev->rdev->sectors,
+		       (unsigned long long)start_sector);
+		rcu_read_unlock();
+		bio_io_error(bio);
 		return 0;
 	}
 	if (unlikely(bio->bi_sector + (bio->bi_size >> 9) >
-		     (tmp_dev->offset + tmp_dev->size)<<1)) {
+		     tmp_dev->end_sector)) {
 		/* This bio crosses a device boundary, so we have to
 		 * split it.
 		 */
 		struct bio_pair *bp;
-		bp = bio_split(bio, bio_split_pool, 
-			       (bio->bi_sector + (bio->bi_size >> 9) -
-				(tmp_dev->offset + tmp_dev->size))<<1);
-		if (linear_make_request(q, &bp->bio1))
+		sector_t end_sector = tmp_dev->end_sector;
+
+		rcu_read_unlock();
+
+		bp = bio_split(bio, end_sector - bio->bi_sector);
+
+		if (linear_make_request(mddev, &bp->bio1))
 			generic_make_request(&bp->bio1);
-		if (linear_make_request(q, &bp->bio2))
+		if (linear_make_request(mddev, &bp->bio2))
 			generic_make_request(&bp->bio2);
 		bio_pair_release(bp);
 		return 0;
 	}
 		    
 	bio->bi_bdev = tmp_dev->rdev->bdev;
-	bio->bi_sector = bio->bi_sector - (tmp_dev->offset << 1) + tmp_dev->rdev->data_offset;
+	bio->bi_sector = bio->bi_sector - start_sector
+		+ tmp_dev->rdev->data_offset;
+	rcu_read_unlock();
 
 	return 1;
 }
@@ -247,52 +332,38 @@ static int linear_make_request (request_queue_t *q, struct bio *bio)
 static void linear_status (struct seq_file *seq, mddev_t *mddev)
 {
 
-#undef MD_DEBUG
-#ifdef MD_DEBUG
-	int j;
-	linear_conf_t *conf = mddev_to_conf(mddev);
-  
-	seq_printf(seq, "      ");
-	for (j = 0; j < conf->nr_zones; j++)
-	{
-		char b[BDEVNAME_SIZE];
-		seq_printf(seq, "[%s",
-			   bdevname(conf->hash_table[j].dev0->rdev->bdev,b));
-
-		if (conf->hash_table[j].dev1)
-			seq_printf(seq, "/%s] ",
-				   bdevname(conf->hash_table[j].dev1->rdev->bdev,b));
-		else
-			seq_printf(seq, "] ");
-	}
-	seq_printf(seq, "\n");
-#endif
-	seq_printf(seq, " %dk rounding", mddev->chunk_size/1024);
+	seq_printf(seq, " %dk rounding", mddev->chunk_sectors / 2);
 }
 
 
-static mdk_personality_t linear_personality=
+static struct mdk_personality linear_personality =
 {
 	.name		= "linear",
+	.level		= LEVEL_LINEAR,
 	.owner		= THIS_MODULE,
 	.make_request	= linear_make_request,
 	.run		= linear_run,
 	.stop		= linear_stop,
 	.status		= linear_status,
+	.hot_add_disk	= linear_add,
+	.size		= linear_size,
 };
 
 static int __init linear_init (void)
 {
-	return register_md_personality (LINEAR, &linear_personality);
+	return register_md_personality (&linear_personality);
 }
 
 static void linear_exit (void)
 {
-	unregister_md_personality (LINEAR);
+	unregister_md_personality (&linear_personality);
 }
 
 
 module_init(linear_init);
 module_exit(linear_exit);
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("md-personality-1"); /* LINEAR */
+MODULE_DESCRIPTION("Linear device concatenation personality for MD");
+MODULE_ALIAS("md-personality-1"); /* LINEAR - deprecated*/
+MODULE_ALIAS("md-linear");
+MODULE_ALIAS("md-level--1");

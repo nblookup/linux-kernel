@@ -1,5 +1,5 @@
 /*
- * drivers/usb/file.c
+ * drivers/usb/core/file.c
  *
  * (C) Copyright Linus Torvalds 1999
  * (C) Copyright Johannes Erdfelt 1999-2001
@@ -15,38 +15,30 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/devfs_fs_kernel.h>
-#include <linux/spinlock.h>
 #include <linux/errno.h>
-
-#ifdef CONFIG_USB_DEBUG
-	#define DEBUG
-#else
-	#undef DEBUG
-#endif
+#include <linux/rwsem.h>
+#include <linux/slab.h>
 #include <linux/usb.h>
 
+#include "usb.h"
+
 #define MAX_USB_MINORS	256
-static struct file_operations *usb_minors[MAX_USB_MINORS];
-static spinlock_t minor_lock = SPIN_LOCK_UNLOCKED;
+static const struct file_operations *usb_minors[MAX_USB_MINORS];
+static DECLARE_RWSEM(minor_rwsem);
 
 static int usb_open(struct inode * inode, struct file * file)
 {
 	int minor = iminor(inode);
-	struct file_operations *c;
+	const struct file_operations *c;
 	int err = -ENODEV;
-	struct file_operations *old_fops, *new_fops = NULL;
+	const struct file_operations *old_fops, *new_fops = NULL;
 
-	spin_lock (&minor_lock);
+	down_read(&minor_rwsem);
 	c = usb_minors[minor];
 
-	if (!c || !(new_fops = fops_get(c))) {
-		spin_unlock(&minor_lock);
-		return err;
-	}
-	spin_unlock(&minor_lock);
+	if (!c || !(new_fops = fops_get(c)))
+		goto done;
 
 	old_fops = file->f_op;
 	file->f_op = new_fops;
@@ -58,50 +50,92 @@ static int usb_open(struct inode * inode, struct file * file)
 		file->f_op = fops_get(old_fops);
 	}
 	fops_put(old_fops);
+ done:
+	up_read(&minor_rwsem);
 	return err;
 }
 
-static struct file_operations usb_fops = {
+static const struct file_operations usb_fops = {
 	.owner =	THIS_MODULE,
 	.open =		usb_open,
+	.llseek =	noop_llseek,
 };
 
-static void release_usb_class_dev(struct class_device *class_dev)
+static struct usb_class {
+	struct kref kref;
+	struct class *class;
+} *usb_class;
+
+static char *usb_devnode(struct device *dev, mode_t *mode)
 {
-	dbg("%s - %s", __FUNCTION__, class_dev->class_id);
-	kfree(class_dev);
+	struct usb_class_driver *drv;
+
+	drv = dev_get_drvdata(dev);
+	if (!drv || !drv->devnode)
+		return NULL;
+	return drv->devnode(dev, mode);
 }
 
-static struct class usb_class = {
-	.name		= "usb",
-	.release	= &release_usb_class_dev,
-};
+static int init_usb_class(void)
+{
+	int result = 0;
+
+	if (usb_class != NULL) {
+		kref_get(&usb_class->kref);
+		goto exit;
+	}
+
+	usb_class = kmalloc(sizeof(*usb_class), GFP_KERNEL);
+	if (!usb_class) {
+		result = -ENOMEM;
+		goto exit;
+	}
+
+	kref_init(&usb_class->kref);
+	usb_class->class = class_create(THIS_MODULE, "usb");
+	if (IS_ERR(usb_class->class)) {
+		result = IS_ERR(usb_class->class);
+		printk(KERN_ERR "class_create failed for usb devices\n");
+		kfree(usb_class);
+		usb_class = NULL;
+		goto exit;
+	}
+	usb_class->class->devnode = usb_devnode;
+
+exit:
+	return result;
+}
+
+static void release_usb_class(struct kref *kref)
+{
+	/* Ok, we cheat as we know we only have one usb_class */
+	class_destroy(usb_class->class);
+	kfree(usb_class);
+	usb_class = NULL;
+}
+
+static void destroy_usb_class(void)
+{
+	if (usb_class)
+		kref_put(&usb_class->kref, release_usb_class);
+}
 
 int usb_major_init(void)
 {
-	if (register_chrdev(USB_MAJOR, "usb", &usb_fops)) {
-		err("unable to get major %d for usb devices", USB_MAJOR);
-		return -EBUSY;
-	}
+	int error;
 
-	devfs_mk_dir("usb");
-	class_register(&usb_class);
-	return 0;
+	error = register_chrdev(USB_MAJOR, "usb", &usb_fops);
+	if (error)
+		printk(KERN_ERR "Unable to get major %d for usb devices\n",
+		       USB_MAJOR);
+
+	return error;
 }
 
 void usb_major_cleanup(void)
 {
-	class_unregister(&usb_class);
-	devfs_remove("usb");
 	unregister_chrdev(USB_MAJOR, "usb");
 }
-
-static ssize_t show_dev(struct class_device *class_dev, char *buf)
-{
-	int minor = (int)(long)class_get_devdata(class_dev);
-	return print_dev_t(buf, MKDEV(USB_MAJOR, minor));
-}
-static CLASS_DEVICE_ATTR(dev, S_IRUGO, show_dev, NULL);
 
 /**
  * usb_register_dev - register a USB device, and ask for a minor number
@@ -114,8 +148,7 @@ static CLASS_DEVICE_ATTR(dev, S_IRUGO, show_dev, NULL);
  * enabled, the minor number will be based on the next available free minor,
  * starting at the class_driver->minor_base.
  *
- * This function also creates the devfs file for the usb device, if devfs
- * is enabled, and creates a usb class device in the sysfs tree.
+ * This function also creates a usb class device in the sysfs tree.
  *
  * usb_deregister_dev() must be called when the driver is done with
  * the minor numbers given out by this function.
@@ -126,11 +159,10 @@ static CLASS_DEVICE_ATTR(dev, S_IRUGO, show_dev, NULL);
 int usb_register_dev(struct usb_interface *intf,
 		     struct usb_class_driver *class_driver)
 {
-	int retval = -EINVAL;
+	int retval;
 	int minor_base = class_driver->minor_base;
-	int minor = 0;
-	char name[BUS_ID_SIZE];
-	struct class_device *class_dev;
+	int minor;
+	char name[20];
 	char *temp;
 
 #ifdef CONFIG_USB_DYNAMIC_MINORS
@@ -141,56 +173,51 @@ int usb_register_dev(struct usb_interface *intf,
 	 */
 	minor_base = 0;
 #endif
-	intf->minor = -1;
-
-	dbg ("looking for a minor, starting at %d", minor_base);
 
 	if (class_driver->fops == NULL)
-		goto exit;
+		return -EINVAL;
+	if (intf->minor >= 0)
+		return -EADDRINUSE;
 
-	spin_lock (&minor_lock);
+	retval = init_usb_class();
+	if (retval)
+		return retval;
+
+	dev_dbg(&intf->dev, "looking for a minor, starting at %d", minor_base);
+
+	down_write(&minor_rwsem);
 	for (minor = minor_base; minor < MAX_USB_MINORS; ++minor) {
 		if (usb_minors[minor])
 			continue;
 
 		usb_minors[minor] = class_driver->fops;
-
-		retval = 0;
+		intf->minor = minor;
 		break;
 	}
-	spin_unlock (&minor_lock);
-
-	if (retval)
-		goto exit;
-
-	intf->minor = minor;
-
-	/* handle the devfs registration */
-	snprintf(name, BUS_ID_SIZE, class_driver->name, minor - minor_base);
-	devfs_mk_cdev(MKDEV(USB_MAJOR, minor), class_driver->mode, name);
+	up_write(&minor_rwsem);
+	if (intf->minor < 0)
+		return -EXFULL;
 
 	/* create a usb class device for this usb interface */
-	class_dev = kmalloc(sizeof(*class_dev), GFP_KERNEL);
-	if (class_dev) {
-		memset(class_dev, 0x00, sizeof(struct class_device));
-		class_dev->class = &usb_class;
-		class_dev->dev = &intf->dev;
-
-		temp = strrchr(name, '/');
-		if (temp && (temp[1] != 0x00))
-			++temp;
-		else
-			temp = name;
-		snprintf(class_dev->class_id, BUS_ID_SIZE, "%s", temp);
-		class_set_devdata(class_dev, (void *)(long)intf->minor);
-		class_device_register(class_dev);
-		class_device_create_file(class_dev, &class_device_attr_dev);
-		intf->class_dev = class_dev;
+	snprintf(name, sizeof(name), class_driver->name, minor - minor_base);
+	temp = strrchr(name, '/');
+	if (temp && (temp[1] != '\0'))
+		++temp;
+	else
+		temp = name;
+	intf->usb_dev = device_create(usb_class->class, &intf->dev,
+				      MKDEV(USB_MAJOR, minor), class_driver,
+				      "%s", temp);
+	if (IS_ERR(intf->usb_dev)) {
+		down_write(&minor_rwsem);
+		usb_minors[minor] = NULL;
+		intf->minor = -1;
+		up_write(&minor_rwsem);
+		retval = PTR_ERR(intf->usb_dev);
 	}
-exit:
 	return retval;
 }
-EXPORT_SYMBOL(usb_register_dev);
+EXPORT_SYMBOL_GPL(usb_register_dev);
 
 /**
  * usb_deregister_dev - deregister a USB device's dynamic minor.
@@ -202,16 +229,15 @@ EXPORT_SYMBOL(usb_register_dev);
  * call to usb_register_dev() (usually when the device is disconnected
  * from the system.)
  *
- * This function also cleans up the devfs file for the usb device, if devfs
- * is enabled, and removes the usb class device from the sysfs tree.
- * 
+ * This function also removes the usb class device from the sysfs tree.
+ *
  * This should be called by all drivers that use the USB major number.
  */
 void usb_deregister_dev(struct usb_interface *intf,
 			struct usb_class_driver *class_driver)
 {
 	int minor_base = class_driver->minor_base;
-	char name[BUS_ID_SIZE];
+	char name[20];
 
 #ifdef CONFIG_USB_DYNAMIC_MINORS
 	minor_base = 0;
@@ -222,19 +248,14 @@ void usb_deregister_dev(struct usb_interface *intf,
 
 	dbg ("removing %d minor", intf->minor);
 
-	spin_lock (&minor_lock);
+	down_write(&minor_rwsem);
 	usb_minors[intf->minor] = NULL;
-	spin_unlock (&minor_lock);
+	up_write(&minor_rwsem);
 
-	snprintf(name, BUS_ID_SIZE, class_driver->name, intf->minor - minor_base);
-	devfs_remove (name);
-
-	if (intf->class_dev) {
-		class_device_unregister(intf->class_dev);
-		intf->class_dev = NULL;
-	}
+	snprintf(name, sizeof(name), class_driver->name, intf->minor - minor_base);
+	device_destroy(usb_class->class, MKDEV(USB_MAJOR, intf->minor));
+	intf->usb_dev = NULL;
 	intf->minor = -1;
+	destroy_usb_class();
 }
-EXPORT_SYMBOL(usb_deregister_dev);
-
-
+EXPORT_SYMBOL_GPL(usb_deregister_dev);

@@ -30,11 +30,13 @@
  * Send feedback to <scottm@somanetworks.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
+#include <linux/interrupt.h>
+#include <linux/signal.h>	/* IRQF_SHARED */
 #include "cpci_hotplug.h"
 #include "cpcihp_zt5550.h"
 
@@ -42,11 +44,7 @@
 #define DRIVER_AUTHOR	"Scott Murray <scottm@somanetworks.com>"
 #define DRIVER_DESC	"ZT5550 CompactPCI Hot Plug Driver"
 
-#if !defined(CONFIG_HOTPLUG_PCI_CPCI_ZT5550_MODULE)
 #define MY_NAME	"cpcihp_zt5550"
-#else
-#define MY_NAME	THIS_MODULE->name
-#endif
 
 #define dbg(format, arg...)					\
 	do {							\
@@ -72,39 +70,49 @@ static struct pci_bus *bus0;
 static struct pci_dev *hc_dev;
 
 /* Host controller register addresses */
-static void *hc_registers;
-static void *csr_hc_index;
-static void *csr_hc_data;
-static void *csr_int_status;
-static void *csr_int_mask;
+static void __iomem *hc_registers;
+static void __iomem *csr_hc_index;
+static void __iomem *csr_hc_data;
+static void __iomem *csr_int_status;
+static void __iomem *csr_int_mask;
 
 
 static int zt5550_hc_config(struct pci_dev *pdev)
 {
+	int ret;
+
 	/* Since we know that no boards exist with two HC chips, treat it as an error */
 	if(hc_dev) {
 		err("too many host controller devices?");
 		return -EBUSY;
 	}
+
+	ret = pci_enable_device(pdev);
+	if(ret) {
+		err("cannot enable %s\n", pci_name(pdev));
+		return ret;
+	}
+
 	hc_dev = pdev;
 	dbg("hc_dev = %p", hc_dev);
-	dbg("pci resource start %lx", pci_resource_start(hc_dev, 1));
-	dbg("pci resource len %lx", pci_resource_len(hc_dev, 1));
+	dbg("pci resource start %llx", (unsigned long long)pci_resource_start(hc_dev, 1));
+	dbg("pci resource len %llx", (unsigned long long)pci_resource_len(hc_dev, 1));
 
 	if(!request_mem_region(pci_resource_start(hc_dev, 1),
 				pci_resource_len(hc_dev, 1), MY_NAME)) {
 		err("cannot reserve MMIO region");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto exit_disable_device;
 	}
 
 	hc_registers =
 	    ioremap(pci_resource_start(hc_dev, 1), pci_resource_len(hc_dev, 1));
 	if(!hc_registers) {
-		err("cannot remap MMIO region %lx @ %lx",
-		    pci_resource_len(hc_dev, 1), pci_resource_start(hc_dev, 1));
-		release_mem_region(pci_resource_start(hc_dev, 1),
-				   pci_resource_len(hc_dev, 1));
-		return -ENODEV;
+		err("cannot remap MMIO region %llx @ %llx",
+			(unsigned long long)pci_resource_len(hc_dev, 1),
+			(unsigned long long)pci_resource_start(hc_dev, 1));
+		ret = -ENODEV;
+		goto exit_release_region;
 	}
 
 	csr_hc_index = hc_registers + CSR_HCINDEX;
@@ -127,14 +135,24 @@ static int zt5550_hc_config(struct pci_dev *pdev)
 	writeb((u8) ALL_DIRECT_INTS_MASK, csr_int_mask);
 	dbg("disabled timer0, timer1 and ENUM interrupts");
 	return 0;
+
+exit_release_region:
+	release_mem_region(pci_resource_start(hc_dev, 1),
+			   pci_resource_len(hc_dev, 1));
+exit_disable_device:
+	pci_disable_device(hc_dev);
+	return ret;
 }
 
 static int zt5550_hc_cleanup(void)
 {
 	if(!hc_dev)
 		return -ENODEV;
+
+	iounmap(hc_registers);
 	release_mem_region(pci_resource_start(hc_dev, 1),
 			   pci_resource_len(hc_dev, 1));
+	pci_disable_device(hc_dev);
 	return 0;
 }
 
@@ -173,7 +191,7 @@ static int zt5550_hc_enable_irq(void)
 	return 0;
 }
 
-int zt5550_hc_disable_irq(void)
+static int zt5550_hc_disable_irq(void)
 {
 	u8 reg;
 
@@ -202,7 +220,7 @@ static int zt5550_hc_init_one (struct pci_dev *pdev, const struct pci_device_id 
 	zt5550_hpc.ops = &zt5550_hpc_ops;
 	if(!poll) {
 		zt5550_hpc.irq = hc_dev->irq;
-		zt5550_hpc.irq_flags = SA_SHIRQ;
+		zt5550_hpc.irq_flags = IRQF_SHARED;
 		zt5550_hpc.dev_id = hc_dev;
 
 		zt5550_hpc_ops.enable_irq = zt5550_hc_enable_irq;
@@ -220,12 +238,13 @@ static int zt5550_hc_init_one (struct pci_dev *pdev, const struct pci_device_id 
 	dbg("registered controller");
 
 	/* Look for first device matching cPCI bus's bridge vendor and device IDs */
-	if(!(bus0_dev = pci_find_device(PCI_VENDOR_ID_DEC,
+	if(!(bus0_dev = pci_get_device(PCI_VENDOR_ID_DEC,
 					 PCI_DEVICE_ID_DEC_21154, NULL))) {
 		status = -ENODEV;
 		goto init_register_error;
 	}
 	bus0 = bus0_dev->subordinate;
+	pci_dev_put(bus0_dev);
 
 	status = cpci_hp_register_bus(bus0, 0x0a, 0x0f);
 	if(status != 0) {
@@ -277,13 +296,17 @@ static struct pci_driver zt5550_hc_driver = {
 static int __init zt5550_init(void)
 {
 	struct resource* r;
+	int rc;
 
 	info(DRIVER_DESC " version: " DRIVER_VERSION);
 	r = request_region(ENUM_PORT, 1, "#ENUM hotswap signal register");
 	if(!r)
 		return -EBUSY;
 
-	return pci_module_init(&zt5550_hc_driver);
+	rc = pci_register_driver(&zt5550_hc_driver);
+	if(rc < 0)
+		release_region(ENUM_PORT, 1);
+	return rc;
 }
 
 static void __exit
@@ -299,7 +322,7 @@ module_exit(zt5550_exit);
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
-MODULE_PARM(debug, "i");
+module_param(debug, bool, 0644);
 MODULE_PARM_DESC(debug, "Debugging mode enabled or not");
-MODULE_PARM(poll, "i");
+module_param(poll, bool, 0644);
 MODULE_PARM_DESC(poll, "#ENUM polling mode enabled or not");

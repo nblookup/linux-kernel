@@ -7,21 +7,21 @@
 
 #include <linux/types.h>
 #include <linux/kdev_t.h>
-#include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/vt_kern.h>
+#include <linux/screen_info.h>
 #include <linux/init.h>
+#include <linux/module.h>
 
 /*
  *  Dummy console driver
  */
 
 #if defined(__arm__)
-#define DUMMY_COLUMNS	ORIG_VIDEO_COLS
-#define DUMMY_ROWS	ORIG_VIDEO_LINES
+#define DUMMY_COLUMNS	screen_info.orig_video_cols
+#define DUMMY_ROWS	screen_info.orig_video_lines
 #elif defined(__hppa__)
 /* set by Kconfig. Use 80x25 for 640x480 and 160x64 for 1280x1024 */
-#include <linux/config.h>
 #define DUMMY_COLUMNS	CONFIG_DUMMY_CONSOLE_COLUMNS
 #define DUMMY_ROWS	CONFIG_DUMMY_CONSOLE_ROWS
 #else
@@ -41,7 +41,7 @@ static void dummycon_init(struct vc_data *vc, int init)
 	vc->vc_cols = DUMMY_COLUMNS;
 	vc->vc_rows = DUMMY_ROWS;
     } else
-	vc_resize(vc->vc_num, DUMMY_COLUMNS, DUMMY_ROWS);
+	vc_resize(vc, DUMMY_COLUMNS, DUMMY_ROWS);
 }
 
 static int dummycon_dummy(void)
@@ -58,6 +58,7 @@ static int dummycon_dummy(void)
  */
 
 const struct consw dummy_con = {
+    .owner =		THIS_MODULE,
     .con_startup =	dummycon_startup,
     .con_init =		dummycon_init,
     .con_deinit =	DUMMY,
@@ -69,7 +70,10 @@ const struct consw dummy_con = {
     .con_bmove =	DUMMY,
     .con_switch =	DUMMY,
     .con_blank =	DUMMY,
-    .con_font_op =	DUMMY,
+    .con_font_set =	DUMMY,
+    .con_font_get =	DUMMY,
+    .con_font_default =	DUMMY,
+    .con_font_copy =	DUMMY,
     .con_set_palette =	DUMMY,
     .con_scrolldelta =	DUMMY,
 };

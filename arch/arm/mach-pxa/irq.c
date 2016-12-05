@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/mach-pxa/irq.c
  *
- *  Generic PXA IRQ handling, GPIO IRQ demultiplexing, etc.
+ *  Generic PXA IRQ handling
  *
  *  Author:	Nicolas Pitre
  *  Created:	Jun 15, 2001
@@ -15,236 +15,225 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
+#include <linux/sysdev.h>
+#include <linux/io.h>
+#include <linux/irq.h>
 
-#include <asm/hardware.h>
-#include <asm/irq.h>
-#include <asm/mach/irq.h>
+#include <mach/hardware.h>
+#include <mach/irqs.h>
+#include <mach/gpio.h>
 
 #include "generic.h"
 
+#define IRQ_BASE		(void __iomem *)io_p2v(0x40d00000)
+
+#define ICIP			(0x000)
+#define ICMR			(0x004)
+#define ICLR			(0x008)
+#define ICFR			(0x00c)
+#define ICPR			(0x010)
+#define ICCR			(0x014)
+#define ICHP			(0x018)
+#define IPR(i)			(((i) < 32) ? (0x01c + ((i) << 2)) :		\
+				((i) < 64) ? (0x0b0 + (((i) - 32) << 2)) :	\
+				      (0x144 + (((i) - 64) << 2)))
+#define IPR_VALID		(1 << 31)
+#define IRQ_BIT(n)		(((n) - PXA_IRQ(0)) & 0x1f)
+
+#define MAX_INTERNAL_IRQS	128
 
 /*
- * This is for IRQs known as PXA_IRQ([8...31]).
+ * This is for peripheral IRQs internal to the PXA chip.
  */
 
-static void pxa_mask_irq(unsigned int irq)
+static int pxa_internal_irq_nr;
+
+static inline int cpu_has_ipr(void)
 {
-	ICMR &= ~(1 << (irq + PXA_IRQ_SKIP));
+	return !cpu_is_pxa25x();
 }
 
-static void pxa_unmask_irq(unsigned int irq)
+static inline void __iomem *irq_base(int i)
 {
-	ICMR |= (1 << (irq + PXA_IRQ_SKIP));
+	static unsigned long phys_base[] = {
+		0x40d00000,
+		0x40d0009c,
+		0x40d00130,
+	};
+
+	return (void __iomem *)io_p2v(phys_base[i]);
 }
 
-static struct irqchip pxa_internal_chip = {
-	.ack		= pxa_mask_irq,
-	.mask		= pxa_mask_irq,
-	.unmask		= pxa_unmask_irq,
+static void pxa_mask_irq(struct irq_data *d)
+{
+	void __iomem *base = irq_data_get_irq_chip_data(d);
+	uint32_t icmr = __raw_readl(base + ICMR);
+
+	icmr &= ~(1 << IRQ_BIT(d->irq));
+	__raw_writel(icmr, base + ICMR);
+}
+
+static void pxa_unmask_irq(struct irq_data *d)
+{
+	void __iomem *base = irq_data_get_irq_chip_data(d);
+	uint32_t icmr = __raw_readl(base + ICMR);
+
+	icmr |= 1 << IRQ_BIT(d->irq);
+	__raw_writel(icmr, base + ICMR);
+}
+
+static struct irq_chip pxa_internal_irq_chip = {
+	.name		= "SC",
+	.irq_ack	= pxa_mask_irq,
+	.irq_mask	= pxa_mask_irq,
+	.irq_unmask	= pxa_unmask_irq,
 };
 
 /*
- * PXA GPIO edge detection for IRQs:
- * IRQs are generated on Falling-Edge, Rising-Edge, or both.
- * Use this instead of directly setting GRER/GFER.
+ * GPIO IRQs for GPIO 0 and 1
  */
-
-static long GPIO_IRQ_rising_edge[3];
-static long GPIO_IRQ_falling_edge[3];
-static long GPIO_IRQ_mask[3];
-
-static int pxa_gpio_irq_type(unsigned int irq, unsigned int type)
+static int pxa_set_low_gpio_type(struct irq_data *d, unsigned int type)
 {
-	int gpio, idx;
+	int gpio = d->irq - IRQ_GPIO0;
 
-	gpio = IRQ_TO_GPIO(irq);
-	idx = gpio >> 5;
-
-	if (type == IRQT_PROBE) {
-	    /* Don't mess with enabled GPIOs using preconfigured edges or
-	       GPIOs set to alternate function during probe */
-		if ((GPIO_IRQ_rising_edge[idx] | GPIO_IRQ_falling_edge[idx]) &
-		    GPIO_bit(gpio))
-			return 0;
-		if (GAFR(gpio) & (0x3 << (((gpio) & 0xf)*2)))
-			return 0;
-		type = __IRQT_RISEDGE | __IRQT_FALEDGE;
+	if (__gpio_is_occupied(gpio)) {
+		pr_err("%s failed: GPIO is configured\n", __func__);
+		return -EINVAL;
 	}
 
-	printk(KERN_DEBUG "IRQ%d (GPIO%d): ", irq, gpio);
+	if (type & IRQ_TYPE_EDGE_RISING)
+		GRER0 |= GPIO_bit(gpio);
+	else
+		GRER0 &= ~GPIO_bit(gpio);
 
-	pxa_gpio_mode(gpio | GPIO_IN);
+	if (type & IRQ_TYPE_EDGE_FALLING)
+		GFER0 |= GPIO_bit(gpio);
+	else
+		GFER0 &= ~GPIO_bit(gpio);
 
-	if (type & __IRQT_RISEDGE) {
-		printk("rising ");
-		__set_bit (gpio, GPIO_IRQ_rising_edge);
-	} else
-		__clear_bit (gpio, GPIO_IRQ_rising_edge);
-
-	if (type & __IRQT_FALEDGE) {
-		printk("falling ");
-		__set_bit (gpio, GPIO_IRQ_falling_edge);
-	} else
-		__clear_bit (gpio, GPIO_IRQ_falling_edge);
-
-	printk("edges\n");
-
-	GRER(gpio) = GPIO_IRQ_rising_edge[idx] & GPIO_IRQ_mask[idx];
-	GFER(gpio) = GPIO_IRQ_falling_edge[idx] & GPIO_IRQ_mask[idx];
 	return 0;
 }
 
-/*
- * GPIO IRQs must be acknowledged.  This is for GPIO 0 and 1.
- */
-
-static void pxa_ack_low_gpio(unsigned int irq)
+static void pxa_ack_low_gpio(struct irq_data *d)
 {
-	GEDR0 = (1 << (irq - IRQ_GPIO0));
+	GEDR0 = (1 << (d->irq - IRQ_GPIO0));
 }
 
-static struct irqchip pxa_low_gpio_chip = {
-	.ack		= pxa_ack_low_gpio,
-	.mask		= pxa_mask_irq,
-	.unmask		= pxa_unmask_irq,
-	.type		= pxa_gpio_irq_type,
+static struct irq_chip pxa_low_gpio_chip = {
+	.name		= "GPIO-l",
+	.irq_ack	= pxa_ack_low_gpio,
+	.irq_mask	= pxa_mask_irq,
+	.irq_unmask	= pxa_unmask_irq,
+	.irq_set_type	= pxa_set_low_gpio_type,
 };
 
-/*
- * Demux handler for GPIO 2-80 edge detect interrupts
- */
-
-static void pxa_gpio_demux_handler(unsigned int irq, struct irqdesc *desc,
-				   struct pt_regs *regs)
-{
-	unsigned int mask;
-	int loop;
-
-	do {
-		loop = 0;
-
-		mask = GEDR0 & ~3;
-		if (mask) {
-			GEDR0 = mask;
-			irq = IRQ_GPIO(2);
-			desc = irq_desc + irq;
-			mask >>= 2;
-			do {
-				if (mask & 1)
-					desc->handle(irq, desc, regs);
-				irq++;
-				desc++;
-				mask >>= 1;
-			} while (mask);
-			loop = 1;
-		}
-
-		mask = GEDR1;
-		if (mask) {
-			GEDR1 = mask;
-			irq = IRQ_GPIO(32);
-			desc = irq_desc + irq;
-			do {
-				if (mask & 1)
-					desc->handle(irq, desc, regs);
-				irq++;
-				desc++;
-				mask >>= 1;
-			} while (mask);
-			loop = 1;
-		}
-
-		mask = GEDR2;
-		if (mask) {
-			GEDR2 = mask;
-			irq = IRQ_GPIO(64);
-			desc = irq_desc + irq;
-			do {
-				if (mask & 1)
-					desc->handle(irq, desc, regs);
-				irq++;
-				desc++;
-				mask >>= 1;
-			} while (mask);
-			loop = 1;
-		}
-	} while (loop);
-}
-
-static void pxa_ack_muxed_gpio(unsigned int irq)
-{
-	int gpio = irq - IRQ_GPIO(2) + 2;
-	GEDR(gpio) = GPIO_bit(gpio);
-}
-
-static void pxa_mask_muxed_gpio(unsigned int irq)
-{
-	int gpio = irq - IRQ_GPIO(2) + 2;
-	__clear_bit(gpio, GPIO_IRQ_mask);
-	GRER(gpio) &= ~GPIO_bit(gpio);
-	GFER(gpio) &= ~GPIO_bit(gpio);
-}
-
-static void pxa_unmask_muxed_gpio(unsigned int irq)
-{
-	int gpio = irq - IRQ_GPIO(2) + 2;
-	int idx = gpio >> 5;
-	__set_bit(gpio, GPIO_IRQ_mask);
-	GRER(gpio) = GPIO_IRQ_rising_edge[idx] & GPIO_IRQ_mask[idx];
-	GFER(gpio) = GPIO_IRQ_falling_edge[idx] & GPIO_IRQ_mask[idx];
-}
-
-static struct irqchip pxa_muxed_gpio_chip = {
-	.ack		= pxa_ack_muxed_gpio,
-	.mask		= pxa_mask_muxed_gpio,
-	.unmask		= pxa_unmask_muxed_gpio,
-	.type		= pxa_gpio_irq_type,
-};
-
-
-void __init pxa_init_irq(void)
+static void __init pxa_init_low_gpio_irq(set_wake_t fn)
 {
 	int irq;
 
-	/* disable all IRQs */
-	ICMR = 0;
+	/* clear edge detection on GPIO 0 and 1 */
+	GFER0 &= ~0x3;
+	GRER0 &= ~0x3;
+	GEDR0 = 0x3;
 
-	/* all IRQs are IRQ, not FIQ */
-	ICLR = 0;
-
-	/* clear all GPIO edge detects */
-	GFER0 = GFER1 = GFER2 = 0;
-	GRER0 = GRER1 = GRER2 = 0;
-	GEDR0 = GEDR0;
-	GEDR1 = GEDR1;
-	GEDR2 = GEDR2;
-
-	/* only unmasked interrupts kick us out of idle */
-	ICCR = 1;
-
-	/* GPIO 0 and 1 must have their mask bit always set */
-	GPIO_IRQ_mask[0] = 3;
-
-	for (irq = PXA_IRQ(PXA_IRQ_SKIP); irq <= PXA_IRQ(31); irq++) {
-		set_irq_chip(irq, &pxa_internal_chip);
-		set_irq_handler(irq, do_level_IRQ);
+	for (irq = IRQ_GPIO0; irq <= IRQ_GPIO1; irq++) {
+		irq_set_chip_and_handler(irq, &pxa_low_gpio_chip,
+					 handle_edge_irq);
+		irq_set_chip_data(irq, irq_base(0));
 		set_irq_flags(irq, IRQF_VALID);
 	}
 
-	for (irq = IRQ_GPIO0; irq <= IRQ_GPIO1; irq++) {
-		set_irq_chip(irq, &pxa_low_gpio_chip);
-		set_irq_handler(irq, do_edge_IRQ);
-		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
-	}
-
-	for (irq = IRQ_GPIO(2); irq <= IRQ_GPIO(80); irq++) {
-		set_irq_chip(irq, &pxa_muxed_gpio_chip);
-		set_irq_handler(irq, do_edge_IRQ);
-		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
-	}
-
-	/* Install handler for GPIO 2-80 edge detect interrupts */
-	set_irq_chip(IRQ_GPIO_2_80, &pxa_internal_chip);
-	set_irq_chained_handler(IRQ_GPIO_2_80, pxa_gpio_demux_handler);
+	pxa_low_gpio_chip.irq_set_wake = fn;
 }
+
+void __init pxa_init_irq(int irq_nr, set_wake_t fn)
+{
+	int irq, i, n;
+
+	BUG_ON(irq_nr > MAX_INTERNAL_IRQS);
+
+	pxa_internal_irq_nr = irq_nr;
+
+	for (n = 0; n < irq_nr; n += 32) {
+		void __iomem *base = irq_base(n >> 5);
+
+		__raw_writel(0, base + ICMR);	/* disable all IRQs */
+		__raw_writel(0, base + ICLR);	/* all IRQs are IRQ, not FIQ */
+		for (i = n; (i < (n + 32)) && (i < irq_nr); i++) {
+			/* initialize interrupt priority */
+			if (cpu_has_ipr())
+				__raw_writel(i | IPR_VALID, IRQ_BASE + IPR(i));
+
+			irq = PXA_IRQ(i);
+			irq_set_chip_and_handler(irq, &pxa_internal_irq_chip,
+						 handle_level_irq);
+			irq_set_chip_data(irq, base);
+			set_irq_flags(irq, IRQF_VALID);
+		}
+	}
+
+	/* only unmasked interrupts kick us out of idle */
+	__raw_writel(1, irq_base(0) + ICCR);
+
+	pxa_internal_irq_chip.irq_set_wake = fn;
+	pxa_init_low_gpio_irq(fn);
+}
+
+#ifdef CONFIG_PM
+static unsigned long saved_icmr[MAX_INTERNAL_IRQS/32];
+static unsigned long saved_ipr[MAX_INTERNAL_IRQS];
+
+static int pxa_irq_suspend(struct sys_device *dev, pm_message_t state)
+{
+	int i;
+
+	for (i = 0; i < pxa_internal_irq_nr / 32; i++) {
+		void __iomem *base = irq_base(i);
+
+		saved_icmr[i] = __raw_readl(base + ICMR);
+		__raw_writel(0, base + ICMR);
+	}
+
+	if (cpu_has_ipr()) {
+		for (i = 0; i < pxa_internal_irq_nr; i++)
+			saved_ipr[i] = __raw_readl(IRQ_BASE + IPR(i));
+	}
+
+	return 0;
+}
+
+static int pxa_irq_resume(struct sys_device *dev)
+{
+	int i;
+
+	for (i = 0; i < pxa_internal_irq_nr / 32; i++) {
+		void __iomem *base = irq_base(i);
+
+		__raw_writel(saved_icmr[i], base + ICMR);
+		__raw_writel(0, base + ICLR);
+	}
+
+	if (cpu_has_ipr())
+		for (i = 0; i < pxa_internal_irq_nr; i++)
+			__raw_writel(saved_ipr[i], IRQ_BASE + IPR(i));
+
+	__raw_writel(1, IRQ_BASE + ICCR);
+	return 0;
+}
+#else
+#define pxa_irq_suspend		NULL
+#define pxa_irq_resume		NULL
+#endif
+
+struct sysdev_class pxa_irq_sysclass = {
+	.name		= "irq",
+	.suspend	= pxa_irq_suspend,
+	.resume		= pxa_irq_resume,
+};
+
+static int __init pxa_irq_init(void)
+{
+	return sysdev_class_register(&pxa_irq_sysclass);
+}
+
+core_initcall(pxa_irq_init);

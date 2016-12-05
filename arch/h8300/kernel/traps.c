@@ -5,7 +5,7 @@
  * Cloned from Linux/m68k.
  *
  * No original Copyright holder listed,
- * Probabily original (C) Roman Zippel (assigned DJD, 1999)
+ * Probable original (C) Roman Zippel (assigned DJD, 1999)
  *
  * Copyright 1999-2000 D. Jeff Dionne, <jeff@rt-control.com>
  *
@@ -16,15 +16,18 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
-#include <linux/kernel_stat.h>
+#include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/init.h>
+#include <linux/module.h>
+#include <linux/bug.h>
 
 #include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/traps.h>
 #include <asm/page.h>
-#include <asm/gpio.h>
+
+static DEFINE_SPINLOCK(die_lock);
 
 /*
  * this must be called very early as the kernel might
@@ -41,7 +44,7 @@ void __init trap_init (void)
 
 asmlinkage void set_esp0 (unsigned long ssp)
 {
-  current->thread.esp0 = ssp;
+	current->thread.esp0 = ssp;
 }
 
 /*
@@ -55,14 +58,6 @@ static void dump(struct pt_regs *fp)
 	int		i;
 
 	printk("\nCURRENT PROCESS:\n\n");
-#if 0
-{
-	extern int	swt_lastjiffies, swt_reference;
-	printk("WATCHDOG: jiffies=%d lastjiffies=%d [%d] reference=%d\n",
-		jiffies, swt_lastjiffies, (swt_lastjiffies - jiffies),
-		swt_reference);
-}
-#endif
 	printk("COMM=%s PID=%d\n", current->comm, current->pid);
 	if (current->mm) {
 		printk("TEXT=%08x-%08x DATA=%08x-%08x BSS=%08x-%08x\n",
@@ -77,12 +72,7 @@ static void dump(struct pt_regs *fp)
 			(int) PAGE_SIZE+(unsigned long)current);
 	}
 
-	printk("PC: %08lx\n", (long)fp->pc);
-	printk("CCR: %02x   SP: %08lx\n", fp->ccr, (long) fp);
-	printk("ER0: %08lx  ER1: %08lx   ER2: %08lx   ER3: %08lx\n",
-		fp->er0, fp->er1, fp->er2, fp->er3);
-	printk("ER4: %08lx  ER5: %08lx   ER6: %08lx\n",
-		fp->er4, fp->er5, fp->er6);
+	show_regs(fp);
 	printk("\nCODE:");
 	tp = ((unsigned char *) fp->pc) - 0x20;
 	for (sp = (unsigned long *) tp, i = 0; (i < 0x40);  i += 4) {
@@ -106,22 +96,19 @@ static void dump(struct pt_regs *fp)
 	printk("\n\n");
 }
 
-void show_trace_task(struct task_struct *tsk)
+void die(const char *str, struct pt_regs *fp, unsigned long err)
 {
-	/* DAVIDM: we can do better, need a proper stack dump */
-	printk("STACK ksp=0x%lx, usp=0x%lx\n", tsk->thread.ksp, tsk->thread.usp);
-}
+	static int diecount;
 
-void die_if_kernel (char *str, struct pt_regs *fp, int nr)
-{
-	extern int console_loglevel;
+	oops_enter();
 
-	if (!(fp->ccr & PS_S))
-		return;
-
-	console_loglevel = 15;
+	console_verbose();
+	spin_lock_irq(&die_lock);
+	report_bug(fp->pc, fp);
+	printk(KERN_EMERG "%s: %04lx [#%d] ", str, err & 0xffff, ++diecount);
 	dump(fp);
 
+	spin_unlock_irq(&die_lock);
 	do_exit(SIGSEGV);
 }
 
@@ -154,7 +141,7 @@ void show_stack(struct task_struct *task, unsigned long *esp)
 	printk("\nCall Trace:");
 	i = 0;
 	stack = esp;
-	while (((unsigned long)stack & (THREAD_SIZE - 1)) == 0) {
+	while (((unsigned long)stack & (THREAD_SIZE - 1)) != 0) {
 		addr = *stack++;
 		/*
 		 * If the address is either in the text segment of the
@@ -174,3 +161,14 @@ void show_stack(struct task_struct *task, unsigned long *esp)
 	printk("\n");
 }
 
+void show_trace_task(struct task_struct *tsk)
+{
+	show_stack(tsk,(unsigned long *)tsk->thread.esp0);
+}
+
+void dump_stack(void)
+{
+	show_stack(NULL,NULL);
+}
+
+EXPORT_SYMBOL(dump_stack);

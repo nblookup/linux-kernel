@@ -9,24 +9,23 @@
  * Based on: sa1100-flash.c, which has the following copyright:
  * Flash memory access on SA11x0 based devices
  *
- * (C) 2000 Nicolas Pitre <nico@cam.org>
+ * (C) 2000 Nicolas Pitre <nico@fluxnic.net>
  *
- * $Id: ceiva.c,v 1.8 2003/05/21 12:45:18 dwmw2 Exp $
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/concat.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/io.h>
 #include <asm/sizes.h>
@@ -43,7 +42,7 @@
  *
  * Please note:
  *  1. The flash size given should be the largest flash size that can
- *     be accomodated.
+ *     be accommodated.
  *
  *  2. The bus width must defined in clps_setup_flash.
  *
@@ -59,7 +58,7 @@
 #define BOOT_PARTITION_SIZE_KiB       (16)
 #define PARAMS_PARTITION_SIZE_KiB     (8)
 #define KERNEL_PARTITION_SIZE_KiB     (4*128)
-/* Use both remaing portion of first flash, and all of second flash */
+/* Use both remaining portion of first flash, and all of second flash */
 #define ROOT_PARTITION_SIZE_KiB       (3*128) + (8*128)
 
 static struct mtd_partition ceiva_partitions[] = {
@@ -122,10 +121,9 @@ static int __init clps_setup_mtd(struct clps_info *clps, int nr, struct mtd_info
 	/*
 	 * Allocate the map_info structs in one go.
 	 */
-	maps = kmalloc(sizeof(struct map_info) * nr, GFP_KERNEL);
+	maps = kzalloc(sizeof(struct map_info) * nr, GFP_KERNEL);
 	if (!maps)
 		return -ENOMEM;
-	memset(maps, 0, sizeof(struct map_info) * nr);
 	/*
 	 * Claim and then map the memory regions.
 	 */
@@ -150,8 +148,8 @@ static int __init clps_setup_mtd(struct clps_info *clps, int nr, struct mtd_info
 			break;
 		}
 
-		clps[i].map->virt = (unsigned long)clps[i].vbase;
-		clps[i].map->buswidth = clps[i].width;
+		clps[i].map->virt = (void __iomem *)clps[i].vbase;
+		clps[i].map->bankwidth = clps[i].width;
 		clps[i].map->size = clps[i].size;
 
 		simple_map_init(&clps[i].map);
@@ -196,16 +194,10 @@ static int __init clps_setup_mtd(struct clps_info *clps, int nr, struct mtd_info
 			 * We detected multiple devices.  Concatenate
 			 * them together.
 			 */
-#ifdef CONFIG_MTD_CONCAT
 			*rmtd = mtd_concat_create(subdev, found,
 						  "clps flash");
 			if (*rmtd == NULL)
 				ret = -ENXIO;
-#else
-			printk(KERN_ERR "clps flash: multiple devices "
-			       "found but MTD concat support disabled.\n");
-			ret = -ENXIO;
-#endif
 		}
 	}
 
@@ -255,7 +247,7 @@ static void __exit clps_destroy_mtd(struct clps_info *clps, struct mtd_info *mtd
 
 static int __init clps_setup_flash(void)
 {
-	int nr;
+	int nr = 0;
 
 #ifdef CONFIG_ARCH_CEIVA
 	if (machine_is_ceiva()) {
@@ -312,8 +304,7 @@ static void __init clps_locate_partitions(struct mtd_info *mtd)
 
 static void __exit clps_destroy_partitions(void)
 {
-	if (parsed_parts)
-		kfree(parsed_parts);
+	kfree(parsed_parts);
 }
 
 static struct mtd_info *mymtd;

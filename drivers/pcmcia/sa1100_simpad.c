@@ -6,14 +6,13 @@
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/init.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/irq.h>
-#include <asm/arch/simpad.h>
+#include <mach/simpad.h>
 #include "sa1100_generic.h"
  
 extern long get_cs3_shadow(void);
@@ -24,19 +23,19 @@ static struct pcmcia_irqs irqs[] = {
 	{ 1, IRQ_GPIO_CF_CD, "CF_CD" },
 };
 
-static int simpad_pcmcia_hw_init(struct sa1100_pcmcia_socket *skt)
+static int simpad_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 {
 
 	clear_cs3_bit(VCC_3V_EN|VCC_5V_EN|EN0|EN1);
 
-	skt->irq = IRQ_GPIO_CF_IRQ;
+	skt->socket.pci_irq = IRQ_GPIO_CF_IRQ;
 
-	return sa11xx_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	return soc_pcmcia_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
-static void simpad_pcmcia_hw_shutdown(struct sa1100_pcmcia_socket *skt)
+static void simpad_pcmcia_hw_shutdown(struct soc_pcmcia_socket *skt)
 {
-	sa11xx_free_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	soc_pcmcia_free_irqs(skt, irqs, ARRAY_SIZE(irqs));
 
 	/* Disable CF bus: */
 	//set_cs3_bit(PCMCIA_BUFF_DIS);
@@ -44,11 +43,11 @@ static void simpad_pcmcia_hw_shutdown(struct sa1100_pcmcia_socket *skt)
 }
 
 static void
-simpad_pcmcia_socket_state(struct sa1100_pcmcia_socket *skt,
+simpad_pcmcia_socket_state(struct soc_pcmcia_socket *skt,
 			   struct pcmcia_state *state)
 {
 	unsigned long levels = GPLR;
-	unsigned long *cs3reg = CS3_BASE;
+	long cs3reg = get_cs3_shadow();
 
 	state->detect=((levels & GPIO_CF_CD)==0)?1:0;
 	state->ready=(levels & GPIO_CF_IRQ)?1:0;
@@ -56,7 +55,7 @@ simpad_pcmcia_socket_state(struct sa1100_pcmcia_socket *skt,
 	state->bvd2=1; /* Not available on Simpad. */
 	state->wrprot=0; /* Not available on Simpad. */
   
-	if((*cs3reg & 0x0c) == 0x0c) {
+	if((cs3reg & 0x0c) == 0x0c) {
 		state->vs_3v=0;
 		state->vs_Xv=0;
 	} else {
@@ -66,7 +65,7 @@ simpad_pcmcia_socket_state(struct sa1100_pcmcia_socket *skt,
 }
 
 static int
-simpad_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt,
+simpad_pcmcia_configure_socket(struct soc_pcmcia_socket *skt,
 			       const socket_state_t *state)
 {
 	unsigned long flags;
@@ -91,7 +90,7 @@ simpad_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt,
 
 	default:
 		printk(KERN_ERR "%s(): unrecognized Vcc %u\n",
-			__FUNCTION__, state->Vcc);
+			__func__, state->Vcc);
 		clear_cs3_bit(VCC_3V_EN|VCC_5V_EN|EN0|EN1);
 		local_irq_restore(flags);
 		return -1;
@@ -103,14 +102,14 @@ simpad_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt,
 	return 0;
 }
 
-static void simpad_pcmcia_socket_init(struct sa1100_pcmcia_socket *skt)
+static void simpad_pcmcia_socket_init(struct soc_pcmcia_socket *skt)
 {
-	sa11xx_enable_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	soc_pcmcia_enable_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
-static void simpad_pcmcia_socket_suspend(struct sa1100_pcmcia_socket *skt)
+static void simpad_pcmcia_socket_suspend(struct soc_pcmcia_socket *skt)
 {
-	sa11xx_disable_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	soc_pcmcia_disable_irqs(skt, irqs, ARRAY_SIZE(irqs));
 	set_cs3_bit(PCMCIA_RESET);
 }
 
@@ -124,7 +123,7 @@ static struct pcmcia_low_level simpad_pcmcia_ops = {
 	.socket_suspend		= simpad_pcmcia_socket_suspend,
 };
 
-int __init pcmcia_simpad_init(struct device *dev)
+int __devinit pcmcia_simpad_init(struct device *dev)
 {
 	int ret = -ENODEV;
 

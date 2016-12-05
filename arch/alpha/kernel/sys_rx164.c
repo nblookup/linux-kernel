@@ -14,12 +14,12 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
 #include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
@@ -47,43 +47,26 @@ rx164_update_irq_hw(unsigned long mask)
 }
 
 static inline void
-rx164_enable_irq(unsigned int irq)
+rx164_enable_irq(struct irq_data *d)
 {
-	rx164_update_irq_hw(cached_irq_mask |= 1UL << (irq - 16));
+	rx164_update_irq_hw(cached_irq_mask |= 1UL << (d->irq - 16));
 }
 
 static void
-rx164_disable_irq(unsigned int irq)
+rx164_disable_irq(struct irq_data *d)
 {
-	rx164_update_irq_hw(cached_irq_mask &= ~(1UL << (irq - 16)));
+	rx164_update_irq_hw(cached_irq_mask &= ~(1UL << (d->irq - 16)));
 }
 
-static unsigned int
-rx164_startup_irq(unsigned int irq)
-{
-	rx164_enable_irq(irq);
-	return 0;
-}
-
-static void
-rx164_end_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		rx164_enable_irq(irq);
-}
-
-static struct hw_interrupt_type rx164_irq_type = {
-	.typename	= "RX164",
-	.startup	= rx164_startup_irq,
-	.shutdown	= rx164_disable_irq,
-	.enable		= rx164_enable_irq,
-	.disable	= rx164_disable_irq,
-	.ack		= rx164_disable_irq,
-	.end		= rx164_end_irq,
+static struct irq_chip rx164_irq_type = {
+	.name		= "RX164",
+	.irq_unmask	= rx164_enable_irq,
+	.irq_mask	= rx164_disable_irq,
+	.irq_mask_ack	= rx164_disable_irq,
 };
 
 static void 
-rx164_device_interrupt(unsigned long vector, struct pt_regs *regs)
+rx164_device_interrupt(unsigned long vector)
 {
 	unsigned long pld;
 	volatile unsigned int *dirr;
@@ -102,9 +85,9 @@ rx164_device_interrupt(unsigned long vector, struct pt_regs *regs)
 		i = ffz(~pld);
 		pld &= pld - 1; /* clear least bit set */
 		if (i == 20) {
-			isa_no_iack_sc_device_interrupt(vector, regs);
+			isa_no_iack_sc_device_interrupt(vector);
 		} else {
-			handle_irq(16+i, regs);
+			handle_irq(16+i);
 		}
 	}
 }
@@ -116,8 +99,8 @@ rx164_init_irq(void)
 
 	rx164_update_irq_hw(0);
 	for (i = 16; i < 40; ++i) {
-		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = &rx164_irq_type;
+		irq_set_chip_and_handler(i, &rx164_irq_type, handle_level_irq);
+		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
 	init_i8259a_irqs();
@@ -201,7 +184,6 @@ struct alpha_machine_vector rx164_mv __initmv = {
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_POLARIS_IO,
-	DO_POLARIS_BUS,
 	.machine_check		= polaris_machine_check,
 	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
 	.min_io_address		= DEFAULT_IO_BASE,

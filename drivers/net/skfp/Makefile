@@ -6,8 +6,8 @@ obj-$(CONFIG_SKFP) += skfp.o
 
 skfp-objs :=  skfddi.o    hwmtm.o    fplustm.o  smt.o      cfm.o     \
               ecm.o       pcmplc.o   pmf.o      queue.o    rmt.o     \
-	      smtdef.o    smtinit.o  smttimer.o srf.o      lnkstat.o \
-              smtparse.o  hwt.o      drvfbi.o   ess.o
+	      smtdef.o    smtinit.o  smttimer.o srf.o      hwt.o     \
+	      drvfbi.o   ess.o
 
 # NOTE:
 #   Compiling this driver produces some warnings (and some more are 
@@ -17,4 +17,4 @@ skfp-objs :=  skfddi.o    hwmtm.o    fplustm.o  smt.o      cfm.o     \
 #   projects. To keep the source common for all those drivers (and
 #   thus simplify fixes to it), please do not clean it up!
 
-EXTRA_CFLAGS += -Idrivers/net/skfp -DPCI -DMEM_MAPPED_IO -Wno-strict-prototypes 
+ccflags-y := -Idrivers/net/skfp -DPCI -DMEM_MAPPED_IO -Wno-strict-prototypes

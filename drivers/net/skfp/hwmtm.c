@@ -75,15 +75,18 @@ extern	u_char	force_irq_pending ;
 	-------------------------------------------------------------
 */
 
-static	void	queue_llc_rx(),		smt_to_llc(),
-		init_txd_ring(),	init_rxd_ring(),
-		queue_txd_mb() ;
-
-static	u_long	init_descr_ring(),	repair_txd_ring(),
-		repair_rxd_ring() ;
-
-static	SMbuf	*get_llc_rx(),		*get_txd_mb() ;
-
+static void queue_llc_rx(struct s_smc *smc, SMbuf *mb);
+static void smt_to_llc(struct s_smc *smc, SMbuf *mb);
+static void init_txd_ring(struct s_smc *smc);
+static void init_rxd_ring(struct s_smc *smc);
+static void queue_txd_mb(struct s_smc *smc, SMbuf *mb);
+static u_long init_descr_ring(struct s_smc *smc, union s_fp_descr volatile *start,
+			      int count);
+static u_long repair_txd_ring(struct s_smc *smc, struct s_smt_tx_queue *queue);
+static u_long repair_rxd_ring(struct s_smc *smc, struct s_smt_rx_queue *queue);
+static SMbuf* get_llc_rx(struct s_smc *smc);
+static SMbuf* get_txd_mb(struct s_smc *smc);
+static void mac_drv_clear_txd(struct s_smc *smc);
 
 /*
 	-------------------------------------------------------------
@@ -92,55 +95,70 @@ static	SMbuf	*get_llc_rx(),		*get_txd_mb() ;
 */
 /*	The external SMT functions are listed in cmtdef.h */
 
-extern	void	*mac_drv_get_space(),	*mac_drv_get_desc_mem(),
-		init_board(),		mac_drv_fill_rxd(),
-		plc1_irq(),		mac_drv_tx_complete(),
-		plc2_irq(),		mac1_irq(),
-		mac2_irq(),		mac3_irq(),
-		timer_irq(),		mac_drv_rx_complete(),
-		mac_drv_requeue_rxd(),	init_plc(),
-		mac_drv_clear_rxd(),	llc_restart_tx(),
-		ev_dispatcher(),	smt_force_irq() ;
+extern void* mac_drv_get_space(struct s_smc *smc, unsigned int size);
+extern void* mac_drv_get_desc_mem(struct s_smc *smc, unsigned int size);
+extern void mac_drv_fill_rxd(struct s_smc *smc);
+extern void mac_drv_tx_complete(struct s_smc *smc,
+				volatile struct s_smt_fp_txd *txd);
+extern void mac_drv_rx_complete(struct s_smc *smc,
+				volatile struct s_smt_fp_rxd *rxd,
+				int frag_count, int len);
+extern void mac_drv_requeue_rxd(struct s_smc *smc, 
+				volatile struct s_smt_fp_rxd *rxd,
+				int frag_count);
+extern void mac_drv_clear_rxd(struct s_smc *smc,
+			      volatile struct s_smt_fp_rxd *rxd, int frag_count);
 
 #ifdef	USE_OS_CPY
-extern	void	hwm_cpy_rxd2mb(),	hwm_cpy_txd2mb() ;
-#endif
-#ifdef	ALL_RX_COMPLETE
-extern	void	mac_drv_all_receives_complete() ;
+extern void hwm_cpy_rxd2mb(void);
+extern void hwm_cpy_txd2mb(void);
 #endif
 
-extern	u_long	mac_drv_virt2phys(),	dma_master() ;
+#ifdef	ALL_RX_COMPLETE
+extern void mac_drv_all_receives_complete(void);
+#endif
+
+extern u_long mac_drv_virt2phys(struct s_smc *smc, void *virt);
+extern u_long dma_master(struct s_smc *smc, void *virt, int len, int flag);
 
 #ifdef	NDIS_OS2
-extern	void	post_proc() ;
+extern void post_proc(void);
 #else
-extern	void	dma_complete() ;
+extern void dma_complete(struct s_smc *smc, volatile union s_fp_descr *descr,
+			 int flag);
 #endif
 
-extern	int	init_fplus(),		mac_drv_rx_init() ;
+extern int mac_drv_rx_init(struct s_smc *smc, int len, int fc, char *look_ahead,
+			   int la_len);
 
 /*
 	-------------------------------------------------------------
 	PUBLIC FUNCTIONS:
 	-------------------------------------------------------------
 */
-	void	process_receive(),	smt_send_mbuf(),
-		fddi_isr(),		mac_drv_clear_txd(),
-		smt_free_mbuf(),	init_driver_fplus(),
-		mac_drv_rx_mode(),	init_fddi_driver(),
-		mac_drv_clear_tx_queue(),
-		mac_drv_clear_rx_queue(),
-		hwm_tx_frag(),		hwm_rx_frag() ;
+void process_receive(struct s_smc *smc);
+void fddi_isr(struct s_smc *smc);
+void smt_free_mbuf(struct s_smc *smc, SMbuf *mb);
+void init_driver_fplus(struct s_smc *smc);
+void mac_drv_rx_mode(struct s_smc *smc, int mode);
+void init_fddi_driver(struct s_smc *smc, u_char *mac_addr);
+void mac_drv_clear_tx_queue(struct s_smc *smc);
+void mac_drv_clear_rx_queue(struct s_smc *smc);
+void hwm_tx_frag(struct s_smc *smc, char far *virt, u_long phys, int len,
+		 int frame_status);
+void hwm_rx_frag(struct s_smc *smc, char far *virt, u_long phys, int len,
+		 int frame_status);
 
-	int	mac_drv_rx_frag(),	mac_drv_init(),
-		hwm_tx_init() ;
+int mac_drv_init(struct s_smc *smc);
+int hwm_tx_init(struct s_smc *smc, u_char fc, int frag_count, int frame_len,
+		int frame_status);
 
-	u_int	mac_drv_check_space() ;
+u_int mac_drv_check_space(void);
 
-	SMbuf 	*smt_get_mbuf() ;
+SMbuf* smt_get_mbuf(struct s_smc *smc);
 
 #ifdef DEBUG
-	void	mac_drv_debug_lev() ;
+	void mac_drv_debug_lev(void);
 #endif
 
 /*
@@ -181,7 +199,7 @@ extern	int	init_fplus(),		mac_drv_rx_init() ;
 #if	defined(NDIS_OS2) || defined(ODI2)
 #define CR_READ(var)	((var) & 0xffff0000 | ((var) & 0xffff))
 #else
-#define CR_READ(var)	(u_long)(var)
+#define CR_READ(var)	(__le32)(var)
 #endif
 
 #define IMASK_SLOW	(IS_PLINT1 | IS_PLINT2 | IS_TIMINT | IS_TOKEN | \
@@ -208,22 +226,22 @@ extern	int	init_fplus(),		mac_drv_rx_init() ;
  *
  *	END_MANUAL_ENTRY
  */
-u_int mac_drv_check_space()
+u_int mac_drv_check_space(void)
 {
 #ifdef	MB_OUTSIDE_SMC
 #ifdef	COMMON_MB_POOL
 	call_count++ ;
 	if (call_count == 1) {
-		return(EXT_VIRT_MEM) ;
+		return EXT_VIRT_MEM;
 	}
 	else {
-		return(EXT_VIRT_MEM_2) ;
+		return EXT_VIRT_MEM_2;
 	}
 #else
-	return (EXT_VIRT_MEM) ;
+	return EXT_VIRT_MEM;
 #endif
 #else
-	return (0) ;
+	return 0;
 #endif
 }
 
@@ -238,8 +256,7 @@ u_int mac_drv_check_space()
  *			mac_drv_init once, after the adatper is detected.
  *	END_MANUAL_ENTRY
  */
-int mac_drv_init(smc)
-struct s_smc *smc ;
+int mac_drv_init(struct s_smc *smc)
 {
 	if (sizeof(struct s_smt_fp_rxd) % 16) {
 		SMT_PANIC(smc,HWM_E0001,HWM_E0001_MSG) ;
@@ -254,7 +271,7 @@ struct s_smc *smc ;
 	if (!(smc->os.hwm.descr_p = (union s_fp_descr volatile *)
 		mac_drv_get_desc_mem(smc,(u_int)
 		(RXD_TXD_COUNT+1)*sizeof(struct s_smt_fp_txd)))) {
-		return(1) ;	/* no space the hwm modul can't work */
+		return 1;	/* no space the hwm modul can't work */
 	}
 
 	/*
@@ -266,18 +283,18 @@ struct s_smc *smc ;
 #ifndef	COMMON_MB_POOL
 	if (!(smc->os.hwm.mbuf_pool.mb_start = (SMbuf *) mac_drv_get_space(smc,
 		MAX_MBUF*sizeof(SMbuf)))) {
-		return(1) ;	/* no space the hwm modul can't work */
+		return 1;	/* no space the hwm modul can't work */
 	}
 #else
 	if (!mb_start) {
 		if (!(mb_start = (SMbuf *) mac_drv_get_space(smc,
 			MAX_MBUF*sizeof(SMbuf)))) {
-			return(1) ;	/* no space the hwm modul can't work */
+			return 1;	/* no space the hwm modul can't work */
 		}
 	}
 #endif
 #endif
-	return (0) ;
+	return 0;
 }
 
 /*
@@ -289,8 +306,7 @@ struct s_smc *smc ;
  *	 least significant byte etc.)
  *	END_MANUAL_ENTRY
  */
-void init_driver_fplus(smc)
-struct s_smc *smc ;
+void init_driver_fplus(struct s_smc *smc)
 {
 	smc->hw.fp.mdr2init = FM_LSB | FM_BMMODE | FM_ENNPRQ | FM_ENHSRQ | 3 ;
 
@@ -305,10 +321,9 @@ struct s_smc *smc ;
 #endif
 }
 
-static u_long init_descr_ring(smc,start,count)
-struct s_smc *smc ;
-union s_fp_descr volatile *start;
-int count ;
+static u_long init_descr_ring(struct s_smc *smc,
+			      union s_fp_descr volatile *start,
+			      int count)
 {
 	int i ;
 	union s_fp_descr volatile *d1 ;
@@ -319,26 +334,25 @@ int count ;
 	for (i=count-1, d1=start; i ; i--) {
 		d2 = d1 ;
 		d1++ ;		/* descr is owned by the host */
-		d2->r.rxd_rbctrl = AIX_REVERSE(BMU_CHECK) ;
+		d2->r.rxd_rbctrl = cpu_to_le32(BMU_CHECK) ;
 		d2->r.rxd_next = &d1->r ;
 		phys = mac_drv_virt2phys(smc,(void *)d1) ;
-		d2->r.rxd_nrdadr = AIX_REVERSE(phys) ;
+		d2->r.rxd_nrdadr = cpu_to_le32(phys) ;
 	}
 	DB_GEN("descr ring ends at = %x ",(void *)d1,0,3) ;
-	d1->r.rxd_rbctrl = AIX_REVERSE(BMU_CHECK) ;
+	d1->r.rxd_rbctrl = cpu_to_le32(BMU_CHECK) ;
 	d1->r.rxd_next = &start->r ;
 	phys = mac_drv_virt2phys(smc,(void *)start) ;
-	d1->r.rxd_nrdadr = AIX_REVERSE(phys) ;
+	d1->r.rxd_nrdadr = cpu_to_le32(phys) ;
 
 	for (i=count, d1=start; i ; i--) {
 		DRV_BUF_FLUSH(&d1->r,DDI_DMA_SYNC_FORDEV) ;
 		d1++;
 	}
-	return(phys) ;
+	return phys;
 }
 
-static void init_txd_ring(smc)
-struct s_smc *smc ;
+static void init_txd_ring(struct s_smc *smc)
 {
 	struct s_smt_fp_txd volatile *ds ;
 	struct s_smt_tx_queue *queue ;
@@ -353,7 +367,7 @@ struct s_smc *smc ;
 	DB_GEN("Init async TxD ring, %d TxDs ",HWM_ASYNC_TXD_COUNT,0,3) ;
 	(void)init_descr_ring(smc,(union s_fp_descr volatile *)ds,
 		HWM_ASYNC_TXD_COUNT) ;
-	phys = AIX_REVERSE(ds->txd_ntdadr) ;
+	phys = le32_to_cpu(ds->txd_ntdadr) ;
 	ds++ ;
 	queue->tx_curr_put = queue->tx_curr_get = ds ;
 	ds-- ;
@@ -367,7 +381,7 @@ struct s_smc *smc ;
 	DB_GEN("Init sync TxD ring, %d TxDs ",HWM_SYNC_TXD_COUNT,0,3) ;
 	(void)init_descr_ring(smc,(union s_fp_descr volatile *)ds,
 		HWM_SYNC_TXD_COUNT) ;
-	phys = AIX_REVERSE(ds->txd_ntdadr) ;
+	phys = le32_to_cpu(ds->txd_ntdadr) ;
 	ds++ ;
 	queue->tx_curr_put = queue->tx_curr_get = ds ;
 	queue->tx_free = HWM_SYNC_TXD_COUNT ;
@@ -375,8 +389,7 @@ struct s_smc *smc ;
 	outpd(ADDR(B5_XS_DA),phys) ;
 }
 
-static void init_rxd_ring(smc)
-struct s_smc *smc ;
+static void init_rxd_ring(struct s_smc *smc)
 {
 	struct s_smt_fp_rxd volatile *ds ;
 	struct s_smt_rx_queue *queue ;
@@ -390,7 +403,7 @@ struct s_smc *smc ;
 	DB_GEN("Init RxD ring, %d RxDs ",SMT_R1_RXD_COUNT,0,3) ;
 	(void)init_descr_ring(smc,(union s_fp_descr volatile *)ds,
 		SMT_R1_RXD_COUNT) ;
-	phys = AIX_REVERSE(ds->rxd_nrdadr) ;
+	phys = le32_to_cpu(ds->rxd_nrdadr) ;
 	ds++ ;
 	queue->rx_curr_put = queue->rx_curr_get = ds ;
 	queue->rx_free = SMT_R1_RXD_COUNT ;
@@ -406,9 +419,7 @@ struct s_smc *smc ;
  *
  *	END_MANUAL_ENTRY
  */
-void init_fddi_driver(smc,mac_addr)
-struct	s_smc	*smc ;
-u_char		*mac_addr ;	/* canonical address */
+void init_fddi_driver(struct s_smc *smc, u_char *mac_addr)
 {
 	SMbuf	*mb ;
 	int	i ;
@@ -472,8 +483,7 @@ u_char		*mac_addr ;	/* canonical address */
 }
 
 
-SMbuf *smt_get_mbuf(smc)
-struct s_smc *smc ;
+SMbuf *smt_get_mbuf(struct s_smc *smc)
 {
 	register SMbuf	*mb ;
 
@@ -492,12 +502,10 @@ struct s_smc *smc ;
 		mb->sm_use_count = 1 ;
 	}
 	DB_GEN("get SMbuf: mb = %x",(void *)mb,0,3) ;
-	return (mb) ;	/* May be NULL */
+	return mb;	/* May be NULL */
 }
 
-void smt_free_mbuf(smc, mb)
-struct s_smc	*smc ;
-SMbuf		*mb;
+void smt_free_mbuf(struct s_smc *smc, SMbuf *mb)
 {
 
 	if (mb) {
@@ -543,8 +551,7 @@ SMbuf		*mb;
  *
  *	END_MANUAL_ENTRY
  */
-void mac_drv_repair_descr(smc)
-struct s_smc *smc ;
+void mac_drv_repair_descr(struct s_smc *smc)
 {
 	u_long	phys ;
 
@@ -576,9 +583,7 @@ struct s_smc *smc ;
 	outpd(ADDR(B0_R1_CSR),CSR_START) ;
 }
 
-static u_long repair_txd_ring(smc,queue)
-struct s_smc *smc ;
-struct s_smt_tx_queue *queue ;
+static u_long repair_txd_ring(struct s_smc *smc, struct s_smt_tx_queue *queue)
 {
 	int i ;
 	int tx_used ;
@@ -593,12 +598,12 @@ struct s_smt_tx_queue *queue ;
 	for (i = tx_used+queue->tx_free-1 ; i ; i-- ) {
 		t = t->txd_next ;
 	}
-	phys = AIX_REVERSE(t->txd_ntdadr) ;
+	phys = le32_to_cpu(t->txd_ntdadr) ;
 
 	t = queue->tx_curr_get ;
 	while (tx_used) {
 		DRV_BUF_FLUSH(t,DDI_DMA_SYNC_FORCPU) ;
-		tbctrl = AIX_REVERSE(t->txd_tbctrl) ;
+		tbctrl = le32_to_cpu(t->txd_tbctrl) ;
 
 		if (tbctrl & BMU_OWN) {
 			if (tbctrl & BMU_STF) {
@@ -608,15 +613,15 @@ struct s_smt_tx_queue *queue ;
 				/*
 				 * repair the descriptor
 				 */
-				t->txd_tbctrl &= AIX_REVERSE(~BMU_OWN) ;
+				t->txd_tbctrl &= ~cpu_to_le32(BMU_OWN) ;
 			}
 		}
-		phys = AIX_REVERSE(t->txd_ntdadr) ;
+		phys = le32_to_cpu(t->txd_ntdadr) ;
 		DRV_BUF_FLUSH(t,DDI_DMA_SYNC_FORDEV) ;
 		t = t->txd_next ;
 		tx_used-- ;
 	}
-	return(phys) ;
+	return phys;
 }
 
 /*
@@ -630,9 +635,7 @@ struct s_smt_tx_queue *queue ;
  *	  RxDs with an OWN bit set but with a reset STF bit should be
  *	  skipped and owned by the driver (OWN = 0). 
  */
-static u_long repair_rxd_ring(smc,queue)
-struct s_smc *smc ;
-struct s_smt_rx_queue *queue ;
+static u_long repair_rxd_ring(struct s_smc *smc, struct s_smt_rx_queue *queue)
 {
 	int i ;
 	int rx_used ;
@@ -647,12 +650,12 @@ struct s_smt_rx_queue *queue ;
 	for (i = SMT_R1_RXD_COUNT-1 ; i ; i-- ) {
 		r = r->rxd_next ;
 	}
-	phys = AIX_REVERSE(r->rxd_nrdadr) ;
+	phys = le32_to_cpu(r->rxd_nrdadr) ;
 
 	r = queue->rx_curr_get ;
 	while (rx_used) {
 		DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORCPU) ;
-		rbctrl = AIX_REVERSE(r->rxd_rbctrl) ;
+		rbctrl = le32_to_cpu(r->rxd_rbctrl) ;
 
 		if (rbctrl & BMU_OWN) {
 			if (rbctrl & BMU_STF) {
@@ -662,15 +665,15 @@ struct s_smt_rx_queue *queue ;
 				/*
 				 * repair the descriptor
 				 */
-				r->rxd_rbctrl &= AIX_REVERSE(~BMU_OWN) ;
+				r->rxd_rbctrl &= ~cpu_to_le32(BMU_OWN) ;
 			}
 		}
-		phys = AIX_REVERSE(r->rxd_nrdadr) ;
+		phys = le32_to_cpu(r->rxd_nrdadr) ;
 		DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORDEV) ;
 		r = r->rxd_next ;
 		rx_used-- ;
 	}
-	return(phys) ;
+	return phys;
 }
 
 
@@ -688,7 +691,7 @@ struct s_smt_rx_queue *queue ;
  *		interrupt service routine, handles the interrupt requests
  *		generated by the FDDI adapter.
  *
- * NOTE:	The operating system dependent module must garantee that the
+ * NOTE:	The operating system dependent module must guarantee that the
  *		interrupts of the adapter are disabled when it calls fddi_isr.
  *
  *	About the USE_BREAK_ISR mechanismn:
@@ -703,8 +706,7 @@ struct s_smt_rx_queue *queue ;
  *
  *	END_MANUAL_ENTRY
  */
-void fddi_isr(smc)
-struct s_smc *smc ;
+void fddi_isr(struct s_smc *smc)
 {
 	u_long		is ;		/* ISR source */
 	u_short		stu, stl ;
@@ -987,9 +989,7 @@ struct s_smc *smc ;
  *
  *	END_MANUAL_ENTRY
  */
-void mac_drv_rx_mode(smc,mode)
-struct s_smc *smc ;
-int mode ;
+void mac_drv_rx_mode(struct s_smc *smc, int mode)
 {
 	switch(mode) {
 	case RX_ENABLE_PASS_SMT:
@@ -1038,8 +1038,7 @@ int mode ;
 /*
  * process receive queue
  */
-void process_receive(smc)
-struct s_smc *smc ;
+void process_receive(struct s_smc *smc)
 {
 	int i ;
 	int n ;
@@ -1086,8 +1085,7 @@ struct s_smc *smc ;
 		do {
 			DB_RX("Check RxD %x for OWN and EOF",(void *)r,0,5) ;
 			DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORCPU) ;
-			rbctrl = CR_READ(r->rxd_rbctrl) ;
-			rbctrl = AIX_REVERSE(rbctrl) ;
+			rbctrl = le32_to_cpu(CR_READ(r->rxd_rbctrl));
 
 			if (rbctrl & BMU_OWN) {
 				NDD_TRACE("RHxE",r,rfsw,rbctrl) ;
@@ -1110,7 +1108,7 @@ struct s_smc *smc ;
 				smc->os.hwm.detec_count = 0 ;
 				goto rx_end ;
 			}
-			rfsw = AIX_REVERSE(r->rxd_rfsw) ;
+			rfsw = le32_to_cpu(r->rxd_rfsw) ;
 			if ((rbctrl & BMU_STF) != ((rbctrl & BMU_ST_BUF) <<5)) {
 				/*
 				 * The BMU_STF bit is deleted, 1 frame is
@@ -1143,7 +1141,7 @@ struct s_smc *smc ;
 		/* may be next 2 DRV_BUF_FLUSH() can be skipped, because */
 		/* BMU_ST_BUF will not be changed by the ASIC */
 		DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORCPU) ;
-		while (rx_used && !(r->rxd_rbctrl & AIX_REVERSE(BMU_ST_BUF))) {
+		while (rx_used && !(r->rxd_rbctrl & cpu_to_le32(BMU_ST_BUF))) {
 			DB_RX("Check STF bit in %x",(void *)r,0,5) ;
 			r = r->rxd_next ;
 			DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORCPU) ;
@@ -1163,7 +1161,7 @@ struct s_smc *smc ;
 		/*
 		 * ASIC Errata no. 7 (STF - Bit Bug)
 		 */
-		rxd->rxd_rbctrl &= AIX_REVERSE(~BMU_STF) ;
+		rxd->rxd_rbctrl &= cpu_to_le32(~BMU_STF) ;
 
 		for (r=rxd, i=frag_count ; i ; r=r->rxd_next, i--){
 			DB_RX("dma_complete for RxD %x",(void *)r,0,5) ;
@@ -1177,7 +1175,7 @@ struct s_smc *smc ;
 
 		DB_RX("frame length = %d",len,0,4) ;
 		/*
-		 * check the frame_lenght and all error flags
+		 * check the frame_length and all error flags
 		 */
 		if (rfsw & (RX_MSRABT|RX_FS_E|RX_FS_CRC|RX_FS_IMPL)){
 			if (rfsw & RD_S_MSRABT) {
@@ -1279,7 +1277,7 @@ struct s_smc *smc ;
 			hwm_cpy_rxd2mb(rxd,data,len) ;
 #else
 			for (r=rxd, i=used_frags ; i ; r=r->rxd_next, i--){
-				n = AIX_REVERSE(r->rxd_rbctrl) & RD_LENGTH ;
+				n = le32_to_cpu(r->rxd_rbctrl) & RD_LENGTH ;
 				DB_RX("cp SMT frame to mb: len = %d",n,0,6) ;
 				memcpy(data,r->rxd_virt,n) ;
 				data += n ;
@@ -1379,9 +1377,7 @@ rx_end:
 	return ;	/* lint bug: needs return detect end of function */
 }
 
-static void smt_to_llc(smc,mb)
-struct s_smc *smc ;
-SMbuf *mb ;
+static void smt_to_llc(struct s_smc *smc, SMbuf *mb)
 {
 	u_char	fc ;
 
@@ -1416,22 +1412,18 @@ SMbuf *mb ;
  *
  *	END_MANUAL_ENTRY
  */
-void hwm_rx_frag(smc,virt,phys,len,frame_status)
-struct s_smc *smc ;
-char far *virt ;
-u_long phys ;
-int len ;
-int frame_status ;
+void hwm_rx_frag(struct s_smc *smc, char far *virt, u_long phys, int len,
+		 int frame_status)
 {
 	struct s_smt_fp_rxd volatile *r ;
-	u_int	rbctrl ;
+	__le32	rbctrl;
 
 	NDD_TRACE("RHfB",virt,len,frame_status) ;
 	DB_RX("hwm_rx_frag: len = %d, frame_status = %x\n",len,frame_status,2) ;
 	r = smc->hw.fp.rx_q[QUEUE_R1].rx_curr_put ;
 	r->rxd_virt = virt ;
-	r->rxd_rbadr = AIX_REVERSE(phys) ;
-	rbctrl = AIX_REVERSE( (((u_long)frame_status &
+	r->rxd_rbadr = cpu_to_le32(phys) ;
+	rbctrl = cpu_to_le32( (((__u32)frame_status &
 		(FIRST_FRAG|LAST_FRAG))<<26) |
 		(((u_long) frame_status & FIRST_FRAG) << 21) |
 		BMU_OWN | BMU_CHECK | BMU_EN_IRQ_EOF | len) ;
@@ -1442,40 +1434,8 @@ int frame_status ;
 	smc->hw.fp.rx_q[QUEUE_R1].rx_free-- ;
 	smc->hw.fp.rx_q[QUEUE_R1].rx_used++ ;
 	smc->hw.fp.rx_q[QUEUE_R1].rx_curr_put = r->rxd_next ;
-	NDD_TRACE("RHfE",r,AIX_REVERSE(r->rxd_rbadr),0) ;
+	NDD_TRACE("RHfE",r,le32_to_cpu(r->rxd_rbadr),0) ;
 }
-
-#ifndef	NDIS_OS2
-/*
- *	BEGIN_MANUAL_ENTRY(mac_drv_rx_frag)
- *	int mac_drv_rx_frag(smc,virt,len)
- *
- * function	DOWNCALL	(hwmtm.c)
- *		mac_drv_rx_frag fills the fragment with a part of the frame.
- *
- * para	virt	the virtual address of the fragment
- *	len	the length in bytes of the fragment
- *
- * return 0:	success code, no errors possible
- *
- *	END_MANUAL_ENTRY
- */
-int mac_drv_rx_frag(smc,virt,len)
-struct s_smc *smc ;
-void far *virt ;
-int len ;
-{
-	NDD_TRACE("RHSB",virt,len,smc->os.hwm.r.mb_pos) ;
-
-	DB_RX("receive from queue: len/virt: = %d/%x",len,virt,4) ;
-	memcpy((char far *)virt,smc->os.hwm.r.mb_pos,len) ;
-	smc->os.hwm.r.mb_pos += len ;
-
-	NDD_TRACE("RHSE",smc->os.hwm.r.mb_pos,0,0) ;
-	return(0) ;
-}
-#endif
-
 
 /*
  *	BEGINN_MANUAL_ENTRY(mac_drv_clear_rx_queue)
@@ -1500,8 +1460,7 @@ int len ;
  *
  *	END_MANUAL_ENTRY
  */
-void mac_drv_clear_rx_queue(smc)
-struct s_smc *smc ;
+void mac_drv_clear_rx_queue(struct s_smc *smc)
 {
 	struct s_smt_fp_rxd volatile *r ;
 	struct s_smt_fp_rxd volatile *next_rxd ;
@@ -1525,15 +1484,15 @@ struct s_smc *smc ;
 	while (queue->rx_used) {
 		DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORCPU) ;
 		DB_RX("switch OWN bit of RxD 0x%x ",r,0,5) ;
-		r->rxd_rbctrl &= AIX_REVERSE(~BMU_OWN) ;
+		r->rxd_rbctrl &= ~cpu_to_le32(BMU_OWN) ;
 		frag_count = 1 ;
 		DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORDEV) ;
 		r = r->rxd_next ;
 		DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORCPU) ;
 		while (r != queue->rx_curr_put &&
-			!(r->rxd_rbctrl & AIX_REVERSE(BMU_ST_BUF))) {
+			!(r->rxd_rbctrl & cpu_to_le32(BMU_ST_BUF))) {
 			DB_RX("Check STF bit in %x",(void *)r,0,5) ;
-			r->rxd_rbctrl &= AIX_REVERSE(~BMU_OWN) ;
+			r->rxd_rbctrl &= ~cpu_to_le32(BMU_OWN) ;
 			DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORDEV) ;
 			r = r->rxd_next ;
 			DRV_BUF_FLUSH(r,DDI_DMA_SYNC_FORCPU) ;
@@ -1588,12 +1547,8 @@ struct s_smc *smc ;
  *
  *	END_MANUAL_ENTRY
  */
-int hwm_tx_init(smc,fc,frag_count,frame_len,frame_status)
-struct	s_smc *smc ;
-u_char fc ;
-int frag_count ;
-int frame_len ;
-int frame_status ;
+int hwm_tx_init(struct s_smc *smc, u_char fc, int frag_count, int frame_len,
+		int frame_status)
 {
 	NDD_TRACE("THiB",fc,frag_count,frame_len) ;
 	smc->os.hwm.tx_p = smc->hw.fp.tx[frame_status & QUEUE_A0] ;
@@ -1640,7 +1595,7 @@ int frame_status ;
 	}
 	DB_TX("frame_status = %x",frame_status,0,3) ;
 	NDD_TRACE("THiE",frame_status,smc->os.hwm.tx_p->tx_free,0) ;
-	return(frame_status) ;
+	return frame_status;
 }
 
 /*
@@ -1670,16 +1625,12 @@ int frame_status ;
  *
  *	END_MANUAL_ENTRY
  */
-void hwm_tx_frag(smc,virt,phys,len,frame_status)
-struct	s_smc *smc ;
-char far *virt ;
-u_long phys ;
-int len ;
-int frame_status ;
+void hwm_tx_frag(struct s_smc *smc, char far *virt, u_long phys, int len,
+		 int frame_status)
 {
 	struct s_smt_fp_txd volatile *t ;
 	struct s_smt_tx_queue *queue ;
-	u_int	tbctrl ;
+	__le32	tbctrl ;
 
 	queue = smc->os.hwm.tx_p ;
 
@@ -1696,9 +1647,9 @@ int frame_status ;
 		/* '*t' is already defined */
 		DB_TX("LAN_TX: TxD = %x, virt = %x ",t,virt,3) ;
 		t->txd_virt = virt ;
-		t->txd_txdscr = AIX_REVERSE(smc->os.hwm.tx_descr) ;
-		t->txd_tbadr = AIX_REVERSE(phys) ;
-		tbctrl = AIX_REVERSE((((u_long)frame_status &
+		t->txd_txdscr = cpu_to_le32(smc->os.hwm.tx_descr) ;
+		t->txd_tbadr = cpu_to_le32(phys) ;
+		tbctrl = cpu_to_le32((((__u32)frame_status &
 			(FIRST_FRAG|LAST_FRAG|EN_IRQ_EOF))<< 26) |
 			BMU_OWN|BMU_CHECK |len) ;
 		t->txd_tbctrl = tbctrl ;
@@ -1780,14 +1731,12 @@ int frame_status ;
 /*
  * queues a receive for later send
  */
-static void queue_llc_rx(smc,mb)
-struct	s_smc *smc ;
-SMbuf	*mb ;
+static void queue_llc_rx(struct s_smc *smc, SMbuf *mb)
 {
 	DB_GEN("queue_llc_rx: mb = %x",(void *)mb,0,4) ;
 	smc->os.hwm.queued_rx_frames++ ;
 	mb->sm_next = (SMbuf *)NULL ;
-	if (smc->os.hwm.llc_rx_pipe == 0) {
+	if (smc->os.hwm.llc_rx_pipe == NULL) {
 		smc->os.hwm.llc_rx_pipe = mb ;
 	}
 	else {
@@ -1806,8 +1755,7 @@ SMbuf	*mb ;
 /*
  * get a SMbuf from the llc_rx_queue
  */
-static SMbuf *get_llc_rx(smc)
-struct	s_smc *smc ;
+static SMbuf *get_llc_rx(struct s_smc *smc)
 {
 	SMbuf	*mb ;
 
@@ -1816,21 +1764,19 @@ struct	s_smc *smc ;
 		smc->os.hwm.llc_rx_pipe = mb->sm_next ;
 	}
 	DB_GEN("get_llc_rx: mb = 0x%x",(void *)mb,0,4) ;
-	return(mb) ;
+	return mb;
 }
 
 /*
  * queues a transmit SMT MBuf during the time were the MBuf is
  * queued the TxD ring
  */
-static void queue_txd_mb(smc,mb)
-struct	s_smc *smc ;
-SMbuf	*mb ;
+static void queue_txd_mb(struct s_smc *smc, SMbuf *mb)
 {
 	DB_GEN("_rx: queue_txd_mb = %x",(void *)mb,0,4) ;
 	smc->os.hwm.queued_txd_mb++ ;
 	mb->sm_next = (SMbuf *)NULL ;
-	if (smc->os.hwm.txd_tx_pipe == 0) {
+	if (smc->os.hwm.txd_tx_pipe == NULL) {
 		smc->os.hwm.txd_tx_pipe = mb ;
 	}
 	else {
@@ -1842,8 +1788,7 @@ SMbuf	*mb ;
 /*
  * get a SMbuf from the txd_tx_queue
  */
-static SMbuf *get_txd_mb(smc)
-struct	s_smc *smc ;
+static SMbuf *get_txd_mb(struct s_smc *smc)
 {
 	SMbuf *mb ;
 
@@ -1852,16 +1797,13 @@ struct	s_smc *smc ;
 		smc->os.hwm.txd_tx_pipe = mb->sm_next ;
 	}
 	DB_GEN("get_txd_mb: mb = 0x%x",(void *)mb,0,4) ;
-	return(mb) ;
+	return mb;
 }
 
 /*
  *	SMT Send function
  */
-void smt_send_mbuf(smc,mb,fc)
-struct s_smc	*smc;
-SMbuf		*mb;
-int		fc;
+void smt_send_mbuf(struct s_smc *smc, SMbuf *mb, int fc)
 {
 	char far *data ;
 	int	len ;
@@ -1874,7 +1816,7 @@ int		fc;
 	struct s_smt_tx_queue *queue ;
 	struct s_smt_fp_txd volatile *t ;
 	u_long	phys ;
-	u_int	tbctrl ;
+	__le32	tbctrl;
 
 	NDD_TRACE("THSB",mb,fc,0) ;
 	DB_TX("smt_send_mbuf: mb = 0x%x, fc = 0x%x",mb,fc,4) ;
@@ -1919,7 +1861,8 @@ int		fc;
 	}
 
 	if (!smc->hw.mac_ring_is_up || frag_count > queue->tx_free) {
-		if (frame_status &= ~LAN_TX) {
+		frame_status &= ~LAN_TX;
+		if (frame_status) {
 			DB_TX("Ring is down: terminate LAN_TX",0,0,2) ;
 		}
 		else {
@@ -1941,14 +1884,14 @@ int		fc;
 			DB_TX("init TxD = 0x%x",(void *)t,0,5) ;
 			if (i == frag_count-1) {
 				frame_status |= LAST_FRAG ;
-				t->txd_txdscr = AIX_REVERSE(TX_DESCRIPTOR |
-					(((u_long)(mb->sm_len-1)&3) << 27)) ;
+				t->txd_txdscr = cpu_to_le32(TX_DESCRIPTOR |
+					(((__u32)(mb->sm_len-1)&3) << 27)) ;
 			}
 			t->txd_virt = virt[i] ;
 			phys = dma_master(smc, (void far *)virt[i],
 				frag_len[i], DMA_RD|SMT_BUF) ;
-			t->txd_tbadr = AIX_REVERSE(phys) ;
-			tbctrl = AIX_REVERSE((((u_long) frame_status &
+			t->txd_tbadr = cpu_to_le32(phys) ;
+			tbctrl = cpu_to_le32((((__u32)frame_status &
 				(FIRST_FRAG|LAST_FRAG)) << 26) |
 				BMU_OWN | BMU_CHECK | BMU_SMT_TX |frag_len[i]) ;
 			t->txd_tbctrl = tbctrl ;
@@ -1995,12 +1938,11 @@ int		fc;
  *
  *	END_MANUAL_ENTRY
  */
-void mac_drv_clear_txd(smc)
-struct s_smc *smc ;
+static void mac_drv_clear_txd(struct s_smc *smc)
 {
 	struct s_smt_tx_queue *queue ;
 	struct s_smt_fp_txd volatile *t1 ;
-	struct s_smt_fp_txd volatile *t2=0 ;
+	struct s_smt_fp_txd volatile *t2 = NULL ;
 	SMbuf *mb ;
 	u_long	tbctrl ;
 	int i ;
@@ -2019,8 +1961,7 @@ struct s_smc *smc ;
 			do {
 				DRV_BUF_FLUSH(t1,DDI_DMA_SYNC_FORCPU) ;
 				DB_TX("check OWN/EOF bit of TxD 0x%x",t1,0,5) ;
-				tbctrl = CR_READ(t1->txd_tbctrl) ;
-				tbctrl = AIX_REVERSE(tbctrl) ;
+				tbctrl = le32_to_cpu(CR_READ(t1->txd_tbctrl));
 
 				if (tbctrl & BMU_OWN || !queue->tx_used){
 					DB_TX("End of TxDs queue %d",i,0,4) ;
@@ -2032,7 +1973,7 @@ struct s_smc *smc ;
 
 			t1 = queue->tx_curr_get ;
 			for (n = frag_count; n; n--) {
-				tbctrl = AIX_REVERSE(t1->txd_tbctrl) ;
+				tbctrl = le32_to_cpu(t1->txd_tbctrl) ;
 				dma_complete(smc,
 					(union s_fp_descr volatile *) t1,
 					(int) (DMA_RD |
@@ -2087,8 +2028,7 @@ free_next_queue: ;
  *
  *	END_MANUAL_ENTRY
  */
-void mac_drv_clear_tx_queue(smc)
-struct s_smc *smc ;
+void mac_drv_clear_tx_queue(struct s_smc *smc)
 {
 	struct s_smt_fp_txd volatile *t ;
 	struct s_smt_tx_queue *queue ;
@@ -2113,7 +2053,7 @@ struct s_smc *smc ;
 		while (tx_used) {
 			DRV_BUF_FLUSH(t,DDI_DMA_SYNC_FORCPU) ;
 			DB_TX("switch OWN bit of TxD 0x%x ",t,0,5) ;
-			t->txd_tbctrl &= AIX_REVERSE(~BMU_OWN) ;
+			t->txd_tbctrl &= ~cpu_to_le32(BMU_OWN) ;
 			DRV_BUF_FLUSH(t,DDI_DMA_SYNC_FORDEV) ;
 			t = t->txd_next ;
 			tx_used-- ;
@@ -2135,10 +2075,10 @@ struct s_smc *smc ;
 		 * tx_curr_get and tx_curr_put to this position
 		 */
 		if (i == QUEUE_S) {
-			outpd(ADDR(B5_XS_DA),AIX_REVERSE(t->txd_ntdadr)) ;
+			outpd(ADDR(B5_XS_DA),le32_to_cpu(t->txd_ntdadr)) ;
 		}
 		else {
-			outpd(ADDR(B5_XA_DA),AIX_REVERSE(t->txd_ntdadr)) ;
+			outpd(ADDR(B5_XA_DA),le32_to_cpu(t->txd_ntdadr)) ;
 		}
 
 		queue->tx_curr_put = queue->tx_curr_get->txd_next ;
@@ -2180,10 +2120,7 @@ struct s_smc *smc ;
  *
  *	END_MANUAL_ENTRY
  */
-void mac_drv_debug_lev(smc,flag,lev)
-struct s_smc *smc ;
-int flag ;
-int lev ;
+void mac_drv_debug_lev(struct s_smc *smc, int flag, int lev)
 {
 	switch(flag) {
 	case (int)NULL:

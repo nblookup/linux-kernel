@@ -19,32 +19,43 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/delay.h>
-#include <linux/pm.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/system.h>
-#include <asm/pgtable.h>
 #include <asm/mach/map.h>
+#include <asm/mach-types.h>
+
+#include <mach/reset.h>
+#include <mach/gpio.h>
+#include <mach/smemc.h>
+#include <mach/pxa3xx-regs.h>
 
 #include "generic.h"
 
-/*
- * Various clock factors driven by the CCCR register.
- */
+void clear_reset_status(unsigned int mask)
+{
+	if (cpu_is_pxa2xx())
+		pxa2xx_clear_reset_status(mask);
+	else {
+		/* RESET_STATUS_* has a 1:1 mapping with ARSR */
+		ARSR = mask;
+	}
+}
 
-/* Crystal Frequency to Memory Frequency Multiplier (L) */
-static unsigned char L_clk_mult[32] = { 0, 27, 32, 36, 40, 45, 0, };
+unsigned long get_clock_tick_rate(void)
+{
+	unsigned long clock_tick_rate;
 
-/* Memory Frequency to Run Mode Frequency Multiplier (M) */
-static unsigned char M_clk_mult[4] = { 0, 1, 2, 4 };
+	if (cpu_is_pxa25x())
+		clock_tick_rate = 3686400;
+	else if (machine_is_mainstone())
+		clock_tick_rate = 3249600;
+	else
+		clock_tick_rate = 3250000;
 
-/* Run Mode Frequency to Turbo Mode Frequency Multiplier (N) */
-/* Note: we store the value N * 2 here. */
-static unsigned char N2_clk_mult[8] = { 0, 0, 2, 3, 4, 0, 6, 0 };
-
-/* Crystal clock */
-#define BASE_CLK	3686400
+	return clock_tick_rate;
+}
+EXPORT_SYMBOL(get_clock_tick_rate);
 
 /*
  * Get the clock frequency as reflected by CCCR and the turbo flag.
@@ -53,88 +64,35 @@ static unsigned char N2_clk_mult[8] = { 0, 0, 2, 3, 4, 0, 6, 0 };
  */
 unsigned int get_clk_frequency_khz(int info)
 {
-	unsigned long cccr, turbo;
-	unsigned int l, L, m, M, n2, N;
-
-	cccr = CCCR;
-	asm( "mrc\tp14, 0, %0, c6, c0, 0" : "=r" (turbo) );
-
-	l  =  L_clk_mult[(cccr >> 0) & 0x1f];
-	m  =  M_clk_mult[(cccr >> 5) & 0x03];
-	n2 = N2_clk_mult[(cccr >> 7) & 0x07];
-
-	L = l * BASE_CLK;
-	M = m * L;
-	N = n2 * M / 2;
-
-	if(info)
-	{
-		L += 5000;
-		printk( KERN_INFO "Memory clock: %d.%02dMHz (*%d)\n",
-			L / 1000000, (L % 1000000) / 10000, l );
-		M += 5000;
-		printk( KERN_INFO "Run Mode clock: %d.%02dMHz (*%d)\n",
-			M / 1000000, (M % 1000000) / 10000, m );
-		N += 5000;
-		printk( KERN_INFO "Turbo Mode clock: %d.%02dMHz (*%d.%d, %sactive)\n",
-			N / 1000000, (N % 1000000) / 10000, n2 / 2, (n2 % 2) * 5,
-			(turbo & 1) ? "" : "in" );
-	}
-
-	return (turbo & 1) ? (N/1000) : (M/1000);
+	if (cpu_is_pxa25x())
+		return pxa25x_get_clk_frequency_khz(info);
+	else if (cpu_is_pxa27x())
+		return pxa27x_get_clk_frequency_khz(info);
+	return 0;
 }
-
 EXPORT_SYMBOL(get_clk_frequency_khz);
 
 /*
- * Return the current lclk requency in units of 10kHz
+ * Intel PXA2xx internal register mapping.
+ *
+ * Note: virtual 0xfffe0000-0xffffffff is reserved for the vector table
+ *       and cache flush area.
  */
-unsigned int get_lclk_frequency_10khz(void)
-{
-	return L_clk_mult[(CCCR >> 0) & 0x1f] * BASE_CLK / 10000;
-}
-
-EXPORT_SYMBOL(get_lclk_frequency_10khz);
-
-/*
- * Handy function to set GPIO alternate functions
- */
-
-void pxa_gpio_mode(int gpio_mode)
-{
-	unsigned long flags;
-	int gpio = gpio_mode & GPIO_MD_MASK_NR;
-	int fn = (gpio_mode & GPIO_MD_MASK_FN) >> 8;
-	int gafr;
-
-	local_irq_save(flags);
-	if (gpio_mode & GPIO_MD_MASK_DIR)
-		GPDR(gpio) |= GPIO_bit(gpio);
-	else
-		GPDR(gpio) &= ~GPIO_bit(gpio);
-	gafr = GAFR(gpio) & ~(0x3 << (((gpio) & 0xf)*2));
-	GAFR(gpio) = gafr |  (fn  << (((gpio) & 0xf)*2));
-	local_irq_restore(flags);
-}
-
-EXPORT_SYMBOL(pxa_gpio_mode);
-
-/*
- * Note that 0xfffe0000-0xffffffff is reserved for the vector table and
- * cache flush area.
- */
-static struct map_desc standard_io_desc[] __initdata = {
- /* virtual     physical    length      type */
-  { 0xf6000000, 0x20000000, 0x01000000, MT_DEVICE }, /* PCMCIA0 IO */
-  { 0xf7000000, 0x30000000, 0x01000000, MT_DEVICE }, /* PCMCIA1 IO */
-  { 0xf8000000, 0x40000000, 0x01400000, MT_DEVICE }, /* Devs */
-  { 0xfa000000, 0x44000000, 0x00100000, MT_DEVICE }, /* LCD */
-  { 0xfc000000, 0x48000000, 0x00100000, MT_DEVICE }, /* Mem Ctl */
-  { 0xff000000, 0x00000000, 0x00100000, MT_DEVICE }  /* UNCACHED_PHYS_0 */
+static struct map_desc common_io_desc[] __initdata = {
+  	{	/* Devs */
+		.virtual	=  0xf2000000,
+		.pfn		= __phys_to_pfn(0x40000000),
+		.length		= 0x02000000,
+		.type		= MT_DEVICE
+	}, {	/* UNCACHED_PHYS_0 */
+		.virtual	= 0xff000000,
+		.pfn		= __phys_to_pfn(0x00000000),
+		.length		= 0x00100000,
+		.type		= MT_DEVICE
+	}
 };
 
 void __init pxa_map_io(void)
 {
-	iotable_init(standard_io_desc, ARRAY_SIZE(standard_io_desc));
-	get_clk_frequency_khz(1);
+	iotable_init(ARRAY_AND_SIZE(common_io_desc));
 }

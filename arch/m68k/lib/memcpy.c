@@ -1,9 +1,11 @@
+
 #include <linux/types.h>
 
 void * memcpy(void * to, const void * from, size_t n)
 {
+#ifdef CONFIG_COLDFIRE
   void *xto = to;
-  size_t temp, temp1;
+  size_t temp;
 
   if (!n)
     return xto;
@@ -30,30 +32,8 @@ void * memcpy(void * to, const void * from, size_t n)
     {
       long *lto = to;
       const long *lfrom = from;
-
-      __asm__ __volatile__("movel %2,%3\n\t"
-			   "andw  #7,%3\n\t"
-			   "lsrl  #3,%2\n\t"
-			   "negw  %3\n\t"
-			   "jmp   %%pc@(1f,%3:w:2)\n\t"
-			   "4:\t"
-			   "movel %0@+,%1@+\n\t"
-			   "movel %0@+,%1@+\n\t"
-			   "movel %0@+,%1@+\n\t"
-			   "movel %0@+,%1@+\n\t"
-			   "movel %0@+,%1@+\n\t"
-			   "movel %0@+,%1@+\n\t"
-			   "movel %0@+,%1@+\n\t"
-			   "movel %0@+,%1@+\n\t"
-			   "1:\t"
-			   "dbra  %2,4b\n\t"
-			   "clrw  %2\n\t"
-			   "subql #1,%2\n\t"
-			   "jpl   4b\n\t"
-			   : "=a" (lfrom), "=a" (lto), "=d" (temp),
-			   "=&d" (temp1)
-			   : "0" (lfrom), "1" (lto), "2" (temp)
-			   );
+      for (; temp; temp--)
+	*lto++ = *lfrom++;
       to = lto;
       from = lfrom;
     }
@@ -72,4 +52,11 @@ void * memcpy(void * to, const void * from, size_t n)
       *cto = *cfrom;
     }
   return xto;
+#else
+  const char *c_from = from;
+  char *c_to = to;
+  while (n-- > 0)
+    *c_to++ = *c_from++;
+  return((void *) to);
+#endif
 }

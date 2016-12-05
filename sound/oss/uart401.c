@@ -1,5 +1,5 @@
 /*
- * sound/uart401.c
+ * sound/oss/uart401.c
  *
  * MPU-401 UART driver (formerly uart401_midi.c)
  *
@@ -24,6 +24,7 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include "sound_config.h"
 
@@ -96,7 +97,7 @@ static void uart401_input_loop(uart401_devc * devc)
 		printk(KERN_WARNING "Too much work in interrupt on uart401 (0x%X). UART jabbering ??\n", devc->base);
 }
 
-irqreturn_t uart401intr(int irq, void *dev_id, struct pt_regs *dummy)
+irqreturn_t uart401intr(int irq, void *dev_id)
 {
 	uart401_devc *devc = dev_id;
 
@@ -430,11 +431,11 @@ EXPORT_SYMBOL(uart401intr);
 
 static struct address_info cfg_mpu;
 
-static int __initdata io = -1;
-static int __initdata irq = -1;
+static int io = -1;
+static int irq = -1;
 
-MODULE_PARM(io, "i");
-MODULE_PARM(irq, "i");
+module_param(io, int, 0444);
+module_param(irq, int, 0444);
 
 
 static int __init init_uart401(void)

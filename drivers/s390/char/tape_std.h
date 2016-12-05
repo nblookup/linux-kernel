@@ -1,17 +1,23 @@
 /*
- *  drivers/s390/char/tape_34xx.h
+ *  drivers/s390/char/tape_std.h
  *    standard tape device functions for ibm tapes.
  *
- *  S390 and zSeries version
- *    Copyright (C) 2001,2002 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) IBM Corp. 2001,2006
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  *		 Tuan Ngo-Anh <ngoanh@de.ibm.com>
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
 #ifndef _TAPE_STD_H
-
 #define _TAPE_STD_H
+
+#include <asm/tape390.h>
+
+/*
+ * Biggest block size to handle. Currently 64K because we only build
+ * channel programs without data chaining.
+ */
+#define MAX_BLOCKSIZE   65535
 
 /*
  * The CCW commands for the Tape type of command.
@@ -105,7 +111,8 @@ struct tape_request *tape_std_bwrite(struct request *,
 int tape_std_assign(struct tape_device *);
 int tape_std_unassign(struct tape_device *);
 int tape_std_read_block_id(struct tape_device *device, __u64 *id);
-int tape_std_display(struct tape_device *, int, unsigned long);
+int tape_std_display(struct tape_device *, struct display_struct *disp);
+int tape_std_terminate_write(struct tape_device *);
 
 /* Standard magnetic tape commands. */
 int tape_std_mtbsf(struct tape_device *, int);
@@ -140,5 +147,13 @@ void tape_std_error_recovery_succeded(struct tape_device *);
 void tape_std_error_recovery_do_retry(struct tape_device *);
 void tape_std_error_recovery_read_opposite(struct tape_device *);
 void tape_std_error_recovery_HWBUG(struct tape_device *, int condno);
+
+/* S390 tape types */
+enum s390_tape_type {
+        tape_3480,
+        tape_3490,
+        tape_3590,
+        tape_3592,
+};
 
 #endif // _TAPE_STD_H

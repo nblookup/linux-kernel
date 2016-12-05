@@ -21,7 +21,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *  
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *     
@@ -65,9 +65,9 @@ static int actisys_reset(struct sir_dev *);
 
 /* These are the baudrates supported, in the order available */
 /* Note : the 220L doesn't support 38400, but we will fix that below */
-static __u32 baud_rates[] = { 9600, 19200, 57600, 115200, 38400 };
+static unsigned baud_rates[] = { 9600, 19200, 57600, 115200, 38400 };
 
-#define MAX_SPEEDS (sizeof(baud_rates)/sizeof(baud_rates[0]))
+#define MAX_SPEEDS ARRAY_SIZE(baud_rates)
 
 static struct dongle_driver act220l = {
 	.owner		= THIS_MODULE,
@@ -89,7 +89,7 @@ static struct dongle_driver act220l_plus = {
 	.set_speed	= actisys_change_speed,
 };
 
-int __init actisys_sir_init(void)
+static int __init actisys_sir_init(void)
 {
 	int ret;
 
@@ -107,7 +107,7 @@ int __init actisys_sir_init(void)
 	return 0;
 }
 
-void __exit actisys_sir_cleanup(void)
+static void __exit actisys_sir_cleanup(void)
 {
 	/* We have to remove both dongles */
 	irda_unregister_dongle(&act220l_plus);
@@ -118,7 +118,7 @@ static int actisys_open(struct sir_dev *dev)
 {
 	struct qos_info *qos = &dev->qos;
 
-	dev->set_dtr_rts(dev, TRUE, TRUE);
+	sirdev_set_dtr_rts(dev, TRUE, TRUE);
 
 	/* Set the speeds we can accept */
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_38400|IR_57600|IR_115200;
@@ -130,13 +130,15 @@ static int actisys_open(struct sir_dev *dev)
 	qos->min_turn_time.bits = 0x7f; /* Needs 0.01 ms */
 	irda_qos_bits_to_value(qos);
 
+	/* irda thread waits 50 msec for power settling */
+
 	return 0;
 }
 
 static int actisys_close(struct sir_dev *dev)
 {
 	/* Power off the dongle */
-	dev->set_dtr_rts(dev, FALSE, FALSE);
+	sirdev_set_dtr_rts(dev, FALSE, FALSE);
 
 	return 0;
 }
@@ -163,7 +165,7 @@ static int actisys_change_speed(struct sir_dev *dev, unsigned speed)
 	int ret = 0;
 	int i = 0;
 
-        IRDA_DEBUG(4, "%s(), speed=%d (was %d)\n", __FUNCTION__,
+        IRDA_DEBUG(4, "%s(), speed=%d (was %d)\n", __func__,
         	speed, dev->speed);
 
 	/* dongle was already resetted from irda_request state machine,
@@ -174,23 +176,25 @@ static int actisys_change_speed(struct sir_dev *dev, unsigned speed)
 	 * Now, we can set the speed requested. Send RTS pulses until we
          * reach the target speed 
 	 */
-	for (i=0; i<MAX_SPEEDS; i++) {
+	for (i = 0; i < MAX_SPEEDS; i++) {
 		if (speed == baud_rates[i]) {
-			dev->speed = baud_rates[i];
+			dev->speed = speed;
 			break;
 		}
 		/* Set RTS low for 10 us */
-		dev->set_dtr_rts(dev, TRUE, FALSE);
+		sirdev_set_dtr_rts(dev, TRUE, FALSE);
 		udelay(MIN_DELAY);
 
 		/* Set RTS high for 10 us */
-		dev->set_dtr_rts(dev, TRUE, TRUE);
+		sirdev_set_dtr_rts(dev, TRUE, TRUE);
 		udelay(MIN_DELAY);
 	}
 
 	/* Check if life is sweet... */
-	if (i >= MAX_SPEEDS)
-		ret = -1;  /* This should not happen */
+	if (i >= MAX_SPEEDS) {
+		actisys_reset(dev);
+		ret = -EINVAL;  /* This should not happen */
+	}
 
 	/* Basta lavoro, on se casse d'ici... */
 	return ret;
@@ -221,11 +225,11 @@ static int actisys_change_speed(struct sir_dev *dev, unsigned speed)
 static int actisys_reset(struct sir_dev *dev)
 {
 	/* Reset the dongle : set DTR low for 10 us */
-	dev->set_dtr_rts(dev, FALSE, TRUE);
+	sirdev_set_dtr_rts(dev, FALSE, TRUE);
 	udelay(MIN_DELAY);
 
 	/* Go back to normal mode */
-	dev->set_dtr_rts(dev, TRUE, TRUE);
+	sirdev_set_dtr_rts(dev, TRUE, TRUE);
 	
 	dev->speed = 9600;	/* That's the default */
 

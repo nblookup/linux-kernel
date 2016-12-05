@@ -25,7 +25,6 @@
  *		2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
 #include <asm/errno.h>
 				
 /*
@@ -38,7 +37,7 @@ unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
 		
 .text
 .align 4
-.globl arch_csum_partial								
+.globl csum_partial
 		
 #ifndef CONFIG_X86_USE_PPRO_CHECKSUM
 
@@ -49,7 +48,7 @@ unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
 	   * Fortunately, it is easy to convert 2-byte alignment to 4-byte
 	   * alignment for the unrolled loop.
 	   */		
-arch_csum_partial:	
+csum_partial:
 	pushl %esi
 	pushl %ebx
 	movl 20(%esp),%eax	# Function arg: unsigned int sum
@@ -119,7 +118,7 @@ arch_csum_partial:
 
 /* Version for PentiumII/PPro */
 
-arch_csum_partial:
+csum_partial:
 	pushl %esi
 	pushl %ebx
 	movl 20(%esp),%eax	# Function arg: unsigned int sum
@@ -244,13 +243,12 @@ unsigned int csum_partial_copy_generic (const char *src, char *dst,
 	.previous
 
 .align 4
-.globl csum_partial_copy_generic_i386
-				
+
 #ifndef CONFIG_X86_USE_PPRO_CHECKSUM
 
 #define ARGBASE 16		
 #define FP		12
-		
+
 csum_partial_copy_generic_i386:
 	subl  $4,%esp	
 	pushl %edi

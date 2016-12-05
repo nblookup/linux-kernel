@@ -1,16 +1,18 @@
 /* fortunet.c memory map
  *
- * $Id: fortunet.c,v 1.6 2003/05/21 12:45:18 dwmw2 Exp $
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <asm/io.h>
+#include <linux/string.h>
+
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
+
+#include <asm/io.h>
 
 #define MAX_NUM_REGIONS		4
 #define MAX_NUM_PARTITIONS	8
@@ -25,7 +27,7 @@
 struct map_region
 {
 	int			window_addr_physical;
-	int			altbuswidth;
+	int			altbankwidth;
 	struct map_info		map_info;
 	struct mtd_info		*mymtd;
 	struct mtd_partition	parts[MAX_NUM_PARTITIONS];
@@ -41,7 +43,7 @@ static int			map_regions_parts[MAX_NUM_REGIONS] = {0,0,0,0};
 
 struct map_info default_map = {
 	.size = DEF_WINDOW_SIZE,
-	.buswidth = 4,
+	.bankwidth = 4,
 };
 
 static char * __init get_string_option(char *dest,int dest_size,char *sor)
@@ -102,7 +104,7 @@ static int __init MTD_New_Region(char *line)
 	if(params[0]<1)
 	{
 		printk(MTD_FORTUNET_PK "Bad parameters for MTD Region "
-			" name,region-number[,base,size,buswidth,altbuswidth]\n");
+			" name,region-number[,base,size,bankwidth,altbankwidth]\n");
 		return 1;
 	}
 	if((params[1]<0)||(params[1]>=MAX_NUM_REGIONS))
@@ -116,7 +118,7 @@ static int __init MTD_New_Region(char *line)
 		&default_map,sizeof(map_regions[params[1]].map_info));
         map_regions_set[params[1]] = 1;
         map_regions[params[1]].window_addr_physical = DEF_WINDOW_ADDR_PHY;
-        map_regions[params[1]].altbuswidth = 2;
+        map_regions[params[1]].altbankwidth = 2;
         map_regions[params[1]].mymtd = NULL;
 	map_regions[params[1]].map_info.name = map_regions[params[1]].map_name;
 	strcpy(map_regions[params[1]].map_info.name,string);
@@ -130,11 +132,11 @@ static int __init MTD_New_Region(char *line)
 	}
 	if(params[0]>3)
 	{
-		map_regions[params[1]].map_info.buswidth = params[4];
+		map_regions[params[1]].map_info.bankwidth = params[4];
 	}
 	if(params[0]>4)
 	{
-		map_regions[params[1]].altbuswidth = params[5];
+		map_regions[params[1]].altbankwidth = params[5];
 	}
 	return 1;
 }
@@ -179,7 +181,7 @@ __setup("MTD_Partition=", MTD_New_Partition);
 /* Backwards-spelling-compatibility */
 __setup("MTD_Partion=", MTD_New_Partition);
 
-int __init init_fortunet(void)
+static int __init init_fortunet(void)
 {
 	int	ix,iy;
 	for(iy=ix=0;ix<MAX_NUM_REGIONS;ix++)
@@ -193,7 +195,7 @@ int __init init_fortunet(void)
 				sizeof(map_regions[ix].map_info));
 			map_regions_set[ix] = 1;
 			map_regions[ix].window_addr_physical = DEF_WINDOW_ADDR_PHY;
-			map_regions[ix].altbuswidth = 2;
+			map_regions[ix].altbankwidth = 2;
 			map_regions[ix].mymtd = NULL;
 			map_regions[ix].map_info.name = map_regions[ix].map_name;
 			strcpy(map_regions[ix].map_info.name,"FORTUNET");
@@ -210,13 +212,16 @@ int __init init_fortunet(void)
 			map_regions[ix].map_info.phys =	map_regions[ix].window_addr_physical,
 
 			map_regions[ix].map_info.virt =
-				(int)ioremap_nocache(
+				ioremap_nocache(
 				map_regions[ix].window_addr_physical,
 				map_regions[ix].map_info.size);
 			if(!map_regions[ix].map_info.virt)
 			{
+				int j = 0;
 				printk(MTD_FORTUNET_PK "%s flash failed to ioremap!\n",
 					map_regions[ix].map_info.name);
+				for (j = 0 ; j < ix; j++)
+					iounmap(map_regions[j].map_info.virt);
 				return -ENXIO;
 			}
 			simple_map_init(&map_regions[ix].map_info);
@@ -227,13 +232,13 @@ int __init init_fortunet(void)
 			map_regions[ix].mymtd = do_map_probe("cfi_probe",
 				&map_regions[ix].map_info);
 			if((!map_regions[ix].mymtd)&&(
-				map_regions[ix].altbuswidth!=map_regions[ix].map_info.buswidth))
+				map_regions[ix].altbankwidth!=map_regions[ix].map_info.bankwidth))
 			{
-				printk(KERN_NOTICE MTD_FORTUNET_PK "Trying alternate buswidth "
+				printk(KERN_NOTICE MTD_FORTUNET_PK "Trying alternate bankwidth "
 					"for %s flash.\n",
 					map_regions[ix].map_info.name);
-				map_regions[ix].map_info.buswidth =
-					map_regions[ix].altbuswidth;
+				map_regions[ix].map_info.bankwidth =
+					map_regions[ix].altbankwidth;
 				map_regions[ix].mymtd = do_map_probe("cfi_probe",
 					&map_regions[ix].map_info);
 			}

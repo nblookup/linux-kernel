@@ -11,6 +11,10 @@
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
 #include <linux/spinlock.h>
+#include <linux/init.h>
+#include <linux/audit.h>
+#include <linux/lsm_audit.h>
+#include <linux/in6.h>
 #include <asm/system.h>
 #include "flask.h"
 #include "av_permissions.h"
@@ -27,118 +31,54 @@ extern int selinux_enforcing;
  */
 struct avc_entry;
 
-/*
- * A reference to an AVC entry.
- */
-struct avc_entry_ref {
-	struct avc_entry *ae;
-};
-
-/* Initialize an AVC entry reference before first use. */
-static inline void avc_entry_ref_init(struct avc_entry_ref *h)
-{
-	h->ae = NULL;
-}
-
 struct task_struct;
-struct vfsmount;
-struct dentry;
 struct inode;
 struct sock;
 struct sk_buff;
 
-/* Auxiliary data to use in generating the audit record. */
-struct avc_audit_data {
-	char    type;
-#define AVC_AUDIT_DATA_FS   1
-#define AVC_AUDIT_DATA_NET  2
-#define AVC_AUDIT_DATA_CAP  3
-#define AVC_AUDIT_DATA_IPC  4
-	struct task_struct *tsk;
-	union 	{
-		struct {
-			struct vfsmount *mnt;
-			struct dentry *dentry;
-			struct inode *inode;
-		} fs;
-		struct {
-			char *netif;
-			struct sk_buff *skb;
-			struct sock *sk;
-			u16 port;
-			u32 daddr;
-		} net;
-		int cap;
-		int ipc_id;
-	} u;
-};
-
-/* Initialize an AVC audit data structure. */
-#define AVC_AUDIT_DATA_INIT(_d,_t) \
-        { memset((_d), 0, sizeof(struct avc_audit_data)); (_d)->type = AVC_AUDIT_DATA_##_t; }
-
 /*
  * AVC statistics
  */
-#define AVC_ENTRY_LOOKUPS        0
-#define AVC_ENTRY_HITS	         1
-#define AVC_ENTRY_MISSES         2
-#define AVC_ENTRY_DISCARDS       3
-#define AVC_CAV_LOOKUPS          4
-#define AVC_CAV_HITS             5
-#define AVC_CAV_PROBES           6
-#define AVC_CAV_MISSES           7
-#define AVC_NSTATS               8
-extern unsigned avc_cache_stats[AVC_NSTATS];
-
-#ifdef AVC_CACHE_STATS
-static inline void avc_cache_stats_incr(int type)
-{
-	avc_cache_stats[type]++;
-}
-
-static inline void avc_cache_stats_add(int type, unsigned val)
-{
-	avc_cache_stats[type] += val;
-}
-#else
-static inline void avc_cache_stats_incr(int type)
-{ }
-
-static inline void avc_cache_stats_add(int type, unsigned val)
-{ }
-#endif
-
-/*
- * AVC display support
- */
-void avc_dump_av(u16 tclass, u32 av);
-void avc_dump_query(u32 ssid, u32 tsid, u16 tclass);
-void avc_dump_cache(char *tag);
+struct avc_cache_stats {
+	unsigned int lookups;
+	unsigned int hits;
+	unsigned int misses;
+	unsigned int allocations;
+	unsigned int reclaims;
+	unsigned int frees;
+};
 
 /*
  * AVC operations
  */
 
-void avc_init(void);
+void __init avc_init(void);
 
-int avc_lookup(u32 ssid, u32 tsid, u16 tclass,
-               u32 requested, struct avc_entry_ref *aeref);
+int avc_audit(u32 ssid, u32 tsid,
+	       u16 tclass, u32 requested,
+	       struct av_decision *avd,
+	       int result,
+	      struct common_audit_data *a, unsigned flags);
 
-int avc_insert(u32 ssid, u32 tsid, u16 tclass,
-               struct avc_entry *ae, struct avc_entry_ref *out_aeref);
-
-void avc_audit(u32 ssid, u32 tsid,
-               u16 tclass, u32 requested,
-               struct av_decision *avd, int result, struct avc_audit_data *auditdata);
-
+#define AVC_STRICT 1 /* Ignore permissive mode. */
 int avc_has_perm_noaudit(u32 ssid, u32 tsid,
-                         u16 tclass, u32 requested,
-                         struct avc_entry_ref *aeref, struct av_decision *avd);
+			 u16 tclass, u32 requested,
+			 unsigned flags,
+			 struct av_decision *avd);
 
-int avc_has_perm(u32 ssid, u32 tsid,
-                 u16 tclass, u32 requested,
-                 struct avc_entry_ref *aeref, struct avc_audit_data *auditdata);
+int avc_has_perm_flags(u32 ssid, u32 tsid,
+		       u16 tclass, u32 requested,
+		       struct common_audit_data *auditdata,
+		       unsigned);
+
+static inline int avc_has_perm(u32 ssid, u32 tsid,
+			       u16 tclass, u32 requested,
+			       struct common_audit_data *auditdata)
+{
+	return avc_has_perm_flags(ssid, tsid, tclass, requested, auditdata, 0);
+}
+
+u32 avc_policy_seqno(void);
 
 #define AVC_CALLBACK_GRANT		1
 #define AVC_CALLBACK_TRY_REVOKE		2
@@ -150,10 +90,21 @@ int avc_has_perm(u32 ssid, u32 tsid,
 #define AVC_CALLBACK_AUDITDENY_DISABLE	128
 
 int avc_add_callback(int (*callback)(u32 event, u32 ssid, u32 tsid,
-                                     u16 tclass, u32 perms,
+				     u16 tclass, u32 perms,
 				     u32 *out_retained),
 		     u32 events, u32 ssid, u32 tsid,
 		     u16 tclass, u32 perms);
+
+/* Exported to selinuxfs */
+int avc_get_hash_stats(char *page);
+extern unsigned int avc_cache_threshold;
+
+/* Attempt to free avc node cache */
+void avc_disable(void);
+
+#ifdef CONFIG_SECURITY_SELINUX_AVC_STATS
+DECLARE_PER_CPU(struct avc_cache_stats, avc_cache_stats);
+#endif
 
 #endif /* _SELINUX_AVC_H_ */
 

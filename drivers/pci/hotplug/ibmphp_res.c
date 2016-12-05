@@ -40,29 +40,27 @@ static void update_resources (struct bus_node *bus_cur, int type, int rangeno);
 static int once_over (void);
 static int remove_ranges (struct bus_node *, struct bus_node *);
 static int update_bridge_ranges (struct bus_node **);
-static int add_range (int type, struct range_node *, struct bus_node *);
+static int add_bus_range (int type, struct range_node *, struct bus_node *);
 static void fix_resources (struct bus_node *);
 static struct bus_node *find_bus_wprev (u8, struct bus_node **, u8);
 
 static LIST_HEAD(gbuses);
-LIST_HEAD(ibmphp_res_head);
 
 static struct bus_node * __init alloc_error_bus (struct ebda_pci_rsrc * curr, u8 busno, int flag)
 {
 	struct bus_node * newbus;
 
 	if (!(curr) && !(flag)) {
-		err ("NULL pointer passed \n");
+		err ("NULL pointer passed\n");
 		return NULL;
 	}
 
-	newbus = kmalloc (sizeof (struct bus_node), GFP_KERNEL);
+	newbus = kzalloc(sizeof(struct bus_node), GFP_KERNEL);
 	if (!newbus) {
-		err ("out of system memory \n");
+		err ("out of system memory\n");
 		return NULL;
 	}
 
-	memset (newbus, 0, sizeof (struct bus_node));
 	if (flag)
 		newbus->busno = busno;
 	else
@@ -76,16 +74,15 @@ static struct resource_node * __init alloc_resources (struct ebda_pci_rsrc * cur
 	struct resource_node *rs;
 	
 	if (!curr) {
-		err ("NULL passed to allocate \n");
+		err ("NULL passed to allocate\n");
 		return NULL;
 	}
 
-	rs = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
+	rs = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
 	if (!rs) {
-		err ("out of system memory \n");
+		err ("out of system memory\n");
 		return NULL;
 	}
-	memset (rs, 0, sizeof (struct resource_node));
 	rs->busno = curr->bus_num;
 	rs->devfunc = curr->dev_fun;
 	rs->start = curr->start_addr;
@@ -101,12 +98,11 @@ static int __init alloc_bus_range (struct bus_node **new_bus, struct range_node 
 	u8 num_ranges = 0;
 
 	if (first_bus) {
-		newbus = kmalloc (sizeof (struct bus_node), GFP_KERNEL);
+		newbus = kzalloc(sizeof(struct bus_node), GFP_KERNEL);
 		if (!newbus) {
-			err ("out of system memory. \n");
+			err ("out of system memory.\n");
 			return -ENOMEM;
 		}
-		memset (newbus, 0, sizeof (struct bus_node));
 		newbus->busno = curr->bus_num;
 	} else {
 		newbus = *new_bus;
@@ -123,14 +119,13 @@ static int __init alloc_bus_range (struct bus_node **new_bus, struct range_node 
 		}
 	}
 
-	newrange = kmalloc (sizeof (struct range_node), GFP_KERNEL);
+	newrange = kzalloc(sizeof(struct range_node), GFP_KERNEL);
 	if (!newrange) {
 		if (first_bus)
 			kfree (newbus);
-		err ("out of system memory \n");
+		err ("out of system memory\n");
 		return -ENOMEM;
 	}
-	memset (newrange, 0, sizeof (struct range_node));
 	newrange->start = curr->start_addr;
 	newrange->end = curr->end_addr;
 		
@@ -138,7 +133,7 @@ static int __init alloc_bus_range (struct bus_node **new_bus, struct range_node 
 		newrange->rangeno = 1;
 	else {
 		/* need to insert our range */
-		add_range (flag, newrange, newbus);
+		add_bus_range (flag, newrange, newbus);
 		debug ("%d resource Primary Bus inserted on bus %x [%x - %x]\n", flag, newbus->busno, newrange->start, newrange->end);
 	}
 
@@ -330,7 +325,7 @@ int __init ibmphp_rsrc_init (void)
 				if (!new_pfmem)
 					return -ENOMEM;
 				new_pfmem->type = PFMEM;
-				new_pfmem->fromMem = FALSE;
+				new_pfmem->fromMem = 0;
 				if (ibmphp_add_resource (new_pfmem) < 0) {
 					newbus = alloc_error_bus (curr, 0, 0);
 					if (!newbus)
@@ -389,7 +384,7 @@ int __init ibmphp_rsrc_init (void)
  * Input: type of the resource, range to add, current bus
  * Output: 0 or -1, bus and range ptrs 
  ********************************************************************************/
-static int add_range (int type, struct range_node *range, struct bus_node *bus_cur)
+static int add_bus_range (int type, struct range_node *range, struct bus_node *bus_cur)
 {
 	struct range_node *range_cur = NULL;
 	struct range_node *range_prev;
@@ -460,14 +455,14 @@ static int add_range (int type, struct range_node *range, struct bus_node *bus_c
 
 /*******************************************************************************
  * This routine goes through the list of resources of type 'type' and updates
- * the range numbers that they correspond to.  It was called from add_range fnc
+ * the range numbers that they correspond to.  It was called from add_bus_range fnc
  *
  * Input: bus, type of the resource, the rangeno starting from which to update
  ******************************************************************************/
 static void update_resources (struct bus_node *bus_cur, int type, int rangeno)
 {
 	struct resource_node *res = NULL;
-	u8 eol = FALSE;	/* end of list indicator */
+	u8 eol = 0;	/* end of list indicator */
 
 	switch (type) {
 		case MEM:
@@ -493,7 +488,7 @@ static void update_resources (struct bus_node *bus_cur, int type, int rangeno)
 			else if (res->nextRange)
 				res = res->nextRange;
 			else {
-				eol = TRUE;
+				eol = 1;
 				break;
 			}
 		}
@@ -568,7 +563,7 @@ static void fix_resources (struct bus_node *bus_cur)
 	struct range_node *range;
 	struct resource_node *res;
 
-	debug ("%s - bus_cur->busno = %d\n", __FUNCTION__, bus_cur->busno);
+	debug ("%s - bus_cur->busno = %d\n", __func__, bus_cur->busno);
 
 	if (bus_cur->needIOUpdate) {
 		res = bus_cur->firstIO;
@@ -604,10 +599,10 @@ int ibmphp_add_resource (struct resource_node *res)
 	struct range_node *range_cur = NULL;
 	struct resource_node *res_start = NULL;
 
-	debug ("%s - enter\n", __FUNCTION__);
+	debug ("%s - enter\n", __func__);
 
 	if (!res) {
-		err ("NULL passed to add \n");
+		err ("NULL passed to add\n");
 		return -ENODEV;
 	}
 	
@@ -634,7 +629,7 @@ int ibmphp_add_resource (struct resource_node *res)
 			res_start = bus_cur->firstPFMem;
 			break;
 		default:
-			err ("cannot read the type of the resource to add... problem \n");
+			err ("cannot read the type of the resource to add... problem\n");
 			return -EINVAL;
 	}
 	while (range_cur) {
@@ -767,7 +762,7 @@ int ibmphp_add_resource (struct resource_node *res)
 		}
 	}
 
-	debug ("%s - exit\n", __FUNCTION__);
+	debug ("%s - exit\n", __func__);
 	return 0;
 }
 
@@ -787,7 +782,7 @@ int ibmphp_remove_resource (struct resource_node *res)
 	char * type = "";
 
 	if (!res)  {
-		err ("resource to remove is NULL \n");
+		err ("resource to remove is NULL\n");
 		return -ENODEV;
 	}
 
@@ -813,7 +808,7 @@ int ibmphp_remove_resource (struct resource_node *res)
 			type = "pfmem";
 			break;
 		default:
-			err ("unknown type for resource to remove \n");
+			err ("unknown type for resource to remove\n");
 			return -EINVAL;
 	}
 	res_prev = NULL;
@@ -954,7 +949,7 @@ static struct range_node * find_range (struct bus_node *bus_cur, struct resource
 			range = bus_cur->rangePFMem;
 			break;
 		default:
-			err ("cannot read resource type in find_range \n");
+			err ("cannot read resource type in find_range\n");
 	}
 
 	while (range) {
@@ -984,7 +979,7 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 	int noranges = 0;
 	u32 tmp_start;		/* this is to make sure start address is divisible by the length needed */
 	u32 tmp_divide;
-	u8 flag = FALSE;
+	u8 flag = 0;
 
 	if (!res)
 		return -EINVAL;
@@ -1002,11 +997,11 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 
 	if (!bus_cur) {
 		/* didn't find a bus, smth's wrong!!! */
-		debug ("no bus in the system, either pci_dev's wrong or allocation failed \n");
+		debug ("no bus in the system, either pci_dev's wrong or allocation failed\n");
 		return -EINVAL;
 	}
 
-	debug ("%s - enter\n", __FUNCTION__);
+	debug ("%s - enter\n", __func__);
 	debug ("bus_cur->busno is %d\n", bus_cur->busno);
 
 	/* This is a quick fix to not mess up with the code very much.  i.e.,
@@ -1027,14 +1022,14 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 			noranges = bus_cur->noPFMemRanges;
 			break;
 		default:
-			err ("wrong type of resource to check \n");
+			err ("wrong type of resource to check\n");
 			return -EINVAL;
 	}
 	res_prev = NULL;
 
 	while (res_cur) {
 		range = find_range (bus_cur, res_cur);
-		debug ("%s - rangeno = %d\n", __FUNCTION__, res_cur->rangeno);
+		debug ("%s - rangeno = %d\n", __func__, res_cur->rangeno);
 
 		if (!range) {
 			err ("no range for the device exists... bailing out...\n");
@@ -1051,17 +1046,17 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 
 					if ((range->start % tmp_divide) == 0) {
 						/* just perfect, starting address is divisible by length */
-						flag = TRUE;
+						flag = 1;
 						len_cur = len_tmp;
 						start_cur = range->start;
 					} else {
 						/* Needs adjusting */
 						tmp_start = range->start;
-						flag = FALSE;
+						flag = 0;
 
 						while ((len_tmp = res_cur->start - 1 - tmp_start) >= res->len) {
 							if ((tmp_start % tmp_divide) == 0) {
-								flag = TRUE;
+								flag = 1;
 								len_cur = len_tmp;
 								start_cur = tmp_start;
 								break;
@@ -1090,17 +1085,17 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 
 					if (((res_cur->end + 1) % tmp_divide) == 0) {
 						/* just perfect, starting address is divisible by length */
-						flag = TRUE;
+						flag = 1;
 						len_cur = len_tmp;
 						start_cur = res_cur->end + 1;
 					} else {
 						/* Needs adjusting */
 						tmp_start = res_cur->end + 1;
-						flag = FALSE;
+						flag = 0;
 
 						while ((len_tmp = range->end - tmp_start) >= res->len) {
 							if ((tmp_start % tmp_divide) == 0) {
-								flag = TRUE;
+								flag = 1;
 								len_cur = len_tmp;
 								start_cur = tmp_start;
 								break;
@@ -1128,17 +1123,17 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 					if ((len_tmp < len_cur) || (len_cur == 0)) {
 						if ((range->start % tmp_divide) == 0) {	
 							/* just perfect, starting address is divisible by length */
-							flag = TRUE;
+							flag = 1;
 							len_cur = len_tmp;
 							start_cur = range->start;
 						} else {
 							/* Needs adjusting */
 							tmp_start = range->start;
-							flag = FALSE;
+							flag = 0;
 
 							while ((len_tmp = res_cur->start - 1 - tmp_start) >= res->len) {
 								if ((tmp_start % tmp_divide) == 0) {
-									flag = TRUE;
+									flag = 1;
 									len_cur = len_tmp;
 									start_cur = tmp_start;
 									break;
@@ -1163,17 +1158,17 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 					if ((len_tmp < len_cur) || (len_cur == 0)) {
 						if (((res_prev->end + 1) % tmp_divide) == 0) {
 							/* just perfect, starting address's divisible by length */
-							flag = TRUE;
+							flag = 1;
 							len_cur = len_tmp;
 							start_cur = res_prev->end + 1;
 						} else {
 							/* Needs adjusting */
 							tmp_start = res_prev->end + 1;
-							flag = FALSE;
+							flag = 0;
 
 							while ((len_tmp = res_cur->start - 1 - tmp_start) >= res->len) {
 								if ((tmp_start % tmp_divide) == 0) {
-									flag = TRUE;
+									flag = 1;
 									len_cur = len_tmp;
 									start_cur = tmp_start;
 									break;
@@ -1222,17 +1217,17 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 				if ((len_tmp < len_cur) || (len_cur == 0)) {
 					if ((range->start % tmp_divide) == 0) {
 						/* just perfect, starting address's divisible by length */
-						flag = TRUE;
+						flag = 1;
 						len_cur = len_tmp;
 						start_cur = range->start;
 					} else {
 						/* Needs adjusting */
 						tmp_start = range->start;
-						flag = FALSE;
+						flag = 0;
 
 						while ((len_tmp = range->end - tmp_start) >= res->len) {
 							if ((tmp_start % tmp_divide) == 0) {
-								flag = TRUE;
+								flag = 1;
 								len_cur = len_tmp;
 								start_cur = tmp_start;
 								break;
@@ -1286,17 +1281,17 @@ int ibmphp_check_resource (struct resource_node *res, u8 bridge)
 					if ((len_tmp < len_cur) || (len_cur == 0)) {
 						if ((range->start % tmp_divide) == 0) {
 							/* just perfect, starting address's divisible by length */
-							flag = TRUE;
+							flag = 1;
 							len_cur = len_tmp;
 							start_cur = range->start;
 						} else {
 							/* Needs adjusting */
 							tmp_start = range->start;
-							flag = FALSE;
+							flag = 0;
 
 							while ((len_tmp = range->end - tmp_start) >= res->len) {
 								if ((tmp_start % tmp_divide) == 0) {
-									flag = TRUE;
+									flag = 1;
 									len_cur = len_tmp;
 									start_cur = tmp_start;
 									break;
@@ -1496,7 +1491,7 @@ int ibmphp_find_resource (struct bus_node *bus, u32 start_address, struct resour
 	char * type = "";
 
 	if (!bus) {
-		err ("The bus passed in NULL to find resource \n");
+		err ("The bus passed in NULL to find resource\n");
 		return -ENODEV;
 	}
 
@@ -1514,7 +1509,7 @@ int ibmphp_find_resource (struct bus_node *bus, u32 start_address, struct resour
 			type = "pfmem";
 			break;
 		default:
-			err ("wrong type of flag \n");
+			err ("wrong type of flag\n");
 			return -EINVAL;
 	}
 	
@@ -1540,17 +1535,17 @@ int ibmphp_find_resource (struct bus_node *bus, u32 start_address, struct resour
 				res_cur = res_cur->next;
 			}
 			if (!res_cur) {
-				debug ("SOS...cannot find %s resource in the bus. \n", type);
+				debug ("SOS...cannot find %s resource in the bus.\n", type);
 				return -EINVAL;
 			}
 		} else {
-			debug ("SOS... cannot find %s resource in the bus. \n", type);
+			debug ("SOS... cannot find %s resource in the bus.\n", type);
 			return -EINVAL;
 		}
 	}
 
 	if (*res)
-		debug ("*res->start = %x \n", (*res)->start);
+		debug ("*res->start = %x\n", (*res)->start);
 
 	return 0;
 }
@@ -1689,7 +1684,7 @@ static int __init once_over (void)
 		bus_cur = list_entry (tmp, struct bus_node, bus_list);
 		if ((!bus_cur->rangePFMem) && (bus_cur->firstPFMem)) {
 			for (pfmem_cur = bus_cur->firstPFMem, pfmem_prev = NULL; pfmem_cur; pfmem_prev = pfmem_cur, pfmem_cur = pfmem_cur->next) {
-				pfmem_cur->fromMem = TRUE;
+				pfmem_cur->fromMem = 1;
 				if (pfmem_prev)
 					pfmem_prev->next = pfmem_cur->next;
 				else
@@ -1706,12 +1701,11 @@ static int __init once_over (void)
 
 				bus_cur->firstPFMemFromMem = pfmem_cur;
 
-				mem = kmalloc (sizeof (struct resource_node), GFP_KERNEL);		
+				mem = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
 				if (!mem) {
-					err ("out of system memory \n");
+					err ("out of system memory\n");
 					return -ENOMEM;
 				}
-				memset (mem, 0, sizeof (struct resource_node));
 				mem->type = MEM;
 				mem->busno = pfmem_cur->busno;
 				mem->devfunc = pfmem_cur->devfunc;
@@ -1792,7 +1786,7 @@ void ibmphp_print_test (void)
 
 	list_for_each (tmp, &gbuses) {
 		bus_cur = list_entry (tmp, struct bus_node, bus_list);
-		debug_pci ("This is bus # %d.  There are \n", bus_cur->busno);
+		debug_pci ("This is bus # %d.  There are\n", bus_cur->busno);
 		debug_pci ("IORanges = %d\t", bus_cur->noIORanges);
 		debug_pci ("MemRanges = %d\t", bus_cur->noMemRanges);
 		debug_pci ("PFMemRanges = %d\n", bus_cur->noPFMemRanges);
@@ -1903,7 +1897,7 @@ static int range_exists_already (struct range_node * range, struct bus_node * bu
 			range_cur = bus_cur->rangePFMem;
 			break;
 		default:
-			err ("wrong type passed to find out if range already exists \n");
+			err ("wrong type passed to find out if range already exists\n");
 			return -ENODEV;
 	}
 
@@ -1948,7 +1942,7 @@ static int __init update_bridge_ranges (struct bus_node **bus)
 		return -ENODEV;
 	ibmphp_pci_bus->number = bus_cur->busno;
 
-	debug ("inside %s \n", __FUNCTION__);
+	debug ("inside %s\n", __func__);
 	debug ("bus_cur->busno = %x\n", bus_cur->busno);
 
 	for (device = 0; device < 32; device++) {
@@ -1995,18 +1989,17 @@ static int __init update_bridge_ranges (struct bus_node **bus)
 						end_address |= (upper_io_end << 16);
 
 						if ((start_address) && (start_address <= end_address)) {
-							range = kmalloc (sizeof (struct range_node), GFP_KERNEL);
+							range = kzalloc(sizeof(struct range_node), GFP_KERNEL);
 							if (!range) {
-								err ("out of system memory \n");
+								err ("out of system memory\n");
 								return -ENOMEM;
 							}
-							memset (range, 0, sizeof (struct range_node));
 							range->start = start_address;
 							range->end = end_address + 0xfff;
 
 							if (bus_sec->noIORanges > 0) {
 								if (!range_exists_already (range, bus_sec, IO)) {
-									add_range (IO, range, bus_sec);
+									add_bus_range (IO, range, bus_sec);
 									++bus_sec->noIORanges;
 								} else {
 									kfree (range);
@@ -2021,13 +2014,12 @@ static int __init update_bridge_ranges (struct bus_node **bus)
 							fix_resources (bus_sec);
 
 							if (ibmphp_find_resource (bus_cur, start_address, &io, IO)) {
-								io = kmalloc (sizeof (struct resource_node), GFP_KERNEL);							
+								io = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
 								if (!io) {
 									kfree (range);
-									err ("out of system memory \n");
+									err ("out of system memory\n");
 									return -ENOMEM;
 								}
-								memset (io, 0, sizeof (struct resource_node));
 								io->type = IO;
 								io->busno = bus_cur->busno;
 								io->devfunc = ((device << 3) | (function & 0x7));
@@ -2046,18 +2038,17 @@ static int __init update_bridge_ranges (struct bus_node **bus)
 
 						if ((start_address) && (start_address <= end_address)) {
 
-							range = kmalloc (sizeof (struct range_node), GFP_KERNEL);
+							range = kzalloc(sizeof(struct range_node), GFP_KERNEL);
 							if (!range) {
-								err ("out of system memory \n");
+								err ("out of system memory\n");
 								return -ENOMEM;
 							}
-							memset (range, 0, sizeof (struct range_node));
 							range->start = start_address;
 							range->end = end_address + 0xfffff;
 
 							if (bus_sec->noMemRanges > 0) {
 								if (!range_exists_already (range, bus_sec, MEM)) {
-									add_range (MEM, range, bus_sec);
+									add_bus_range (MEM, range, bus_sec);
 									++bus_sec->noMemRanges;
 								} else {
 									kfree (range);
@@ -2073,13 +2064,12 @@ static int __init update_bridge_ranges (struct bus_node **bus)
 							fix_resources (bus_sec);
 
 							if (ibmphp_find_resource (bus_cur, start_address, &mem, MEM)) {
-								mem = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
+								mem = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
 								if (!mem) {
 									kfree (range);
-									err ("out of system memory \n");
+									err ("out of system memory\n");
 									return -ENOMEM;
 								}
-								memset (mem, 0, sizeof (struct resource_node));
 								mem->type = MEM;
 								mem->busno = bus_cur->busno;
 								mem->devfunc = ((device << 3) | (function & 0x7));
@@ -2102,18 +2092,17 @@ static int __init update_bridge_ranges (struct bus_node **bus)
 
 						if ((start_address) && (start_address <= end_address)) {
 
-							range = kmalloc (sizeof (struct range_node), GFP_KERNEL);
+							range = kzalloc(sizeof(struct range_node), GFP_KERNEL);
 							if (!range) {
-								err ("out of system memory \n");
+								err ("out of system memory\n");
 								return -ENOMEM;
 							}
-							memset (range, 0, sizeof (struct range_node));
 							range->start = start_address;
 							range->end = end_address + 0xfffff;
 
 							if (bus_sec->noPFMemRanges > 0) {
 								if (!range_exists_already (range, bus_sec, PFMEM)) {
-									add_range (PFMEM, range, bus_sec);
+									add_bus_range (PFMEM, range, bus_sec);
 									++bus_sec->noPFMemRanges;
 								} else {
 									kfree (range);
@@ -2128,20 +2117,19 @@ static int __init update_bridge_ranges (struct bus_node **bus)
 
 							fix_resources (bus_sec);
 							if (ibmphp_find_resource (bus_cur, start_address, &pfmem, PFMEM)) {
-								pfmem = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
+								pfmem = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
 								if (!pfmem) {
 									kfree (range);
-									err ("out of system memory \n");
+									err ("out of system memory\n");
 									return -ENOMEM;
 								}
-								memset (pfmem, 0, sizeof (struct resource_node));
 								pfmem->type = PFMEM;
 								pfmem->busno = bus_cur->busno;
 								pfmem->devfunc = ((device << 3) | (function & 0x7));
 								pfmem->start = start_address;
 								pfmem->end = end_address + 0xfffff;
 								pfmem->len = pfmem->end - pfmem->start + 1;
-								pfmem->fromMem = FALSE;
+								pfmem->fromMem = 0;
 
 								ibmphp_add_resource (pfmem);
 							}

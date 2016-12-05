@@ -10,15 +10,14 @@
 #include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/errno.h>
+#include <linux/gfp.h>
 /* Used for the temporal inet entries and routing */
 #include <linux/socket.h>
 #include <linux/route.h>
-#include <linux/dio.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -40,8 +39,7 @@
 /* Our private data structure */
 struct m147lance_private {
 	struct lance_private lance;
-	void *base;
-	void *ram;
+	unsigned long ram;
 };
 
 /* function prototypes... This is easy because all the grot is in the
@@ -49,49 +47,52 @@ struct m147lance_private {
  * plus board-specific init, open and close actions.
  * Oh, and we need to tell the generic code how to read and write LANCE registers...
  */
-int mvme147lance_probe(struct net_device *dev);
 static int m147lance_open(struct net_device *dev);
 static int m147lance_close(struct net_device *dev);
-static void m147lance_writerap(struct m147lance_private *lp, unsigned short value);
-static void m147lance_writerdp(struct m147lance_private *lp, unsigned short value);
-static unsigned short m147lance_readrdp(struct m147lance_private *lp);
+static void m147lance_writerap(struct lance_private *lp, unsigned short value);
+static void m147lance_writerdp(struct lance_private *lp, unsigned short value);
+static unsigned short m147lance_readrdp(struct lance_private *lp);
 
 typedef void (*writerap_t)(void *, unsigned short);
 typedef void (*writerdp_t)(void *, unsigned short);
 typedef unsigned short (*readrdp_t)(void *);
 
-#ifdef MODULE
-static struct m147lance_private *root_m147lance_dev;
-#endif
+static const struct net_device_ops lance_netdev_ops = {
+	.ndo_open		= m147lance_open,
+	.ndo_stop		= m147lance_close,
+	.ndo_start_xmit		= lance_start_xmit,
+	.ndo_set_multicast_list	= lance_set_multicast,
+	.ndo_tx_timeout		= lance_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= eth_mac_addr,
+};
 
 /* Initialise the one and only on-board 7990 */
-int __init mvme147lance_probe(struct net_device *dev)
+struct net_device * __init mvme147lance_probe(int unit)
 {
+	struct net_device *dev;
 	static int called;
 	static const char name[] = "MVME147 LANCE";
 	struct m147lance_private *lp;
 	u_long *addr;
 	u_long address;
+	int err;
 
 	if (!MACH_IS_MVME147 || called)
-		return -ENODEV;
+		return ERR_PTR(-ENODEV);
 	called++;
 
-	SET_MODULE_OWNER(dev);
+	dev = alloc_etherdev(sizeof(struct m147lance_private));
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
 
-	dev->priv = kmalloc(sizeof(struct m147lance_private), GFP_KERNEL);
-	if (dev->priv == NULL)
-		return -ENOMEM;
-	memset(dev->priv, 0, sizeof(struct m147lance_private));
+	if (unit >= 0)
+		sprintf(dev->name, "eth%d", unit);
 
 	/* Fill the dev fields */
 	dev->base_addr = (unsigned long)MVME147_LANCE_BASE;
-	dev->open = &m147lance_open;
-	dev->stop = &m147lance_close;
-	dev->hard_start_xmit = &lance_start_xmit;
-	dev->get_stats = &lance_get_stats;
-	dev->set_multicast_list = &lance_set_multicast;
-	dev->tx_timeout = &lance_tx_timeout;
+	dev->netdev_ops = &lance_netdev_ops;
 	dev->dma = 0;
 
 	addr=(u_long *)ETHERNET_ADDRESS;
@@ -106,23 +107,22 @@ int __init mvme147lance_probe(struct net_device *dev)
 	address=address>>8;
 	dev->dev_addr[3]=address&0xff;
 
-	printk("%s: MVME147 at 0x%08lx, irq %d, Hardware Address %02x:%02x:%02x:%02x:%02x:%02x\n",
-		dev->name, dev->base_addr, MVME147_LANCE_IRQ,
-		dev->dev_addr[0],
-		dev->dev_addr[1], dev->dev_addr[2],
-		dev->dev_addr[3], dev->dev_addr[4],
-		dev->dev_addr[5]);
+	printk("%s: MVME147 at 0x%08lx, irq %d, "
+	       "Hardware Address %pM\n",
+	       dev->name, dev->base_addr, MVME147_LANCE_IRQ,
+	       dev->dev_addr);
 
-	lp = (struct m147lance_private *)dev->priv;
-	lp->ram = (void *)__get_dma_pages(GFP_ATOMIC, 3);	/* 16K */
+	lp = netdev_priv(dev);
+	lp->ram = __get_dma_pages(GFP_ATOMIC, 3);	/* 16K */
 	if (!lp->ram)
 	{
 		printk("%s: No memory for LANCE buffers\n", dev->name);
-		return -ENODEV;
+		free_netdev(dev);
+		return ERR_PTR(-ENOMEM);
 	}
 
 	lp->lance.name = (char*)name;                   /* discards const, shut up gcc */
-	lp->lance.ll = (struct lance_regs *)(dev->base_addr);
+	lp->lance.base = dev->base_addr;
 	lp->lance.init_block = (struct lance_init_block *)(lp->ram); /* CPU addr */
 	lp->lance.lance_init_block = (struct lance_init_block *)(lp->ram);                 /* LANCE addr of same RAM */
 	lp->lance.busmaster_regval = LE_C3_BSWP;        /* we're bigendian */
@@ -134,30 +134,30 @@ int __init mvme147lance_probe(struct net_device *dev)
 	lp->lance.lance_log_tx_bufs = LANCE_LOG_TX_BUFFERS;
 	lp->lance.rx_ring_mod_mask = RX_RING_MOD_MASK;
 	lp->lance.tx_ring_mod_mask = TX_RING_MOD_MASK;
-	ether_setup(dev);
 
-#ifdef MODULE
-	dev->ifindex = dev_new_index();
-	lp->next_module = root_m147lance_dev;
-	root_m147lance_dev = lp;
-#endif /* MODULE */
+	err = register_netdev(dev);
+	if (err) {
+		free_pages(lp->ram, 3);
+		free_netdev(dev);
+		return ERR_PTR(err);
+	}
 
-	return 0;
+	return dev;
 }
 
-static void m147lance_writerap(struct m147lance_private *lp, unsigned short value)
+static void m147lance_writerap(struct lance_private *lp, unsigned short value)
 {
-	lp->lance.ll->rap = value;
+	out_be16(lp->base + LANCE_RAP, value);
 }
 
-static void m147lance_writerdp(struct m147lance_private *lp, unsigned short value)
+static void m147lance_writerdp(struct lance_private *lp, unsigned short value)
 {
-	lp->lance.ll->rdp = value;
+	out_be16(lp->base + LANCE_RDP, value);
 }
 
-static unsigned short m147lance_readrdp(struct m147lance_private *lp)
+static unsigned short m147lance_readrdp(struct lance_private *lp)
 {
-	return lp->lance.ll->rdp;
+	return in_be16(lp->base + LANCE_RDP);
 }
 
 static int m147lance_open(struct net_device *dev)
@@ -185,23 +185,21 @@ static int m147lance_close(struct net_device *dev)
 #ifdef MODULE
 MODULE_LICENSE("GPL");
 
-int init_module(void)
+static struct net_device *dev_mvme147_lance;
+int __init init_module(void)
 {
-	root_lance_dev = NULL;
-	return mvme147lance_probe(NULL);
+	dev_mvme147_lance = mvme147lance_probe(-1);
+	if (IS_ERR(dev_mvme147_lance))
+		return PTR_ERR(dev_mvme147_lance);
+	return 0;
 }
 
-void cleanup_module(void)
+void __exit cleanup_module(void)
 {
-	/* Walk the chain of devices, unregistering them */
-	struct m147lance_private *lp;
-	while (root_m147lance_dev) {
-		lp = root_m147lance_dev->next_module;
-		unregister_netdev(root_lance_dev->dev);
-		free_pages(lp->ram, 3);
-		free_netdev(root_lance_dev->dev);
-		root_lance_dev = lp;
-	}
+	struct m147lance_private *lp = netdev_priv(dev_mvme147_lance);
+	unregister_netdev(dev_mvme147_lance);
+	free_pages(lp->ram, 3);
+	free_netdev(dev_mvme147_lance);
 }
 
 #endif /* MODULE */

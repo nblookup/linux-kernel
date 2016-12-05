@@ -28,7 +28,7 @@
    - added support for Arco Electronics AE/2-card (experimental)
 
    Mon Sep 14 09:53:42 CET 1998 (David Weinehall)
-   - added support for Compex ENET-16MC/P (experimental) 
+   - added support for Compex ENET-16MC/P (experimental)
 
    Tue Sep 15 16:21:12 CET 1998 (David Weinehall, Magnus Jonsson, Tomas Ogren)
    - Miscellaneous bugfixes
@@ -44,11 +44,11 @@
    - Version# bump
 
    Mon Nov 16 15:28:23 CET 1998 (Wim Dumon)
-   - pass 'dev' as last parameter of request_irq in stead of 'NULL'   
+   - pass 'dev' as last parameter of request_irq in stead of 'NULL'
 
    Wed Feb  7 21:24:00 CET 2001 (Alfred Arnold)
    - added support for the D-Link DE-320CT
-   
+
    *    WARNING
 	-------
 	This is alpha-test software.  It is not guaranteed to work. As a
@@ -66,7 +66,6 @@ static const char *version = "ne2.c:v0.91 Nov 16 1998 Wim Dumon <wimpie@kotnet.o
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -74,13 +73,16 @@ static const char *version = "ne2.c:v0.91 Nov 16 1998 Wim Dumon <wimpie@kotnet.o
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+#include <linux/bitops.h>
+#include <linux/jiffies.h>
 
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 
 #include "8390.h"
+
+#define DRV_NAME "ne2"
 
 /* Some defines that people can play with if so inclined. */
 
@@ -134,9 +136,6 @@ extern int netcard_probe(struct net_device *dev);
 
 static int ne2_probe1(struct net_device *dev, int slot);
 
-static int ne_open(struct net_device *dev);
-static int ne_close(struct net_device *dev);
-
 static void ne_reset_8390(struct net_device *dev);
 static void ne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 		int ring_page);
@@ -147,9 +146,9 @@ static void ne_block_output(struct net_device *dev, const int count,
 
 
 /*
- * special code to read the DE-320's MAC address EEPROM.  In contrast to a 
+ * special code to read the DE-320's MAC address EEPROM.  In contrast to a
  * standard NE design, this is a serial EEPROM (93C46) that has to be read
- * bit by bit.  The EEPROM cotrol port at base + 0x1e has the following 
+ * bit by bit.  The EEPROM cotrol port at base + 0x1e has the following
  * layout:
  *
  * Bit 0 = Data out (read from EEPROM)
@@ -215,7 +214,7 @@ static unsigned int __init dlink_get_eeprom(unsigned int eeaddr, unsigned int ad
 {
 	int z;
 	unsigned int value = 0;
- 
+
 	/* pull the CS line low for a moment.  This resets the EEPROM-
 	   internal logic, and makes it ready for a new command. */
 
@@ -242,36 +241,59 @@ static unsigned int __init dlink_get_eeprom(unsigned int eeaddr, unsigned int ad
  * Note that at boot, this probe only picks up one card at a time.
  */
 
-int __init ne2_probe(struct net_device *dev)
+static int __init do_ne2_probe(struct net_device *dev)
 {
 	static int current_mca_slot = -1;
 	int i;
 	int adapter_found = 0;
 
-	SET_MODULE_OWNER(dev);
-
-	/* Do not check any supplied i/o locations. 
+	/* Do not check any supplied i/o locations.
 	   POS registers usually don't fail :) */
 
-	/* MCA cards have POS registers.  
-	   Autodetecting MCA cards is extremely simple. 
+	/* MCA cards have POS registers.
+	   Autodetecting MCA cards is extremely simple.
 	   Just search for the card. */
 
 	for(i = 0; (ne2_adapters[i].name != NULL) && !adapter_found; i++) {
-		current_mca_slot = 
+		current_mca_slot =
 			mca_find_unused_adapter(ne2_adapters[i].id, 0);
 
 		if((current_mca_slot != MCA_NOTFOUND) && !adapter_found) {
-			mca_set_adapter_name(current_mca_slot, 
+			int res;
+			mca_set_adapter_name(current_mca_slot,
 					ne2_adapters[i].name);
 			mca_mark_as_used(current_mca_slot);
-			
-			return ne2_probe1(dev, current_mca_slot);
+
+			res = ne2_probe1(dev, current_mca_slot);
+			if (res)
+				mca_mark_as_unused(current_mca_slot);
+			return res;
 		}
 	}
 	return -ENODEV;
 }
 
+#ifndef MODULE
+struct net_device * __init ne2_probe(int unit)
+{
+	struct net_device *dev = alloc_eip_netdev();
+	int err;
+
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = do_ne2_probe(dev);
+	if (err)
+		goto out;
+	return dev;
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
+}
+#endif
 
 static int ne2_procinfo(char *buf, int slot, struct net_device *dev)
 {
@@ -279,19 +301,14 @@ static int ne2_procinfo(char *buf, int slot, struct net_device *dev)
 
 	len += sprintf(buf+len, "The NE/2 Ethernet Adapter\n" );
 	len += sprintf(buf+len, "Driver written by Wim Dumon ");
-	len += sprintf(buf+len, "<wimpie@kotnet.org>\n"); 
+	len += sprintf(buf+len, "<wimpie@kotnet.org>\n");
 	len += sprintf(buf+len, "Modified by ");
 	len += sprintf(buf+len, "David Weinehall <tao@acc.umu.se>\n");
 	len += sprintf(buf+len, "and by Magnus Jonsson <bigfoot@acc.umu.se>\n");
 	len += sprintf(buf+len, "Based on the original NE2000 drivers\n" );
 	len += sprintf(buf+len, "Base IO: %#x\n", (unsigned int)dev->base_addr);
 	len += sprintf(buf+len, "IRQ    : %d\n", dev->irq);
-
-#define HW_ADDR(i) dev->dev_addr[i]
-	len += sprintf(buf+len, "HW addr : %x:%x:%x:%x:%x:%x\n", 
-			HW_ADDR(0), HW_ADDR(1), HW_ADDR(2), 
-			HW_ADDR(3), HW_ADDR(4), HW_ADDR(5) );
-#undef HW_ADDR
+	len += sprintf(buf+len, "HW addr : %pM\n", dev->dev_addr);
 
 	return len;
 }
@@ -332,7 +349,7 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 		irq = irqs[(POS & 0x60)>>5];
 	}
 
-	if (!request_region(base_addr, NE_IO_EXTENT, dev->name))
+	if (!request_region(base_addr, NE_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
 
 #ifdef DEBUG
@@ -342,7 +359,7 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 
 #ifndef CRYNWR_WAY
 	/* Reset the card the way they do it in the Crynwr packet driver */
-	for (i=0; i<8; i++) 
+	for (i=0; i<8; i++)
 		outb(0x0, base_addr + NE_RESET);
 	inb(base_addr + NE_RESET);
 	outb(0x21, base_addr + NE_CMD);
@@ -360,15 +377,15 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 
 #else  /* _I_ never tested it this way .. Go ahead and try ...*/
 	/* Reset card. Who knows what dain-bramaged state it was left in. */
-	{ 
+	{
 		unsigned long reset_start_time = jiffies;
 
-		/* DON'T change these to inb_p/outb_p or reset will fail on 
+		/* DON'T change these to inb_p/outb_p or reset will fail on
 		   clones.. */
 		outb(inb(base_addr + NE_RESET), base_addr + NE_RESET);
 
 		while ((inb_p(base_addr + EN0_ISR) & ENISR_RESET) == 0)
-			if (jiffies - reset_start_time > 2*HZ/100) {
+			if (time_after(jiffies, reset_start_time + 2*HZ/100)) {
 				printk(" not found (no reset ack).\n");
 				retval = -ENODEV;
 				goto out;
@@ -380,16 +397,16 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 
 
 	/* Read the 16 bytes of station address PROM.
-	   We must first initialize registers, similar to 
-	   NS8390_init(eifdev, 0).
+	   We must first initialize registers, similar to
+	   NS8390p_init(eifdev, 0).
 	   We can't reliably read the SAPROM address without this.
 	   (I learned the hard way!). */
 	{
-		struct { 
-			unsigned char value, offset; 
+		struct {
+			unsigned char value, offset;
 		} program_seq[] = {
 						/* Select page 0 */
-			{E8390_NODMA+E8390_PAGE0+E8390_STOP, E8390_CMD}, 
+			{E8390_NODMA+E8390_PAGE0+E8390_STOP, E8390_CMD},
 			{0x49,	EN0_DCFG},  /* Set WORD-wide (0x49) access. */
 			{0x00,	EN0_RCNTLO},  /* Clear the count regs. */
 			{0x00,	EN0_RCNTHI},
@@ -404,8 +421,8 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 			{E8390_RREAD+E8390_START, E8390_CMD},
 		};
 
-		for (i = 0; i < sizeof(program_seq)/sizeof(program_seq[0]); i++)
-			outb_p(program_seq[i].value, base_addr + 
+		for (i = 0; i < ARRAY_SIZE(program_seq); i++)
+			outb_p(program_seq[i].value, base_addr +
 				program_seq[i].offset);
 
 	}
@@ -434,29 +451,21 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 
 	/* Snarf the interrupt now.  There's no point in waiting since we cannot
 	   share and the board will usually be enabled. */
-	retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev);
+	retval = request_irq(dev->irq, eip_interrupt, 0, DRV_NAME, dev);
 	if (retval) {
-		printk (" unable to get IRQ %d (irqval=%d).\n", 
+		printk (" unable to get IRQ %d (irqval=%d).\n",
 				dev->irq, retval);
 		goto out;
 	}
 
 	dev->base_addr = base_addr;
 
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk (" unable to get memory for dev->priv.\n");
-		free_irq(dev->irq, dev);
-		retval = -ENOMEM;
-		goto out;
-	}
-
-	for(i = 0; i < ETHER_ADDR_LEN; i++) {
-		printk(" %2.2x", SA_prom[i]);
+	for(i = 0; i < ETHER_ADDR_LEN; i++)
 		dev->dev_addr[i] = SA_prom[i];
-	}
 
-	printk("\n%s: %s found at %#x, using IRQ %d.\n",
+	printk(" %pM\n", dev->dev_addr);
+
+	printk("%s: %s found at %#x, using IRQ %d.\n",
 			dev->name, name, base_addr, dev->irq);
 
 	mca_set_adapter_procfn(slot, (MCA_ProcFn) ne2_procinfo, dev);
@@ -476,30 +485,22 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 	ei_status.block_input = &ne_block_input;
 	ei_status.block_output = &ne_block_output;
 	ei_status.get_8390_hdr = &ne_get_8390_hdr;
-	
+
 	ei_status.priv = slot;
-	
-	dev->open = &ne_open;
-	dev->stop = &ne_close;
-	NS8390_init(dev, 0);
+
+	dev->netdev_ops = &eip_netdev_ops;
+	NS8390p_init(dev, 0);
+
+	retval = register_netdev(dev);
+	if (retval)
+		goto out1;
 	return 0;
+out1:
+	mca_set_adapter_procfn( ei_status.priv, NULL, NULL);
+	free_irq(dev->irq, dev);
 out:
 	release_region(base_addr, NE_IO_EXTENT);
 	return retval;
-}
-
-static int ne_open(struct net_device *dev)
-{
-	ei_open(dev);
-	return 0;
-}
-
-static int ne_close(struct net_device *dev)
-{
-	if (ei_debug > 1)
-		printk("%s: Shutting down ethercard.\n", dev->name);
-	ei_close(dev);
-	return 0;
 }
 
 /* Hard reset the card.  This used to pause for the same period that a
@@ -508,7 +509,7 @@ static void ne_reset_8390(struct net_device *dev)
 {
 	unsigned long reset_start_time = jiffies;
 
-	if (ei_debug > 1) 
+	if (ei_debug > 1)
 		printk("resetting the 8390 t=%ld...", jiffies);
 
 	/* DON'T change these to inb_p/outb_p or reset will fail on clones. */
@@ -519,8 +520,8 @@ static void ne_reset_8390(struct net_device *dev)
 
 	/* This check _should_not_ be necessary, omit eventually. */
 	while ((inb_p(NE_BASE+EN0_ISR) & ENISR_RESET) == 0)
-		if (jiffies - reset_start_time > 2*HZ/100) {
-			printk("%s: ne_reset_8390() did not complete.\n", 
+		if (time_after(jiffies, reset_start_time + 2*HZ/100)) {
+			printk("%s: ne_reset_8390() did not complete.\n",
 					dev->name);
 			break;
 		}
@@ -531,13 +532,13 @@ static void ne_reset_8390(struct net_device *dev)
    we don't need to be concerned with ring wrap as the header will be at
    the start of a page, so we optimize accordingly. */
 
-static void ne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, 
+static void ne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 		int ring_page)
 {
 
 	int nic_base = dev->base_addr;
 
-	/* This *shouldn't* happen. 
+	/* This *shouldn't* happen.
 	   If it does, it's the last thing you'll see */
 	if (ei_status.dmaing) {
 		printk("%s: DMAing conflict in ne_get_8390_hdr "
@@ -555,10 +556,10 @@ static void ne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 	outb_p(E8390_RREAD+E8390_START, nic_base + NE_CMD);
 
 	if (ei_status.word16)
-		insw(NE_BASE + NE_DATAPORT, hdr, 
+		insw(NE_BASE + NE_DATAPORT, hdr,
 				sizeof(struct e8390_pkt_hdr)>>1);
 	else
-		insb(NE_BASE + NE_DATAPORT, hdr, 
+		insb(NE_BASE + NE_DATAPORT, hdr,
 				sizeof(struct e8390_pkt_hdr));
 
 	outb_p(ENISR_RDC, nic_base + EN0_ISR);	/* Ack intr. */
@@ -570,7 +571,7 @@ static void ne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
    hints. The NEx000 doesn't share the on-board packet memory -- you have
    to put the packet out through the "remote DMA" dataport using outb. */
 
-static void ne_block_input(struct net_device *dev, int count, struct sk_buff *skb, 
+static void ne_block_input(struct net_device *dev, int count, struct sk_buff *skb,
 		int ring_offset)
 {
 #ifdef NE_SANITY_CHECK
@@ -579,7 +580,7 @@ static void ne_block_input(struct net_device *dev, int count, struct sk_buff *sk
 	int nic_base = dev->base_addr;
 	char *buf = skb->data;
 
-	/* This *shouldn't* happen. 
+	/* This *shouldn't* happen.
 	   If it does, it's the last thing you'll see */
 	if (ei_status.dmaing) {
 		printk("%s: DMAing conflict in ne_block_input "
@@ -647,7 +648,7 @@ static void ne_block_output(struct net_device *dev, int count,
 	if (ei_status.word16 && (count & 0x01))
 		count++;
 
-	/* This *shouldn't* happen. 
+	/* This *shouldn't* happen.
 	   If it does, it's the last thing you'll see */
 	if (ei_status.dmaing) {
 		printk("%s: DMAing conflict in ne_block_output."
@@ -720,72 +721,78 @@ retry:
 #endif
 
 	while ((inb_p(nic_base + EN0_ISR) & ENISR_RDC) == 0)
-		if (jiffies - dma_start > 2*HZ/100) {		/* 20ms */
+		if (time_after(jiffies, dma_start + 2*HZ/100)) {		/* 20ms */
 			printk("%s: timeout waiting for Tx RDC.\n", dev->name);
 			ne_reset_8390(dev);
-			NS8390_init(dev,1);
+			NS8390p_init(dev, 1);
 			break;
 		}
 
 	outb_p(ENISR_RDC, nic_base + EN0_ISR);	/* Ack intr. */
 	ei_status.dmaing &= ~0x01;
-	return;
 }
 
 
 #ifdef MODULE
 #define MAX_NE_CARDS	4	/* Max number of NE cards per module */
-static struct net_device dev_ne[MAX_NE_CARDS];
+static struct net_device *dev_ne[MAX_NE_CARDS];
 static int io[MAX_NE_CARDS];
 static int irq[MAX_NE_CARDS];
 static int bad[MAX_NE_CARDS];	/* 0xbad = bad sig or no reset ack */
 MODULE_LICENSE("GPL");
 
-#ifdef MODULE_PARM
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
-MODULE_PARM(bad, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(bad, int, NULL, 0);
 MODULE_PARM_DESC(io, "(ignored)");
 MODULE_PARM_DESC(irq, "(ignored)");
 MODULE_PARM_DESC(bad, "(ignored)");
-#endif
 
 /* Module code fixed by David Weinehall */
 
-int init_module(void)
+int __init init_module(void)
 {
+	struct net_device *dev;
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
-		struct net_device *dev = &dev_ne[this_dev];
+		dev = alloc_eip_netdev();
+		if (!dev)
+			break;
 		dev->irq = irq[this_dev];
 		dev->mem_end = bad[this_dev];
 		dev->base_addr = io[this_dev];
-		dev->init = ne2_probe;
-		if (register_netdev(dev) != 0) {
-			if (found != 0) return 0;   /* Got at least one. */
-
-			printk(KERN_WARNING "ne2.c: No NE/2 card found.\n");
-			return -ENXIO;
+		if (do_ne2_probe(dev) == 0) {
+			dev_ne[found++] = dev;
+			continue;
 		}
-		found++;
+		free_netdev(dev);
+		break;
 	}
-	return 0;
+	if (found)
+		return 0;
+	printk(KERN_WARNING "ne2.c: No NE/2 card found\n");
+	return -ENXIO;
 }
 
-void cleanup_module(void)
+static void cleanup_card(struct net_device *dev)
+{
+	mca_mark_as_unused(ei_status.priv);
+	mca_set_adapter_procfn( ei_status.priv, NULL, NULL);
+	free_irq(dev->irq, dev);
+	release_region(dev->base_addr, NE_IO_EXTENT);
+}
+
+void __exit cleanup_module(void)
 {
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
-		struct net_device *dev = &dev_ne[this_dev];
-		if (dev->priv != NULL) {
-			mca_mark_as_unused(ei_status.priv);
-			mca_set_adapter_procfn( ei_status.priv, NULL, NULL);
-			kfree(dev->priv);
-			free_irq(dev->irq, dev);
-			release_region(dev->base_addr, NE_IO_EXTENT);
+		struct net_device *dev = dev_ne[this_dev];
+		if (dev) {
 			unregister_netdev(dev);
+			cleanup_card(dev);
+			free_netdev(dev);
 		}
 	}
 }

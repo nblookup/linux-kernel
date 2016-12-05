@@ -4,49 +4,71 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/fs.h>
-#include <linux/smp_lock.h>
 #include <linux/ext2_fs.h>
+#include <linux/security.h>
 #include "xattr.h"
 
-#define XATTR_SECURITY_PREFIX "security."
-
 static size_t
-ext2_xattr_security_list(char *list, struct inode *inode,
-			const char *name, int name_len)
+ext2_xattr_security_list(struct dentry *dentry, char *list, size_t list_size,
+			 const char *name, size_t name_len, int type)
 {
-	const int prefix_len = sizeof(XATTR_SECURITY_PREFIX)-1;
+	const int prefix_len = XATTR_SECURITY_PREFIX_LEN;
+	const size_t total_len = prefix_len + name_len + 1;
 
-	if (list) {
+	if (list && total_len <= list_size) {
 		memcpy(list, XATTR_SECURITY_PREFIX, prefix_len);
 		memcpy(list+prefix_len, name, name_len);
 		list[prefix_len + name_len] = '\0';
 	}
-	return prefix_len + name_len + 1;
+	return total_len;
 }
 
 static int
-ext2_xattr_security_get(struct inode *inode, const char *name,
-		       void *buffer, size_t size)
+ext2_xattr_security_get(struct dentry *dentry, const char *name,
+		       void *buffer, size_t size, int type)
 {
 	if (strcmp(name, "") == 0)
 		return -EINVAL;
-	return ext2_xattr_get(inode, EXT2_XATTR_INDEX_SECURITY, name,
+	return ext2_xattr_get(dentry->d_inode, EXT2_XATTR_INDEX_SECURITY, name,
 			      buffer, size);
 }
 
 static int
-ext2_xattr_security_set(struct inode *inode, const char *name,
-		       const void *value, size_t size, int flags)
+ext2_xattr_security_set(struct dentry *dentry, const char *name,
+		const void *value, size_t size, int flags, int type)
 {
 	if (strcmp(name, "") == 0)
 		return -EINVAL;
-	return ext2_xattr_set(inode, EXT2_XATTR_INDEX_SECURITY, name,
+	return ext2_xattr_set(dentry->d_inode, EXT2_XATTR_INDEX_SECURITY, name,
 			      value, size, flags);
 }
 
-struct ext2_xattr_handler ext2_xattr_security_handler = {
+int
+ext2_init_security(struct inode *inode, struct inode *dir,
+		   const struct qstr *qstr)
+{
+	int err;
+	size_t len;
+	void *value;
+	char *name;
+
+	err = security_inode_init_security(inode, dir, qstr, &name, &value, &len);
+	if (err) {
+		if (err == -EOPNOTSUPP)
+			return 0;
+		return err;
+	}
+	err = ext2_xattr_set(inode, EXT2_XATTR_INDEX_SECURITY,
+			     name, value, len, 0);
+	kfree(name);
+	kfree(value);
+	return err;
+}
+
+const struct xattr_handler ext2_xattr_security_handler = {
 	.prefix	= XATTR_SECURITY_PREFIX,
 	.list	= ext2_xattr_security_list,
 	.get	= ext2_xattr_security_get,

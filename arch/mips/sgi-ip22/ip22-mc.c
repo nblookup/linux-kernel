@@ -4,20 +4,23 @@
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  * Copyright (C) 1999 Andrew R. Baker (andrewb@uab.edu) - Indigo2 changes
  * Copyright (C) 2003 Ladislav Michl  (ladis@linux-mips.org)
+ * Copyright (C) 2004 Peter Fuerst    (pf@net.alphadv.de) - IP28
  */
 
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
 
-#include <asm/addrspace.h>
+#include <asm/io.h>
 #include <asm/bootinfo.h>
-#include <asm/ptrace.h>
 #include <asm/sgialib.h>
 #include <asm/sgi/mc.h>
 #include <asm/sgi/hpc3.h>
 #include <asm/sgi/ip22.h>
 
 struct sgimc_regs *sgimc;
+
+EXPORT_SYMBOL(sgimc);
 
 static inline unsigned long get_bank_addr(unsigned int memconfig)
 {
@@ -45,7 +48,7 @@ struct mem {
 /*
  * Detect installed memory, do some sanity checks and notify kernel about it
  */
-static void probe_memory(void)
+static void __init probe_memory(void)
 {
 	int i, j, found, cnt = 0;
 	struct mem bank[4];
@@ -106,7 +109,9 @@ void __init sgimc_init(void)
 {
 	u32 tmp;
 
-	sgimc = (struct sgimc_regs *)(KSEG1 + SGIMC_BASE);
+	/* ioremap can't fail */
+	sgimc = (struct sgimc_regs *)
+		ioremap(SGIMC_BASE, sizeof(struct sgimc_regs));
 
 	printk(KERN_INFO "MC: SGI memory controller Revision %d\n",
 	       (int) sgimc->systemid & SGIMC_SYSID_MASKREV);
@@ -133,9 +138,12 @@ void __init sgimc_init(void)
 	/* Step 2: Enable all parity checking in cpu control register
 	 *         zero.
 	 */
+	/* don't touch parity settings for IP28 */
+#ifndef CONFIG_SGI_IP28
 	tmp = sgimc->cpuctrl0;
 	tmp |= (SGIMC_CCTRL0_EPERRGIO | SGIMC_CCTRL0_EPERRMEM |
 		SGIMC_CCTRL0_R4KNOCHKPARR);
+#endif
 	sgimc->cpuctrl0 = tmp;
 
 	/* Step 3: Setup the MC write buffer depth, this is controlled
@@ -198,4 +206,32 @@ void __init sgimc_init(void)
 }
 
 void __init prom_meminit(void) {}
-void __init prom_free_prom_memory (void) {}
+void __init prom_free_prom_memory(void)
+{
+#ifdef CONFIG_SGI_IP28
+	u32 mconfig1;
+	unsigned long flags;
+	spinlock_t lock;
+
+	/*
+	 * because ARCS accesses memory uncached we wait until ARCS
+	 * isn't needed any longer, before we switch from slow to
+	 * normal mode
+	 */
+	spin_lock_irqsave(&lock, flags);
+	mconfig1 = sgimc->mconfig1;
+	/* map ECC register */
+	sgimc->mconfig1 = (mconfig1 & 0xffff0000) | 0x2060;
+	iob();
+	/* switch to normal mode */
+	*(unsigned long *)PHYS_TO_XKSEG_UNCACHED(0x60000000) = 0;
+	iob();
+	/* reduce WR_COL */
+	sgimc->cmacc = (sgimc->cmacc & ~0xf) | 4;
+	iob();
+	/* restore old config */
+	sgimc->mconfig1 = mconfig1;
+	iob();
+	spin_unlock_irqrestore(&lock, flags);
+#endif
+}

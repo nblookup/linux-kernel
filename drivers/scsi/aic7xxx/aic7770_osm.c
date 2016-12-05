@@ -1,7 +1,7 @@
 /*
  * Linux driver attachment glue for aic7770 based controllers.
  *
- * Copyright (c) 2000-2001 Adaptec Inc.
+ * Copyright (c) 2000-2003 Adaptec Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,91 +36,13 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/linux/drivers/scsi/aic7xxx/aic7770_osm.c#13 $
+ * $Id: //depot/aic7xxx/linux/drivers/scsi/aic7xxx/aic7770_osm.c#14 $
  */
 
 #include "aic7xxx_osm.h"
 
-#define MINSLOT			1
-#define NUMSLOTS		16
-#define IDOFFSET		0x80
-
-int
-aic7770_linux_probe(Scsi_Host_Template *template)
-{
-#if defined(__i386__) || defined(__alpha__)
-	struct aic7770_identity *entry;
-	struct ahc_softc *ahc;
-	int i, slot;
-	int eisaBase;
-	int found;
-
-	eisaBase = 0x1000 + AHC_EISA_SLOT_OFFSET;
-	found = 0;
-	for (slot = 1; slot < NUMSLOTS; eisaBase+=0x1000, slot++) {
-		uint32_t eisa_id;
-		size_t	 id_size;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
-		if (check_region(eisaBase, AHC_EISA_IOSIZE) != 0)
-			continue;
-		request_region(eisaBase, AHC_EISA_IOSIZE, "aic7xxx");
-#else
-		if (request_region(eisaBase, AHC_EISA_IOSIZE, "aic7xxx") == 0)
-			continue;
-#endif
-
-		eisa_id = 0;
-		id_size = sizeof(eisa_id);
-		for (i = 0; i < 4; i++) {
-			/* VLcards require priming*/
-			outb(0x80 + i, eisaBase + IDOFFSET);
-			eisa_id |= inb(eisaBase + IDOFFSET + i)
-				   << ((id_size-i-1) * 8);
-		}
-		release_region(eisaBase, AHC_EISA_IOSIZE);
-		if (eisa_id & 0x80000000)
-			continue;  /* no EISA card in slot */
-
-		entry = aic7770_find_device(eisa_id);
-		if (entry != NULL) {
-			char	 buf[80];
-			char	*name;
-			int	 error;
-
-			/*
-			 * Allocate a softc for this card and
-			 * set it up for attachment by our
-			 * common detect routine.
-			 */
-			sprintf(buf, "ahc_eisa:%d", slot);
-			name = malloc(strlen(buf) + 1, M_DEVBUF, M_NOWAIT);
-			if (name == NULL)
-				break;
-			strcpy(name, buf);
-			ahc = ahc_alloc(template, name);
-			if (ahc == NULL) {
-				/*
-				 * If we can't allocate this one,
-				 * chances are we won't be able to
-				 * allocate future card structures.
-				 */
-				break;
-			}
-			error = aic7770_config(ahc, entry, eisaBase);
-			if (error != 0) {
-				ahc->bsh.ioport = 0;
-				ahc_free(ahc);
-				continue;
-			}
-			found++;
-		}
-	}
-	return (found);
-#else
-	return (0);
-#endif
-}
+#include <linux/device.h>
+#include <linux/eisa.h>
 
 int
 aic7770_map_registers(struct ahc_softc *ahc, u_int port)
@@ -128,12 +50,8 @@ aic7770_map_registers(struct ahc_softc *ahc, u_int port)
 	/*
 	 * Lock out other contenders for our i/o space.
 	 */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
-	request_region(port, AHC_EISA_IOSIZE, "aic7xxx");
-#else
-	if (request_region(port, AHC_EISA_IOSIZE, "aic7xxx") == 0)
+	if (!request_region(port, AHC_EISA_IOSIZE, "aic7xxx"))
 		return (ENOMEM);
-#endif
 	ahc->tag = BUS_SPACE_PIO;
 	ahc->bsh.ioport = port;
 	return (0);
@@ -147,11 +65,92 @@ aic7770_map_int(struct ahc_softc *ahc, u_int irq)
 
 	shared = 0;
 	if ((ahc->flags & AHC_EDGE_INTERRUPT) == 0)
-		shared = SA_SHIRQ;
+		shared = IRQF_SHARED;
 
 	error = request_irq(irq, ahc_linux_isr, shared, "aic7xxx", ahc);
 	if (error == 0)
 		ahc->platform_data->irq = irq;
 	
 	return (-error);
+}
+
+static int
+aic7770_probe(struct device *dev)
+{
+	struct eisa_device *edev = to_eisa_device(dev);
+	u_int eisaBase = edev->base_addr+AHC_EISA_SLOT_OFFSET;
+	struct	ahc_softc *ahc;
+	char	buf[80];
+	char   *name;
+	int	error;
+
+	sprintf(buf, "ahc_eisa:%d", eisaBase >> 12);
+	name = kmalloc(strlen(buf) + 1, GFP_ATOMIC);
+	if (name == NULL)
+		return (ENOMEM);
+	strcpy(name, buf);
+	ahc = ahc_alloc(&aic7xxx_driver_template, name);
+	if (ahc == NULL)
+		return (ENOMEM);
+	error = aic7770_config(ahc, aic7770_ident_table + edev->id.driver_data,
+			       eisaBase);
+	if (error != 0) {
+		ahc->bsh.ioport = 0;
+		ahc_free(ahc);
+		return (error);
+	}
+
+ 	dev_set_drvdata(dev, ahc);
+
+	error = ahc_linux_register_host(ahc, &aic7xxx_driver_template);
+	return (error);
+}
+
+static int
+aic7770_remove(struct device *dev)
+{
+	struct ahc_softc *ahc = dev_get_drvdata(dev);
+	u_long s;
+
+	if (ahc->platform_data && ahc->platform_data->host)
+			scsi_remove_host(ahc->platform_data->host);
+
+	ahc_lock(ahc, &s);
+	ahc_intr_enable(ahc, FALSE);
+	ahc_unlock(ahc, &s);
+
+	ahc_free(ahc);
+	return 0;
+}
+ 
+static struct eisa_device_id aic7770_ids[] = {
+	{ "ADP7771", 0 }, /* AHA 274x */
+	{ "ADP7756", 1 }, /* AHA 284x BIOS enabled */
+	{ "ADP7757", 2 }, /* AHA 284x BIOS disabled */
+	{ "ADP7782", 3 }, /* AHA 274x Olivetti OEM */
+	{ "ADP7783", 4 }, /* AHA 274x Olivetti OEM (Differential) */
+	{ "ADP7770", 5 }, /* AIC7770 generic */
+	{ "" }
+};
+MODULE_DEVICE_TABLE(eisa, aic7770_ids);
+
+static struct eisa_driver aic7770_driver = {
+	.id_table	= aic7770_ids,
+	.driver = {
+		.name   = "aic7xxx",
+		.probe  = aic7770_probe,
+		.remove = aic7770_remove,
+	}
+};
+  
+int
+ahc_linux_eisa_init(void)
+{
+	return eisa_driver_register(&aic7770_driver);
+}
+  
+void
+ahc_linux_eisa_exit(void)
+{
+	eisa_driver_unregister(&aic7770_driver);
 }

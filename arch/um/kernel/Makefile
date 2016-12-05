@@ -1,66 +1,47 @@
-# 
-# Copyright (C) 2002 Jeff Dike (jdike@karaya.com)
+#
+# Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux,intel}.com)
 # Licensed under the GPL
 #
 
-extra-y := vmlinux.lds.s
+CPPFLAGS_vmlinux.lds := -U$(SUBARCH) -DSTART=$(LDS_START) \
+                        -DELF_ARCH=$(LDS_ELF_ARCH)        \
+                        -DELF_FORMAT=$(LDS_ELF_FORMAT)
+extra-y := vmlinux.lds
+clean-files :=
 
-obj-y = checksum.o config.o exec_kern.o exitcode.o frame_kern.o frame.o \
-	helper.o init_task.o irq.o irq_user.o ksyms.o mem.o mem_user.o \
-	process.o process_kern.o ptrace.o reboot.o resource.o sigio_user.o \
-	sigio_kern.o signal_kern.o signal_user.o smp.o syscall_kern.o \
-	syscall_user.o sysrq.o sys_call_table.o tempfile.o time.o \
-	time_kern.o tlb.o trap_kern.o trap_user.o uaccess_user.o um_arch.o \
-	umid.o user_syms.o user_util.o
+obj-y = config.o exec.o exitcode.o init_task.o irq.o ksyms.o mem.o \
+	physmem.o process.o ptrace.o reboot.o sigio.o \
+	signal.o smp.o syscall.o sysrq.o time.o tlb.o trap.o uaccess.o \
+	um_arch.o umid.o skas/
 
-obj-$(CONFIG_BLK_DEV_INITRD) += initrd_kern.o initrd_user.o
+obj-$(CONFIG_BLK_DEV_INITRD) += initrd.o
 obj-$(CONFIG_GPROF)	+= gprof_syms.o
 obj-$(CONFIG_GCOV)	+= gmon_syms.o
-obj-$(CONFIG_TTY_LOG)	+= tty_log.o
 
-obj-$(CONFIG_MODE_TT) += tt/
-obj-$(CONFIG_MODE_SKAS) += skas/
+USER_OBJS := config.o
 
-user-objs-$(CONFIG_TTY_LOG) += tty_log.o
+include arch/um/scripts/Makefile.rules
 
-USER_OBJS := $(filter %_user.o,$(obj-y))  $(user-objs-y) config.o helper.o \
-	process.o tempfile.o time.o tty_log.o umid.o user_util.o user_syms.o
-USER_OBJS := $(foreach file,$(USER_OBJS),$(obj)/$(file))
+targets := config.c config.tmp
 
-DMODULES-$(CONFIG_MODULES) = -D__CONFIG_MODULES__
-DMODVERSIONS-$(CONFIG_MODVERSIONS) = -D__CONFIG_MODVERSIONS__
+# Be careful with the below Sed code - sed is pitfall-rich!
+# We use sed to lower build requirements, for "embedded" builders for instance.
 
+$(obj)/config.tmp: $(objtree)/.config FORCE
+	$(call if_changed,quote1)
 
-CFLAGS_user_syms.o = -D__AUTOCONF_INCLUDED__ $(DMODULES-y) $(DMODVERSIONS-y) \
-	-I/usr/include -I../include
+quiet_cmd_quote1 = QUOTE   $@
+      cmd_quote1 = sed -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n",/' \
+		   $< > $@
 
-CFLAGS_frame.o := $(patsubst -fomit-frame-pointer,,$(USER_CFLAGS))
+$(obj)/config.c: $(src)/config.c.in $(obj)/config.tmp FORCE
+	$(call if_changed,quote2)
 
-$(USER_OBJS) : %.o: %.c
-	$(CC) $(CFLAGS_$(notdir $@)) $(USER_CFLAGS) -c -o $@ $<
-
-# This has to be separate because it needs be compiled with frame pointers
-# regardless of how the rest of the kernel is built.
-
-$(obj)/frame.o: $(src)/frame.c
-	$(CC) $(CFLAGS_$(notdir $@)) -c -o $@ $<
-
-QUOTE = 'my $$config=`cat $(TOPDIR)/.config`; $$config =~ s/"/\\"/g ; while(<STDIN>) { $$_ =~ s/CONFIG/$$config/; print $$_ }'
-
-$(obj)/config.c : $(src)/config.c.in $(TOPDIR)/.config
-	$(PERL) -e $(QUOTE) < $(src)/config.c.in > $@
-
-$(obj)/config.o : $(obj)/config.c
-
-clean:
-	rm -f config.c
-	for dir in $(subdir-y) ; do $(MAKE) -C $$dir clean; done
-
-modules:
-
-fastdep:
-
-dep:
-
-archmrproper: clean
-
+quiet_cmd_quote2 = QUOTE   $@
+      cmd_quote2 = sed -e '/CONFIG/{'          \
+		  -e 's/"CONFIG"//'            \
+		  -e 'r $(obj)/config.tmp'     \
+		  -e 'a \'                     \
+		  -e '""'                      \
+		  -e '}'                       \
+		  $< > $@

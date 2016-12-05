@@ -37,6 +37,8 @@
 #ifndef NFS_IDMAP_H
 #define NFS_IDMAP_H
 
+#include <linux/types.h>
+
 /* XXX from bits/utmp.h  */
 #define IDMAP_NAMESZ  128
 
@@ -52,18 +54,55 @@
 #define IDMAP_STATUS_SUCCESS    0x08
 
 struct idmap_msg {
-	u_int8_t  im_type;
-	u_int8_t  im_conv;
-	char      im_name[IDMAP_NAMESZ];
-	u_int32_t im_id;
-	u_int8_t  im_status;
+	__u8  im_type;
+	__u8  im_conv;
+	char  im_name[IDMAP_NAMESZ];
+	__u32 im_id;
+	__u8  im_status;
 };
 
 #ifdef __KERNEL__
-void      *nfs_idmap_new(struct nfs_server *);
-void       nfs_idmap_delete(struct nfs_server *);
-int        nfs_idmap_id(struct nfs_server *, u_int8_t, char *, u_int,  uid_t *);
-int        nfs_idmap_name(struct nfs_server *, u_int8_t, uid_t, char *, u_int *);
+
+/* Forward declaration to make this header independent of others */
+struct nfs_client;
+struct nfs_server;
+
+#ifdef CONFIG_NFS_USE_NEW_IDMAPPER
+
+int nfs_idmap_init(void);
+void nfs_idmap_quit(void);
+
+static inline int nfs_idmap_new(struct nfs_client *clp)
+{
+	return 0;
+}
+
+static inline void nfs_idmap_delete(struct nfs_client *clp)
+{
+}
+
+#else /* CONFIG_NFS_USE_NEW_IDMAPPER not set */
+
+static inline int nfs_idmap_init(void)
+{
+	return 0;
+}
+
+static inline void nfs_idmap_quit(void)
+{
+}
+
+int nfs_idmap_new(struct nfs_client *);
+void nfs_idmap_delete(struct nfs_client *);
+
+#endif /* CONFIG_NFS_USE_NEW_IDMAPPER */
+
+int nfs_map_name_to_uid(const struct nfs_server *, const char *, size_t, __u32 *);
+int nfs_map_group_to_gid(const struct nfs_server *, const char *, size_t, __u32 *);
+int nfs_map_uid_to_name(const struct nfs_server *, __u32, char *, size_t);
+int nfs_map_gid_to_group(const struct nfs_server *, __u32, char *, size_t);
+
+extern unsigned int nfs_idmap_cache_timeout;
 #endif /* __KERNEL__ */
 
 #endif /* NFS_IDMAP_H */

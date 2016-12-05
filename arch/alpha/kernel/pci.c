@@ -12,7 +12,6 @@
  * Nov 2000, Ivan Kokshaysky <ink@jurassic.park.msu.ru>
  *	     PCI-PCI bridges cleanup
  */
-#include <linux/config.h>
 #include <linux/string.h>
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -67,20 +66,26 @@ quirk_isa_bridge(struct pci_dev *dev)
 {
 	dev->class = PCI_CLASS_BRIDGE_ISA << 8;
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82378, quirk_isa_bridge);
 
 static void __init
 quirk_cypress(struct pci_dev *dev)
 {
 	/* The Notorious Cy82C693 chip.  */
 
-	/* The Cypress IDE controller doesn't support native mode, but it
-	   has programmable addresses of IDE command/control registers.
-	   This violates PCI specifications, confuses the IDE subsystem and
-	   causes resource conflicts between the primary HD_CMD register and
-	   the floppy controller.  Ugh.  Fix that.  */
+	/* The generic legacy mode IDE fixup in drivers/pci/probe.c
+	   doesn't work correctly with the Cypress IDE controller as
+	   it has non-standard register layout.  Fix that.  */
 	if (dev->class >> 8 == PCI_CLASS_STORAGE_IDE) {
-		dev->resource[0].flags = 0;
-		dev->resource[1].flags = 0;
+		dev->resource[2].start = dev->resource[3].start = 0;
+		dev->resource[2].end = dev->resource[3].end = 0;
+		dev->resource[2].flags = dev->resource[3].flags = 0;
+		if (PCI_FUNC(dev->devfn) == 2) {
+			dev->resource[0].start = 0x170;
+			dev->resource[0].end = 0x177;
+			dev->resource[1].start = 0x376;
+			dev->resource[1].end = 0x376;
+		}
 	}
 
 	/* The Cypress bridge responds on the PCI bus in the address range
@@ -89,7 +94,7 @@ quirk_cypress(struct pci_dev *dev)
 	   BIOS ranges (disabled after power-up), and some consoles do turn
 	   them on.  So if we use a large direct-map window, or a large SG
 	   window, we must avoid the entire 0xfff00000-0xffffffff region.  */
-	else if (dev->class >> 8 == PCI_CLASS_BRIDGE_ISA) {
+	if (dev->class >> 8 == PCI_CLASS_BRIDGE_ISA) {
 		if (__direct_map_base + __direct_map_size >= 0xfff00000UL)
 			__direct_map_size = 0xfff00000UL - __direct_map_base;
 		else {
@@ -100,6 +105,7 @@ quirk_cypress(struct pci_dev *dev)
 		}
 	}
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CONTAQ, PCI_DEVICE_ID_CONTAQ_82C693, quirk_cypress);
 
 /* Called for each device after PCI setup is done. */
 static void __init
@@ -112,29 +118,22 @@ pcibios_fixup_final(struct pci_dev *dev)
 		isa_bridge = dev;
 	}
 }
+DECLARE_PCI_FIXUP_FINAL(PCI_ANY_ID, PCI_ANY_ID, pcibios_fixup_final);
 
-struct pci_fixup pcibios_fixups[] __initdata = {
-	{ PCI_FIXUP_HEADER, PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82378,
-	  quirk_isa_bridge },
-	{ PCI_FIXUP_HEADER, PCI_VENDOR_ID_CONTAQ, PCI_DEVICE_ID_CONTAQ_82C693,
-	  quirk_cypress },
-	{ PCI_FIXUP_FINAL,  PCI_ANY_ID,	PCI_ANY_ID,
-	  pcibios_fixup_final },
-	{ 0 }
-};
-
+/* Just declaring that the power-of-ten prefixes are actually the
+   power-of-two ones doesn't make it true :) */
 #define KB			1024
 #define MB			(1024*KB)
 #define GB			(1024*MB)
 
-void
-pcibios_align_resource(void *data, struct resource *res,
-		       unsigned long size, unsigned long align)
+resource_size_t
+pcibios_align_resource(void *data, const struct resource *res,
+		       resource_size_t size, resource_size_t align)
 {
 	struct pci_dev *dev = data;
 	struct pci_controller *hose = dev->sysdata;
 	unsigned long alignto;
-	unsigned long start = res->start;
+	resource_size_t start = res->start;
 
 	if (res->flags & IORESOURCE_IO) {
 		/* Make sure we start at our min on all hoses */
@@ -169,7 +168,7 @@ pcibios_align_resource(void *data, struct resource *res,
 		 */
 
 		/* Align to multiple of size of minimum base.  */
-		alignto = max(0x1000UL, align);
+		alignto = max_t(resource_size_t, 0x1000, align);
 		start = ALIGN(start, alignto);
 		if (hose->sparse_mem_base && size <= 7 * 16*MB) {
 			if (((start / (16*MB)) & 0x7) == 0) {
@@ -185,7 +184,7 @@ pcibios_align_resource(void *data, struct resource *res,
 		}
 	}
 
-	res->start = start;
+	return start;
 }
 #undef KB
 #undef MB
@@ -201,7 +200,7 @@ pcibios_init(void)
 
 subsys_initcall(pcibios_init);
 
-char * __init
+char * __devinit
 pcibios_setup(char *str)
 {
 	return str;
@@ -210,7 +209,7 @@ pcibios_setup(char *str)
 #ifdef ALPHA_RESTORE_SRM_SETUP
 static struct pdev_srm_saved_conf *srm_saved_configs;
 
-void __init
+void __devinit
 pdev_save_srm_config(struct pci_dev *dev)
 {
 	struct pdev_srm_saved_conf *tmp;
@@ -226,13 +225,13 @@ pdev_save_srm_config(struct pci_dev *dev)
 
 	tmp = kmalloc(sizeof(*tmp), GFP_KERNEL);
 	if (!tmp) {
-		printk(KERN_ERR "%s: kmalloc() failed!\n", __FUNCTION__);
+		printk(KERN_ERR "%s: kmalloc() failed!\n", __func__);
 		return;
 	}
 	tmp->next = srm_saved_configs;
 	tmp->dev = dev;
 
-	pci_save_state(dev, tmp->regs);
+	pci_save_state(dev);
 
 	srm_saved_configs = tmp;
 }
@@ -248,19 +247,19 @@ pci_restore_srm_config(void)
 
 	/* Restore SRM config. */
 	for (tmp = srm_saved_configs; tmp; tmp = tmp->next) {
-		pci_restore_state(tmp->dev, tmp->regs);
+		pci_restore_state(tmp->dev);
 	}
 }
 #endif
 
-void __init
+void __devinit
 pcibios_fixup_resource(struct resource *res, struct resource *root)
 {
 	res->start += root->start;
 	res->end += root->start;
 }
 
-void __init
+void __devinit
 pcibios_fixup_device_resources(struct pci_dev *dev, struct pci_bus *bus)
 {
 	/* Update device resources.  */
@@ -279,13 +278,12 @@ pcibios_fixup_device_resources(struct pci_dev *dev, struct pci_bus *bus)
 	}
 }
 
-void __init
+void __devinit
 pcibios_fixup_bus(struct pci_bus *bus)
 {
 	/* Propagate hose info into the subordinate devices.  */
 
 	struct pci_controller *hose = bus->sysdata;
-	struct list_head *ln;
 	struct pci_dev *dev = bus->self;
 
 	if (!dev) {
@@ -309,9 +307,7 @@ pcibios_fixup_bus(struct pci_bus *bus)
  		pcibios_fixup_device_resources(dev, bus);
 	} 
 
-	for (ln = bus->devices.next; ln != &bus->devices; ln = ln->next) {
-		struct pci_dev *dev = pci_dev_b(ln);
-
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		pdev_save_srm_config(dev);
 		if ((dev->class >> 8) != PCI_CLASS_BRIDGE_PCI)
 			pcibios_fixup_device_resources(dev, bus);
@@ -324,25 +320,7 @@ pcibios_update_irq(struct pci_dev *dev, int irq)
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
 }
 
-/* Most Alphas have straight-forward swizzling needs.  */
-
-u8 __init
-common_swizzle(struct pci_dev *dev, u8 *pinp)
-{
-	u8 pin = *pinp;
-
-	while (dev->bus->parent) {
-		pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
-		/* Move up the chain of bridges. */
-		dev = dev->bus->self;
-        }
-	*pinp = pin;
-
-	/* The slot is the slot of the last bridge. */
-	return PCI_SLOT(dev->devfn);
-}
-
-void __devinit
+void
 pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
 			 struct resource *res)
 {
@@ -358,35 +336,30 @@ pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
 	region->end = res->end - offset;
 }
 
+void pcibios_bus_to_resource(struct pci_dev *dev, struct resource *res,
+			     struct pci_bus_region *region)
+{
+	struct pci_controller *hose = (struct pci_controller *)dev->sysdata;
+	unsigned long offset = 0;
+
+	if (res->flags & IORESOURCE_IO)
+		offset = hose->io_space->start;
+	else if (res->flags & IORESOURCE_MEM)
+		offset = hose->mem_space->start;
+
+	res->start = region->start + offset;
+	res->end = region->end + offset;
+}
+
 #ifdef CONFIG_HOTPLUG
 EXPORT_SYMBOL(pcibios_resource_to_bus);
+EXPORT_SYMBOL(pcibios_bus_to_resource);
 #endif
 
 int
 pcibios_enable_device(struct pci_dev *dev, int mask)
 {
-	u16 cmd, oldcmd;
-	int i;
-
-	pci_read_config_word(dev, PCI_COMMAND, &cmd);
-	oldcmd = cmd;
-
-	for (i = 0; i < PCI_NUM_RESOURCES; i++) {
-		struct resource *res = &dev->resource[i];
-
-		if (res->flags & IORESOURCE_IO)
-			cmd |= PCI_COMMAND_IO;
-		else if (res->flags & IORESOURCE_MEM)
-			cmd |= PCI_COMMAND_MEMORY;
-	}
-
-	if (cmd != oldcmd) {
-		printk(KERN_DEBUG "PCI: Enabling device: (%s), cmd %x\n",
-		       pci_name(dev), cmd);
-		/* Enable the appropriate bits in the PCI command register.  */
-		pci_write_config_word(dev, PCI_COMMAND, cmd);
-	}
-	return 0;
+	return pci_enable_resources(dev, mask);
 }
 
 /*
@@ -405,14 +378,13 @@ pcibios_set_master(struct pci_dev *dev)
 	pci_write_config_byte(dev, PCI_LATENCY_TIMER, 64);
 }
 
-static void __init
+void __init
 pcibios_claim_one_bus(struct pci_bus *b)
 {
-	struct list_head *ld;
+	struct pci_dev *dev;
 	struct pci_bus *child_bus;
 
-	for (ld = b->devices.next; ld != &b->devices; ld = ld->next) {
-		struct pci_dev *dev = pci_dev_b(ld);
+	list_for_each_entry(dev, &b->devices, bus_list) {
 		int i;
 
 		for (i = 0; i < PCI_NUM_RESOURCES; i++) {
@@ -420,7 +392,8 @@ pcibios_claim_one_bus(struct pci_bus *b)
 
 			if (r->parent || !r->start || !r->flags)
 				continue;
-			pci_claim_resource(dev, i);
+			if (pci_probe_only || (r->flags & IORESOURCE_PCI_FIXED))
+				pci_claim_resource(dev, i);
 		}
 	}
 
@@ -431,12 +404,10 @@ pcibios_claim_one_bus(struct pci_bus *b)
 static void __init
 pcibios_claim_console_setup(void)
 {
-	struct list_head *lb;
+	struct pci_bus *b;
 
-	for(lb = pci_root_buses.next; lb != &pci_root_buses; lb = lb->next) {
-		struct pci_bus *b = pci_bus_b(lb);
+	list_for_each_entry(b, &pci_root_buses, node)
 		pcibios_claim_one_bus(b);
-	}
 }
 
 void __init
@@ -461,8 +432,7 @@ common_init_pci(void)
 		}
 	}
 
-	if (pci_probe_only)
-		pcibios_claim_console_setup();
+	pcibios_claim_console_setup();
 
 	pci_assign_unassigned_resources();
 	pci_fixup_irqs(alpha_mv.pci_swizzle, alpha_mv.pci_map_irq);
@@ -512,10 +482,11 @@ sys_pciconfig_iobase(long which, unsigned long bus, unsigned long dfn)
 		if (bus == 0 && dfn == 0) {
 			hose = pci_isa_hose;
 		} else {
-			dev = pci_find_slot(bus, dfn);
+			dev = pci_get_bus_and_slot(bus, dfn);
 			if (!dev)
 				return -ENODEV;
 			hose = dev->sysdata;
+			pci_dev_put(dev);
 		}
 	}
 
@@ -536,3 +507,41 @@ sys_pciconfig_iobase(long which, unsigned long bus, unsigned long dfn)
 
 	return -EOPNOTSUPP;
 }
+
+/* Create an __iomem token from a PCI BAR.  Copied from lib/iomap.c with
+   no changes, since we don't want the other things in that object file.  */
+
+void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)
+{
+	resource_size_t start = pci_resource_start(dev, bar);
+	resource_size_t len = pci_resource_len(dev, bar);
+	unsigned long flags = pci_resource_flags(dev, bar);
+
+	if (!len || !start)
+		return NULL;
+	if (maxlen && len > maxlen)
+		len = maxlen;
+	if (flags & IORESOURCE_IO)
+		return ioport_map(start, len);
+	if (flags & IORESOURCE_MEM) {
+		/* Not checking IORESOURCE_CACHEABLE because alpha does
+		   not distinguish between ioremap and ioremap_nocache.  */
+		return ioremap(start, len);
+	}
+	return NULL;
+}
+
+/* Destroy that token.  Not copied from lib/iomap.c.  */
+
+void pci_iounmap(struct pci_dev *dev, void __iomem * addr)
+{
+	if (__is_mmio(addr))
+		iounmap(addr);
+}
+
+EXPORT_SYMBOL(pci_iomap);
+EXPORT_SYMBOL(pci_iounmap);
+
+/* FIXME: Some boxes have multiple ISA bridges! */
+struct pci_dev *isa_bridge;
+EXPORT_SYMBOL(isa_bridge);

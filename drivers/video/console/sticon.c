@@ -37,7 +37,6 @@
 
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/errno.h>
 #include <linux/vt_kern.h>
@@ -75,7 +74,7 @@ static inline void cursor_undrawn(void)
     cursor_drawn = 0;
 }
 
-static const char *__init sticon_startup(void)
+static const char *sticon_startup(void)
 {
     return "STI console";
 }
@@ -85,20 +84,14 @@ static int sticon_set_palette(struct vc_data *c, unsigned char *table)
     return -EINVAL;
 }
 
-static int sticon_font_op(struct vc_data *c, struct console_font_op *op)
-{
-    return -ENOSYS;
-}
-
 static void sticon_putc(struct vc_data *conp, int c, int ypos, int xpos)
 {
-    int unit = conp->vc_num;
     int redraw_cursor = 0;
 
     if (vga_is_gfx || console_blanked)
 	    return;
-	    
-    if (vt_cons[unit]->vc_mode != KD_TEXT)
+
+    if (conp->vc_mode != KD_TEXT)
     	    return;
 #if 0
     if ((p->cursor_x == xpos) && (p->cursor_y == ypos)) {
@@ -116,15 +109,14 @@ static void sticon_putc(struct vc_data *conp, int c, int ypos, int xpos)
 static void sticon_putcs(struct vc_data *conp, const unsigned short *s,
 			 int count, int ypos, int xpos)
 {
-    int unit = conp->vc_num;
     int redraw_cursor = 0;
 
     if (vga_is_gfx || console_blanked)
 	    return;
 
-    if (vt_cons[unit]->vc_mode != KD_TEXT)
+    if (conp->vc_mode != KD_TEXT)
     	    return;
-    
+
 #if 0
     if ((p->cursor_y == ypos) && (xpos <= p->cursor_x) &&
 	(p->cursor_x < (xpos + count))) {
@@ -222,7 +214,7 @@ static void sticon_init(struct vc_data *c, int init)
     } else {
 	/* vc_rows = (c->vc_rows > vc_rows) ? vc_rows : c->vc_rows; */
 	/* vc_cols = (c->vc_cols > vc_cols) ? vc_cols : c->vc_cols; */
-	vc_resize(c->vc_num, vc_cols, vc_rows); 
+	vc_resize(c, vc_cols, vc_rows);
 /*	vc_resize_con(vc_rows, vc_cols, c->vc_num); */
     }
 }
@@ -250,26 +242,18 @@ static int sticon_set_origin(struct vc_data *conp)
     return 0;
 }
 
-static int sticon_blank(struct vc_data *c, int blank)
+static int sticon_blank(struct vc_data *c, int blank, int mode_switch)
 {
-    switch (blank) {
-    case 0:		/* unblank */
-	vga_is_gfx = 0;
-	/* Tell console.c that it has to restore the screen itself */
-	return 1;
-    case 1:		/* normal blanking */
-    default:		/* VESA blanking */
-	if (vga_is_gfx)
-		return 0;
-	sticon_set_origin(c);
-	sti_clear(sticon_sti, 0,0, c->vc_rows, c->vc_cols, BLANK);
-	return 1;
-    case -1:		/* Entering graphic mode */
-	sti_clear(sticon_sti, 0,0, c->vc_rows, c->vc_cols, BLANK);
-	vga_is_gfx = 1;
+    if (blank == 0) {
+	if (mode_switch)
+	    vga_is_gfx = 0;
 	return 1;
     }
-    return 1;		/* console needs to restore screen itself */
+    sticon_set_origin(c);
+    sti_clear(sticon_sti, 0,0, c->vc_rows, c->vc_cols, BLANK);
+    if (mode_switch)
+	vga_is_gfx = 1;
+    return 1;
 }
 
 static int sticon_scrolldelta(struct vc_data *conp, int lines)
@@ -330,7 +314,7 @@ static unsigned long sticon_getxy(struct vc_data *conp, unsigned long pos,
 }
 
 static u8 sticon_build_attr(struct vc_data *conp, u8 color, u8 intens,
-			    u8 blink, u8 underline, u8 reverse)
+			    u8 blink, u8 underline, u8 reverse, u8 italic)
 {
     u8 attr = ((color & 0x70) >> 1) | ((color & 7));
 
@@ -361,7 +345,8 @@ static void sticon_save_screen(struct vc_data *conp)
 {
 }
 
-static struct consw sti_con = {
+static const struct consw sti_con = {
+	.owner			= THIS_MODULE,
 	.con_startup		= sticon_startup,
 	.con_init		= sticon_init,
 	.con_deinit		= sticon_deinit,
@@ -373,7 +358,6 @@ static struct consw sti_con = {
 	.con_bmove		= sticon_bmove,
 	.con_switch		= sticon_switch,
 	.con_blank		= sticon_blank,
-	.con_font_op		= sticon_font_op,
 	.con_set_palette	= sticon_set_palette,
 	.con_scrolldelta	= sticon_scrolldelta,
 	.con_set_origin		= sticon_set_origin,
@@ -386,7 +370,7 @@ static struct consw sti_con = {
 
 
 
-int __init sticonsole_init(void)
+static int __init sticonsole_init(void)
 {
     /* already initialized ? */
     if (sticon_sti)
@@ -398,7 +382,7 @@ int __init sticonsole_init(void)
 
     if (conswitchp == &dummy_con) {
 	printk(KERN_INFO "sticon: Initializing STI text console.\n");
-	take_over_console(&sti_con, 0, MAX_NR_CONSOLES - 1, 1);
+	return take_over_console(&sti_con, 0, MAX_NR_CONSOLES - 1, 1);
     }
     return 0;
 }

@@ -8,7 +8,7 @@
  *
  *	This software may be used and distributed according to the terms
  *	of the GNU General Public License, incorporated herein by reference.
- * 
+ *
  * The author may be reached as simon@ncm.com, or C/O
  *    NCM
  *    Attn: Simon Janes
@@ -23,7 +23,7 @@
  * Inspirations:
  *   The Harried and Overworked Alan Cox
  * Conspiracies:
- *   The Alan Cox and Mike McLagan plot to get someone else to do the code, 
+ *   The Alan Cox and Mike McLagan plot to get someone else to do the code,
  *   which turned out to be me.
  */
 
@@ -111,11 +111,16 @@
  * Sorry, I had to rewrite most of this for 2.5.x -DaveM
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/netdevice.h>
+#include <net/net_namespace.h>
 
 #include <linux/if.h>
 #include <linux/if_arp.h>
@@ -126,19 +131,18 @@
 static int eql_open(struct net_device *dev);
 static int eql_close(struct net_device *dev);
 static int eql_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
-static int eql_slave_xmit(struct sk_buff *skb, struct net_device *dev);
-static struct net_device_stats *eql_get_stats(struct net_device *dev);
+static netdev_tx_t eql_slave_xmit(struct sk_buff *skb, struct net_device *dev);
 
 #define eql_is_slave(dev)	((dev->flags & IFF_SLAVE) == IFF_SLAVE)
 #define eql_is_master(dev)	((dev->flags & IFF_MASTER) == IFF_MASTER)
 
-static void eql_kill_one_slave(slave_t *slave);
+static void eql_kill_one_slave(slave_queue_t *queue, slave_t *slave);
 
 static void eql_timer(unsigned long param)
 {
 	equalizer_t *eql = (equalizer_t *) param;
 	struct list_head *this, *tmp, *head;
-	
+
 	spin_lock_bh(&eql->queue.lock);
 	head = &eql->queue.all_slaves;
 	list_for_each_safe(this, tmp, head) {
@@ -149,7 +153,7 @@ static void eql_timer(unsigned long param)
 			if (slave->bytes_queued < 0)
 				slave->bytes_queued = 0;
 		} else {
-			eql_kill_one_slave(slave);
+			eql_kill_one_slave(&eql->queue, slave);
 		}
 
 	}
@@ -159,17 +163,22 @@ static void eql_timer(unsigned long param)
 	add_timer(&eql->timer);
 }
 
-static char version[] __initdata = 
-	"Equalizer2002: Simon Janes (simon@ncm.com) and David S. Miller (davem@redhat.com)\n";
+static const char version[] __initconst =
+	"Equalizer2002: Simon Janes (simon@ncm.com) and David S. Miller (davem@redhat.com)";
+
+static const struct net_device_ops eql_netdev_ops = {
+	.ndo_open	= eql_open,
+	.ndo_stop	= eql_close,
+	.ndo_do_ioctl	= eql_ioctl,
+	.ndo_start_xmit	= eql_slave_xmit,
+};
 
 static void __init eql_setup(struct net_device *dev)
 {
-	equalizer_t *eql = dev->priv;
-
-	SET_MODULE_OWNER(dev);
+	equalizer_t *eql = netdev_priv(dev);
 
 	init_timer(&eql->timer);
-	eql->timer.data     	= (unsigned long) dev->priv;
+	eql->timer.data     	= (unsigned long) eql;
 	eql->timer.expires  	= jiffies + EQL_DEFAULT_RESCHED_IVAL;
 	eql->timer.function 	= eql_timer;
 
@@ -177,34 +186,30 @@ static void __init eql_setup(struct net_device *dev)
 	INIT_LIST_HEAD(&eql->queue.all_slaves);
 	eql->queue.master_dev	= dev;
 
-	dev->open		= eql_open;
-	dev->stop		= eql_close;
-	dev->do_ioctl		= eql_ioctl;
-	dev->hard_start_xmit	= eql_slave_xmit;
-	dev->get_stats		= eql_get_stats;
-  
+	dev->netdev_ops		= &eql_netdev_ops;
+
 	/*
 	 *	Now we undo some of the things that eth_setup does
-	 * 	that we don't like 
+	 * 	that we don't like
 	 */
-	 
+
 	dev->mtu        	= EQL_DEFAULT_MTU;	/* set to 576 in if_eql.h */
 	dev->flags      	= IFF_MASTER;
 
 	dev->type       	= ARPHRD_SLIP;
 	dev->tx_queue_len 	= 5;		/* Hands them off fast */
+	dev->priv_flags	       &= ~IFF_XMIT_DST_RELEASE;
 }
 
 static int eql_open(struct net_device *dev)
 {
-	equalizer_t *eql = dev->priv;
+	equalizer_t *eql = netdev_priv(dev);
 
 	/* XXX We should force this off automatically for the user. */
-	printk(KERN_INFO "%s: remember to turn off Van-Jacobson compression on "
-	       "your slave devices.\n", dev->name);
+	netdev_info(dev,
+		    "remember to turn off Van-Jacobson compression on your slave devices\n");
 
-	if (!list_empty(&eql->queue.all_slaves))
-		BUG();
+	BUG_ON(!list_empty(&eql->queue.all_slaves));
 
 	eql->min_slaves = 1;
 	eql->max_slaves = EQL_DEFAULT_MAX_SLAVES; /* 4 usually... */
@@ -214,16 +219,17 @@ static int eql_open(struct net_device *dev)
 	return 0;
 }
 
-static void eql_kill_one_slave(slave_t *slave)
+static void eql_kill_one_slave(slave_queue_t *queue, slave_t *slave)
 {
 	list_del(&slave->list);
+	queue->num_slaves--;
 	slave->dev->flags &= ~IFF_SLAVE;
 	dev_put(slave->dev);
 	kfree(slave);
 }
 
 static void eql_kill_slave_queue(slave_queue_t *queue)
-{ 
+{
 	struct list_head *head, *tmp, *this;
 
 	spin_lock_bh(&queue->lock);
@@ -232,8 +238,7 @@ static void eql_kill_slave_queue(slave_queue_t *queue)
 	list_for_each_safe(this, tmp, head) {
 		slave_t *s = list_entry(this, slave_t, list);
 
-		eql_kill_one_slave(s);
-		queue->num_slaves--;
+		eql_kill_one_slave(queue, s);
 	}
 
 	spin_unlock_bh(&queue->lock);
@@ -241,11 +246,11 @@ static void eql_kill_slave_queue(slave_queue_t *queue)
 
 static int eql_close(struct net_device *dev)
 {
-	equalizer_t *eql = dev->priv;
+	equalizer_t *eql = netdev_priv(dev);
 
 	/*
 	 *	The timer has to be stopped first before we start hacking away
-	 *	at the data structure it scans every so often... 
+	 *	at the data structure it scans every so often...
 	 */
 
 	del_timer_sync(&eql->timer);
@@ -255,43 +260,37 @@ static int eql_close(struct net_device *dev)
 	return 0;
 }
 
-static int eql_enslave(struct net_device *dev,  slaving_request_t *srq);
-static int eql_emancipate(struct net_device *dev, slaving_request_t *srq);
+static int eql_enslave(struct net_device *dev,  slaving_request_t __user *srq);
+static int eql_emancipate(struct net_device *dev, slaving_request_t __user *srq);
 
-static int eql_g_slave_cfg(struct net_device *dev, slave_config_t *sc);
-static int eql_s_slave_cfg(struct net_device *dev, slave_config_t *sc);
+static int eql_g_slave_cfg(struct net_device *dev, slave_config_t __user *sc);
+static int eql_s_slave_cfg(struct net_device *dev, slave_config_t __user *sc);
 
-static int eql_g_master_cfg(struct net_device *dev, master_config_t *mc);
-static int eql_s_master_cfg(struct net_device *dev, master_config_t *mc);
+static int eql_g_master_cfg(struct net_device *dev, master_config_t __user *mc);
+static int eql_s_master_cfg(struct net_device *dev, master_config_t __user *mc);
 
 static int eql_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
-{  
+{
 	if (cmd != EQL_GETMASTRCFG && cmd != EQL_GETSLAVECFG &&
 	    !capable(CAP_NET_ADMIN))
 	  	return -EPERM;
 
 	switch (cmd) {
 		case EQL_ENSLAVE:
-			return eql_enslave(dev,
-					   (slaving_request_t *) ifr->ifr_data);
+			return eql_enslave(dev, ifr->ifr_data);
 		case EQL_EMANCIPATE:
-			return eql_emancipate(dev,
-					      (slaving_request_t *) ifr->ifr_data);
+			return eql_emancipate(dev, ifr->ifr_data);
 		case EQL_GETSLAVECFG:
-			return eql_g_slave_cfg(dev,
-					       (slave_config_t *) ifr->ifr_data);
+			return eql_g_slave_cfg(dev, ifr->ifr_data);
 		case EQL_SETSLAVECFG:
-			return eql_s_slave_cfg(dev,
-					       (slave_config_t *) ifr->ifr_data);
+			return eql_s_slave_cfg(dev, ifr->ifr_data);
 		case EQL_GETMASTRCFG:
-			return eql_g_master_cfg(dev,
-						(master_config_t *) ifr->ifr_data);
+			return eql_g_master_cfg(dev, ifr->ifr_data);
 		case EQL_SETMASTRCFG:
-			return eql_s_master_cfg(dev,
-						(master_config_t *) ifr->ifr_data);
+			return eql_s_master_cfg(dev, ifr->ifr_data);
 		default:
 			return -EOPNOTSUPP;
-	};
+	}
 }
 
 /* queue->lock must be held */
@@ -307,15 +306,15 @@ static slave_t *__eql_schedule_slaves(slave_queue_t *queue)
 	head = &queue->all_slaves;
 	list_for_each_safe(this, tmp, head) {
 		slave_t *slave = list_entry(this, slave_t, list);
-		unsigned long slave_load, bytes_queued, priority_Bps; 
+		unsigned long slave_load, bytes_queued, priority_Bps;
 
 		/* Go through the slave list once, updating best_slave
 		 * whenever a new best_load is found.
 		 */
 		bytes_queued = slave->bytes_queued;
-		priority_Bps = slave->priority_Bps;    
+		priority_Bps = slave->priority_Bps;
 		if ((slave->dev->flags & IFF_UP) == IFF_UP) {
-			slave_load = (~0UL - (~0UL / 2)) - 
+			slave_load = (~0UL - (~0UL / 2)) -
 				(priority_Bps) + bytes_queued * 8;
 
 			if (slave_load < best_load) {
@@ -324,15 +323,15 @@ static slave_t *__eql_schedule_slaves(slave_queue_t *queue)
 			}
 		} else {
 			/* We found a dead slave, kill it. */
-			eql_kill_one_slave(slave);
+			eql_kill_one_slave(queue, slave);
 		}
 	}
 	return best_slave;
 }
 
-static int eql_slave_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t eql_slave_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	equalizer_t *eql = dev->priv;
+	equalizer_t *eql = netdev_priv(dev);
 	slave_t *slave;
 
 	spin_lock(&eql->queue.lock);
@@ -343,23 +342,17 @@ static int eql_slave_xmit(struct sk_buff *skb, struct net_device *dev)
 
 		skb->dev = slave_dev;
 		skb->priority = 1;
-		slave->bytes_queued += skb->len; 
+		slave->bytes_queued += skb->len;
 		dev_queue_xmit(skb);
-		eql->stats.tx_packets++;
+		dev->stats.tx_packets++;
 	} else {
-		eql->stats.tx_dropped++;
+		dev->stats.tx_dropped++;
 		dev_kfree_skb(skb);
-	}	  
+	}
 
 	spin_unlock(&eql->queue.lock);
 
-	return 0;
-}
-
-static struct net_device_stats * eql_get_stats(struct net_device *dev)
-{
-	equalizer_t *eql = dev->priv;
-	return &eql->stats;
+	return NETDEV_TX_OK;
 }
 
 /*
@@ -384,7 +377,7 @@ static slave_t *__eql_find_slave_dev(slave_queue_t *queue, struct net_device *de
 
 static inline int eql_is_full(slave_queue_t *queue)
 {
-	equalizer_t *eql = queue->master_dev->priv;
+	equalizer_t *eql = netdev_priv(queue->master_dev);
 
 	if (queue->num_slaves >= eql->max_slaves)
 		return 1;
@@ -395,11 +388,11 @@ static inline int eql_is_full(slave_queue_t *queue)
 static int __eql_insert_slave(slave_queue_t *queue, slave_t *slave)
 {
 	if (!eql_is_full(queue)) {
-		slave_t *duplicate_slave = 0;
+		slave_t *duplicate_slave = NULL;
 
 		duplicate_slave = __eql_find_slave_dev(queue, slave->dev);
-		if (duplicate_slave != 0)
-			eql_kill_one_slave(duplicate_slave);
+		if (duplicate_slave)
+			eql_kill_one_slave(queue, duplicate_slave);
 
 		list_add(&slave->list, &queue->all_slaves);
 		queue->num_slaves++;
@@ -411,7 +404,7 @@ static int __eql_insert_slave(slave_queue_t *queue, slave_t *slave)
 	return -ENOSPC;
 }
 
-static int eql_enslave(struct net_device *master_dev, slaving_request_t *srqp)
+static int eql_enslave(struct net_device *master_dev, slaving_request_t __user *srqp)
 {
 	struct net_device *slave_dev;
 	slaving_request_t srq;
@@ -419,14 +412,14 @@ static int eql_enslave(struct net_device *master_dev, slaving_request_t *srqp)
 	if (copy_from_user(&srq, srqp, sizeof (slaving_request_t)))
 		return -EFAULT;
 
-	slave_dev  = dev_get_by_name(srq.slave_name);
+	slave_dev  = dev_get_by_name(&init_net, srq.slave_name);
 	if (slave_dev) {
 		if ((master_dev->flags & IFF_UP) == IFF_UP) {
 			/* slave is not a master & not already a slave: */
 			if (!eql_is_master(slave_dev) &&
 			    !eql_is_slave(slave_dev)) {
 				slave_t *s = kmalloc(sizeof(*s), GFP_KERNEL);
-				equalizer_t *eql = master_dev->priv;
+				equalizer_t *eql = netdev_priv(master_dev);
 				int ret;
 
 				if (!s) {
@@ -457,9 +450,9 @@ static int eql_enslave(struct net_device *master_dev, slaving_request_t *srqp)
 	return -EINVAL;
 }
 
-static int eql_emancipate(struct net_device *master_dev, slaving_request_t *srqp)
+static int eql_emancipate(struct net_device *master_dev, slaving_request_t __user *srqp)
 {
-	equalizer_t *eql = master_dev->priv;
+	equalizer_t *eql = netdev_priv(master_dev);
 	struct net_device *slave_dev;
 	slaving_request_t srq;
 	int ret;
@@ -467,7 +460,7 @@ static int eql_emancipate(struct net_device *master_dev, slaving_request_t *srqp
 	if (copy_from_user(&srq, srqp, sizeof (slaving_request_t)))
 		return -EFAULT;
 
-	slave_dev = dev_get_by_name(srq.slave_name);
+	slave_dev = dev_get_by_name(&init_net, srq.slave_name);
 	ret = -EINVAL;
 	if (slave_dev) {
 		spin_lock_bh(&eql->queue.lock);
@@ -477,7 +470,7 @@ static int eql_emancipate(struct net_device *master_dev, slaving_request_t *srqp
 							      slave_dev);
 
 			if (slave) {
-				eql_kill_one_slave(slave);
+				eql_kill_one_slave(&eql->queue, slave);
 				ret = 0;
 			}
 		}
@@ -489,9 +482,9 @@ static int eql_emancipate(struct net_device *master_dev, slaving_request_t *srqp
 	return ret;
 }
 
-static int eql_g_slave_cfg(struct net_device *dev, slave_config_t *scp)
+static int eql_g_slave_cfg(struct net_device *dev, slave_config_t __user *scp)
 {
-	equalizer_t *eql = dev->priv;
+	equalizer_t *eql = netdev_priv(dev);
 	slave_t *slave;
 	struct net_device *slave_dev;
 	slave_config_t sc;
@@ -500,7 +493,9 @@ static int eql_g_slave_cfg(struct net_device *dev, slave_config_t *scp)
 	if (copy_from_user(&sc, scp, sizeof (slave_config_t)))
 		return -EFAULT;
 
-	slave_dev = dev_get_by_name(sc.slave_name);
+	slave_dev = dev_get_by_name(&init_net, sc.slave_name);
+	if (!slave_dev)
+		return -ENODEV;
 
 	ret = -EINVAL;
 
@@ -522,7 +517,7 @@ static int eql_g_slave_cfg(struct net_device *dev, slave_config_t *scp)
 	return ret;
 }
 
-static int eql_s_slave_cfg(struct net_device *dev, slave_config_t *scp)
+static int eql_s_slave_cfg(struct net_device *dev, slave_config_t __user *scp)
 {
 	slave_t *slave;
 	equalizer_t *eql;
@@ -533,11 +528,13 @@ static int eql_s_slave_cfg(struct net_device *dev, slave_config_t *scp)
 	if (copy_from_user(&sc, scp, sizeof (slave_config_t)))
 		return -EFAULT;
 
-	eql = dev->priv;
-	slave_dev = dev_get_by_name(sc.slave_name);
+	slave_dev = dev_get_by_name(&init_net, sc.slave_name);
+	if (!slave_dev)
+		return -ENODEV;
 
 	ret = -EINVAL;
 
+	eql = netdev_priv(dev);
 	spin_lock_bh(&eql->queue.lock);
 	if (eql_is_slave(slave_dev)) {
 		slave = __eql_find_slave_dev(&eql->queue, slave_dev);
@@ -550,16 +547,20 @@ static int eql_s_slave_cfg(struct net_device *dev, slave_config_t *scp)
 	}
 	spin_unlock_bh(&eql->queue.lock);
 
+	dev_put(slave_dev);
+
 	return ret;
 }
 
-static int eql_g_master_cfg(struct net_device *dev, master_config_t *mcp)
+static int eql_g_master_cfg(struct net_device *dev, master_config_t __user *mcp)
 {
 	equalizer_t *eql;
 	master_config_t mc;
 
+	memset(&mc, 0, sizeof(master_config_t));
+
 	if (eql_is_master(dev)) {
-		eql = dev->priv;
+		eql = netdev_priv(dev);
 		mc.max_slaves = eql->max_slaves;
 		mc.min_slaves = eql->min_slaves;
 		if (copy_to_user(mcp, &mc, sizeof (master_config_t)))
@@ -569,7 +570,7 @@ static int eql_g_master_cfg(struct net_device *dev, master_config_t *mcp)
 	return -EINVAL;
 }
 
-static int eql_s_master_cfg(struct net_device *dev, master_config_t *mcp)
+static int eql_s_master_cfg(struct net_device *dev, master_config_t __user *mcp)
 {
 	equalizer_t *eql;
 	master_config_t mc;
@@ -578,7 +579,7 @@ static int eql_s_master_cfg(struct net_device *dev, master_config_t *mcp)
 		return -EFAULT;
 
 	if (eql_is_master(dev)) {
-		eql = dev->priv;
+		eql = netdev_priv(dev);
 		eql->max_slaves = mc.max_slaves;
 		eql->min_slaves = mc.min_slaves;
 		return 0;
@@ -592,15 +593,15 @@ static int __init eql_init_module(void)
 {
 	int err;
 
-	printk(version);
+	pr_info("%s\n", version);
 
 	dev_eql = alloc_netdev(sizeof(equalizer_t), "eql", eql_setup);
 	if (!dev_eql)
 		return -ENOMEM;
 
 	err = register_netdev(dev_eql);
-	if (err) 
-		kfree(dev_eql);
+	if (err)
+		free_netdev(dev_eql);
 	return err;
 }
 

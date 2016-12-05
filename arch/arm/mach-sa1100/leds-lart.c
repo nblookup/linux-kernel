@@ -9,10 +9,9 @@
  *  time, but in that case the timer events will still dictate the
  *  pace of the LED.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/leds.h>
 #include <asm/system.h>
 

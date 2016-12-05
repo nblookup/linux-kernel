@@ -1,4 +1,4 @@
-/* $Id: b1pci.c,v 1.1.4.1.2.1 2001/12/21 15:00:17 kai Exp $
+/* $Id: b1pci.c,v 1.1.2.2 2004/01/16 21:09:27 keil Exp $
  * 
  * Module for AVM B1 PCI-card.
  * 
@@ -9,7 +9,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
@@ -25,6 +24,10 @@
 #include <linux/isdn/capiutil.h>
 #include <linux/isdn/capilli.h>
 #include "avmcard.h"
+
+/* ------------------------------------------------------------- */
+
+static char *revision = "$Revision: 1.1.2.2 $";
 
 /* ------------------------------------------------------------- */
 
@@ -94,7 +97,7 @@ static int b1pci_probe(struct capicardparams *p, struct pci_dev *pdev)
 	b1_reset(card->port);
 	b1_getrevision(card);
 	
-	retval = request_irq(card->irq, b1_interrupt, SA_SHIRQ, card->name, card);
+	retval = request_irq(card->irq, b1_interrupt, IRQF_SHARED, card->name, card);
 	if (retval) {
 		printk(KERN_ERR "b1pci: unable to get IRQ %d.\n", card->irq);
 		retval = -EBUSY;
@@ -109,7 +112,7 @@ static int b1pci_probe(struct capicardparams *p, struct pci_dev *pdev)
 	cinfo->capi_ctrl.load_firmware = b1_load_firmware;
 	cinfo->capi_ctrl.reset_ctr     = b1_reset_ctr;
 	cinfo->capi_ctrl.procinfo      = b1pci_procinfo;
-	cinfo->capi_ctrl.ctr_read_proc = b1ctl_read_proc;
+	cinfo->capi_ctrl.proc_fops = &b1ctl_proc_fops;
 	strcpy(cinfo->capi_ctrl.name, card->name);
 	cinfo->capi_ctrl.owner         = THIS_MODULE;
 
@@ -231,7 +234,7 @@ static int b1pciv4_probe(struct capicardparams *p, struct pci_dev *pdev)
 	b1dma_reset(card);
 	b1_getrevision(card);
 
-	retval = request_irq(card->irq, b1dma_interrupt, SA_SHIRQ, card->name, card);
+	retval = request_irq(card->irq, b1dma_interrupt, IRQF_SHARED, card->name, card);
 	if (retval) {
 		printk(KERN_ERR "b1pci: unable to get IRQ %d.\n",
 		       card->irq);
@@ -248,7 +251,7 @@ static int b1pciv4_probe(struct capicardparams *p, struct pci_dev *pdev)
 	cinfo->capi_ctrl.load_firmware = b1dma_load_firmware;
 	cinfo->capi_ctrl.reset_ctr     = b1dma_reset_ctr;
 	cinfo->capi_ctrl.procinfo      = b1pciv4_procinfo;
-	cinfo->capi_ctrl.ctr_read_proc = b1dmactl_read_proc;
+	cinfo->capi_ctrl.proc_fops = &b1dmactl_proc_fops;
 	strcpy(cinfo->capi_ctrl.name, card->name);
 
 	retval = attach_capi_ctr(&cinfo->capi_ctrl);
@@ -362,13 +365,50 @@ static struct pci_driver b1pci_pci_driver = {
 	.remove		= __devexit_p(b1pci_pci_remove),
 };
 
+static struct capi_driver capi_driver_b1pci = {
+	.name		= "b1pci",
+	.revision	= "1.0",
+};
+#ifdef CONFIG_ISDN_DRV_AVMB1_B1PCIV4
+static struct capi_driver capi_driver_b1pciv4 = {
+	.name		= "b1pciv4",
+	.revision	= "1.0",
+};
+#endif
+
 static int __init b1pci_init(void)
 {
-	return pci_module_init(&b1pci_pci_driver);
+	char *p;
+	char rev[32];
+	int err;
+
+	if ((p = strchr(revision, ':')) != NULL && p[1]) {
+		strlcpy(rev, p + 2, 32);
+		if ((p = strchr(rev, '$')) != NULL && p > rev)
+		   *(p-1) = 0;
+	} else
+		strcpy(rev, "1.0");
+
+
+	err = pci_register_driver(&b1pci_pci_driver);
+	if (!err) {
+		strlcpy(capi_driver_b1pci.revision, rev, 32);
+		register_capi_driver(&capi_driver_b1pci);
+#ifdef CONFIG_ISDN_DRV_AVMB1_B1PCIV4
+		strlcpy(capi_driver_b1pciv4.revision, rev, 32);
+		register_capi_driver(&capi_driver_b1pciv4);
+#endif
+		printk(KERN_INFO "b1pci: revision %s\n", rev);
+	}
+	return err;
 }
 
 static void __exit b1pci_exit(void)
 {
+	unregister_capi_driver(&capi_driver_b1pci);
+#ifdef CONFIG_ISDN_DRV_AVMB1_B1PCIV4
+	unregister_capi_driver(&capi_driver_b1pciv4);
+#endif
 	pci_unregister_driver(&b1pci_pci_driver);
 }
 

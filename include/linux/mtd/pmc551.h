@@ -1,13 +1,11 @@
 /*
- * $Id: pmc551.h,v 1.5 2003/01/24 16:49:53 dwmw2 Exp $
- *
  * PMC551 PCI Mezzanine Ram Device
  *
  * Author:
  *       Mark Ferrell
  *       Copyright 1999,2000 Nortel Networks
  *
- * License: 
+ * License:
  *	 As part of this driver was derrived from the slram.c driver it falls
  *	 under the same license, which is GNU General Public License v2
  */
@@ -17,7 +15,7 @@
 
 #include <linux/mtd/mtd.h>
 
-#define PMC551_VERSION "$Id: pmc551.h,v 1.5 2003/01/24 16:49:53 dwmw2 Exp $\n"\
+#define PMC551_VERSION \
        "Ramix PMC551 PCI Mezzanine Ram Driver. (C) 1999,2000 Nortel Networks.\n"
 
 /*
@@ -30,16 +28,17 @@ struct mypriv {
         u32    curr_map0;
         u32    asize;
 	struct mtd_info *nextpmc551;
-};                       
+};
 
 /*
  * Function Prototypes
  */
 static int pmc551_erase(struct mtd_info *, struct erase_info *);
-static void pmc551_unpoint(struct mtd_info *, u_char *, loff_t, size_t);
-static int pmc551_point (struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen, u_char **mtdbuf);
+static void pmc551_unpoint(struct mtd_info *, loff_t, size_t);
+static int pmc551_point(struct mtd_info *mtd, loff_t from, size_t len,
+		size_t *retlen, void **virt, resource_size_t *phys);
 static int pmc551_read(struct mtd_info *, loff_t, size_t, size_t *, u_char *);
-static int pmc551_write(struct mtd_info *, loff_t, size_t, size_t *, const u_char *);        
+static int pmc551_write(struct mtd_info *, loff_t, size_t, size_t *, const u_char *);
 
 
 /*
@@ -50,7 +49,7 @@ static int pmc551_write(struct mtd_info *, loff_t, size_t, size_t *, const u_cha
 #endif
 
 #ifndef PCI_DEVICE_ID_V3_SEMI_V370PDC
-#define PCI_DEVICE_ID_V3_SEMI_V370PDC     0x0200  
+#define PCI_DEVICE_ID_V3_SEMI_V370PDC     0x0200
 #endif
 
 

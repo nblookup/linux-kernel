@@ -26,10 +26,10 @@
  * **********************
  */
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -39,7 +39,6 @@
 #include <linux/com20020.h>
 
 #include <asm/io.h>
-
 
 #define VERSION "arcnet: COM20020 ISA support (by David Woodhouse et al.)\n"
 
@@ -52,7 +51,7 @@ static int __init com20020isa_probe(struct net_device *dev)
 {
 	int ioaddr;
 	unsigned long airqmask;
-	struct arcnet_local *lp = dev->priv;
+	struct arcnet_local *lp = netdev_priv(dev);
 	int err;
 
 	BUGLVL(D_NORMAL) printk(VERSION);
@@ -91,14 +90,14 @@ static int __init com20020isa_probe(struct net_device *dev)
 		outb(0, _INTMASK);
 		dev->irq = probe_irq_off(airqmask);
 
-		if (dev->irq <= 0) {
+		if ((int)dev->irq <= 0) {
 			BUGMSG(D_INIT_REASONS, "Autoprobe IRQ failed first time\n");
 			airqmask = probe_irq_on();
 			outb(NORXflag, _INTMASK);
 			udelay(5);
 			outb(0, _INTMASK);
 			dev->irq = probe_irq_off(airqmask);
-			if (dev->irq <= 0) {
+			if ((int)dev->irq <= 0) {
 				BUGMSG(D_NORMAL, "Autoprobe IRQ failed.\n");
 				err = -ENODEV;
 				goto out;
@@ -117,49 +116,43 @@ out:
 	return err;
 }
 
-
-#ifdef MODULE
-
-static struct net_device *my_dev;
-
-/* Module parameters */
-
 static int node = 0;
 static int io = 0x0;		/* <--- EDIT THESE LINES FOR YOUR CONFIGURATION */
 static int irq = 0;		/* or use the insmod io= irq= shmem= options */
-static char *device;		/* use eg. device="arc1" to change name */
+static char device[9];		/* use eg. device="arc1" to change name */
 static int timeout = 3;
 static int backplane = 0;
 static int clockp = 0;
 static int clockm = 0;
 
-MODULE_PARM(node, "i");
-MODULE_PARM(io, "i");
-MODULE_PARM(irq, "i");
-MODULE_PARM(device, "s");
-MODULE_PARM(timeout, "i");
-MODULE_PARM(backplane, "i");
-MODULE_PARM(clockp, "i");
-MODULE_PARM(clockm, "i");
+module_param(node, int, 0);
+module_param(io, int, 0);
+module_param(irq, int, 0);
+module_param_string(device, device, sizeof(device), 0);
+module_param(timeout, int, 0);
+module_param(backplane, int, 0);
+module_param(clockp, int, 0);
+module_param(clockm, int, 0);
+
 MODULE_LICENSE("GPL");
 
-int init_module(void)
+static struct net_device *my_dev;
+
+static int __init com20020_init(void)
 {
 	struct net_device *dev;
 	struct arcnet_local *lp;
-	int err;
 
-	dev = dev_alloc(device ? : "arc%d", &err);
+	dev = alloc_arcdev(device);
 	if (!dev)
-		return err;
-	lp = dev->priv = kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
-	if (!lp)
 		return -ENOMEM;
-	memset(lp, 0, sizeof(struct arcnet_local));
 
 	if (node && node != 0xff)
 		dev->dev_addr[0] = node;
 
+	dev->netdev_ops = &com20020_netdev_ops;
+
+	lp = netdev_priv(dev);
 	lp->backplane = backplane;
 	lp->clockp = clockp & 7;
 	lp->clockm = clockm & 3;
@@ -172,61 +165,56 @@ int init_module(void)
 	if (dev->irq == 2)
 		dev->irq = 9;
 
-	if (com20020isa_probe(dev))
+	if (com20020isa_probe(dev)) {
+		free_netdev(dev);
 		return -EIO;
+	}
 
 	my_dev = dev;
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit com20020_exit(void)
 {
-	com20020_remove(my_dev);
+	unregister_netdev(my_dev);
+	free_irq(my_dev->irq, my_dev);
 	release_region(my_dev->base_addr, ARCNET_TOTAL_SIZE);
+	free_netdev(my_dev);
 }
 
-#else
-
+#ifndef MODULE
 static int __init com20020isa_setup(char *s)
 {
-	struct net_device *dev;
-	struct arcnet_local *lp;
 	int ints[8];
 
 	s = get_options(s, 8, ints);
 	if (!ints[0])
 		return 1;
-	dev = alloc_bootmem(sizeof(struct net_device) + sizeof(struct arcnet_local));
-	memset(dev, 0, sizeof(struct net_device) + sizeof(struct arcnet_local));
-	lp = dev->priv = (struct arcnet_local *) (dev + 1);
-	dev->init = com20020isa_probe;
 
 	switch (ints[0]) {
 	default:		/* ERROR */
 		printk("com90xx: Too many arguments.\n");
 	case 6:		/* Timeout */
-		lp->timeout = ints[6];
+		timeout = ints[6];
 	case 5:		/* CKP value */
-		lp->clockp = ints[5];
+		clockp = ints[5];
 	case 4:		/* Backplane flag */
-		lp->backplane = ints[4];
+		backplane = ints[4];
 	case 3:		/* Node ID */
-		dev->dev_addr[0] = ints[3];
+		node = ints[3];
 	case 2:		/* IRQ */
-		dev->irq = ints[2];
+		irq = ints[2];
 	case 1:		/* IO address */
-		dev->base_addr = ints[1];
+		io = ints[1];
 	}
 	if (*s)
-		strncpy(dev->name, s, 9);
-	else
-		strcpy(dev->name, "arc%d");
-	if (register_netdev(dev))
-		printk(KERN_ERR "com20020: Cannot register arcnet device\n");
-
+		snprintf(device, sizeof(device), "%s", s);
 	return 1;
 }
 
 __setup("com20020=", com20020isa_setup);
 
 #endif				/* MODULE */
+
+module_init(com20020_init)
+module_exit(com20020_exit)

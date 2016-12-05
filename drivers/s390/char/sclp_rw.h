@@ -1,18 +1,16 @@
 /*
- *  drivers/s390/char/sclp_rw.h
- *    interface to the SCLP-read/write driver
+ * interface to the SCLP-read/write driver
  *
- *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Martin Peschke <mpeschke@de.ibm.com>
- *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
+ * Copyright IBM Corporation 1999, 2009
+ *
+ * Author(s): Martin Peschke <mpeschke@de.ibm.com>
+ *	      Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
 #ifndef __SCLP_RW_H__
 #define __SCLP_RW_H__
 
 #include <linux/list.h>
-#include <linux/timer.h>
 
 struct mto {
 	u16 length;
@@ -74,7 +72,6 @@ struct sclp_buffer {
 	char *current_line;
 	int current_length;
 	int retry_count;
-	struct timer_list retry_timer;
 	/* output format settings */
 	unsigned short columns;
 	unsigned short htab;
@@ -89,10 +86,16 @@ int sclp_rw_init(void);
 struct sclp_buffer *sclp_make_buffer(void *, unsigned short, unsigned short);
 void *sclp_unmake_buffer(struct sclp_buffer *);
 int sclp_buffer_space(struct sclp_buffer *);
-int sclp_write(struct sclp_buffer *buffer, const unsigned char *, int, int);
-void sclp_emit_buffer(struct sclp_buffer *,void (*)(struct sclp_buffer *,int));
+int sclp_write(struct sclp_buffer *buffer, const unsigned char *, int);
+int sclp_emit_buffer(struct sclp_buffer *,void (*)(struct sclp_buffer *,int));
 void sclp_set_columns(struct sclp_buffer *, unsigned short);
 void sclp_set_htab(struct sclp_buffer *, unsigned short);
 int sclp_chars_in_buffer(struct sclp_buffer *);
+
+#ifdef CONFIG_SCLP_CONSOLE
+void sclp_console_pm_event(enum sclp_pm_event sclp_pm_event);
+#else
+static inline void sclp_console_pm_event(enum sclp_pm_event sclp_pm_event) { }
+#endif
 
 #endif	/* __SCLP_RW_H__ */

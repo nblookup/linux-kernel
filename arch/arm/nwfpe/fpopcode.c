@@ -19,7 +19,6 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
-#include <linux/config.h>
 #include "fpa11.h"
 #include "softfloat.h"
 #include "fpopcode.h"
@@ -29,14 +28,14 @@
 
 #ifdef CONFIG_FPE_NWFPE_XP
 const floatx80 floatx80Constant[] = {
-	{0x0000, 0x0000000000000000ULL},	/* extended 0.0 */
-	{0x3fff, 0x8000000000000000ULL},	/* extended 1.0 */
-	{0x4000, 0x8000000000000000ULL},	/* extended 2.0 */
-	{0x4000, 0xc000000000000000ULL},	/* extended 3.0 */
-	{0x4001, 0x8000000000000000ULL},	/* extended 4.0 */
-	{0x4001, 0xa000000000000000ULL},	/* extended 5.0 */
-	{0x3ffe, 0x8000000000000000ULL},	/* extended 0.5 */
-	{0x4002, 0xa000000000000000ULL}		/* extended 10.0 */
+	{ .high = 0x0000, .low = 0x0000000000000000ULL},/* extended 0.0 */
+	{ .high = 0x3fff, .low = 0x8000000000000000ULL},/* extended 1.0 */
+	{ .high = 0x4000, .low = 0x8000000000000000ULL},/* extended 2.0 */
+	{ .high = 0x4000, .low = 0xc000000000000000ULL},/* extended 3.0 */
+	{ .high = 0x4001, .low = 0x8000000000000000ULL},/* extended 4.0 */
+	{ .high = 0x4001, .low = 0xa000000000000000ULL},/* extended 5.0 */
+	{ .high = 0x3ffe, .low = 0x8000000000000000ULL},/* extended 0.5 */
+	{ .high = 0x4002, .low = 0xa000000000000000ULL},/* extended 10.0 */
 };
 #endif
 

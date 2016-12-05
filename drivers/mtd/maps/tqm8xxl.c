@@ -1,15 +1,13 @@
 /*
- * Handle mapping of the flash memory access routines 
+ * Handle mapping of the flash memory access routines
  * on TQM8xxL based devices.
- *
- * $Id: tqm8xxl.c,v 1.9 2003/06/23 11:48:18 dwmw2 Exp $
  *
  * based on rpxlite.c
  *
  * Copyright(C) 2001 Kirk Lee <kirk@hpc.ee.ntu.edu.tw>
  *
  * This code is GPLed
- * 
+ *
  */
 
 /*
@@ -19,19 +17,20 @@
  *	    2MiB	   512Kx16	  2MiB		   0
  *	    4MiB	   1Mx16	  4MiB		   0
  *	    8MiB	   1Mx16	  4MiB		   4MiB
- * Thus, we choose CONFIG_MTD_CFI_I2 & CONFIG_MTD_CFI_B4 at 
+ * Thus, we choose CONFIG_MTD_CFI_I2 & CONFIG_MTD_CFI_B4 at
  * kernel configuration.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <asm/io.h>
+#include <linux/slab.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
+
+#include <asm/io.h>
 
 #define FLASH_ADDR 0x40000000
 #define FLASH_SIZE 0x00800000
@@ -50,21 +49,21 @@ static struct mtd_info* mtd_banks[FLASH_BANK_MAX];
 static struct map_info* map_banks[FLASH_BANK_MAX];
 static struct mtd_part_def part_banks[FLASH_BANK_MAX];
 static unsigned long num_banks;
-static unsigned long start_scan_addr;
+static void __iomem *start_scan_addr;
 
 /*
  * Here are partition information for all known TQM8xxL series devices.
  * See include/linux/mtd/partitions.h for definition of the mtd_partition
  * structure.
- * 
+ *
  * The *_max_flash_size is the maximum possible mapped flash size which
- * is not necessarily the actual flash size.  It must correspond to the 
+ * is not necessarily the actual flash size.  It must correspond to the
  * value specified in the mapping definition defined by the
  * "struct map_desc *_io_desc" for the corresponding machine.
  */
 
 #ifdef CONFIG_MTD_PARTITIONS
-/* Currently, TQM8xxL has upto 8MiB flash */
+/* Currently, TQM8xxL has up to 8MiB flash */
 static unsigned long tqm8xxl_max_flash_size = 0x00800000;
 
 /* partition definition for first flash bank
@@ -105,12 +104,12 @@ static struct mtd_partition tqm8xxl_fs_partitions[] = {
 	  .name = "jffs",
 	  .offset = 0x00200000,
 	  .size = 0x00200000,
-	  .//size = MTDPART_SIZ_FULL,
+	  //.size = MTDPART_SIZ_FULL,
 	}
 };
 #endif
 
-int __init init_tqm_mtd(void)
+static int __init init_tqm_mtd(void)
 {
 	int idx = 0, ret = 0;
 	unsigned long flash_addr, flash_size, mtd_size = 0;
@@ -121,27 +120,26 @@ int __init init_tqm_mtd(void)
 	flash_size = bd->bi_flashsize;
 
 	//request maximum flash size address space
-	start_scan_addr = (unsigned long)ioremap(flash_addr, flash_size);
+	start_scan_addr = ioremap(flash_addr, flash_size);
 	if (!start_scan_addr) {
-		printk(KERN_WARNING "%s:Failed to ioremap address:0x%x\n", __FUNCTION__, flash_addr);
+		printk(KERN_WARNING "%s:Failed to ioremap address:0x%x\n", __func__, flash_addr);
 		return -EIO;
 	}
 
 	for (idx = 0 ; idx < FLASH_BANK_MAX ; idx++) {
 		if(mtd_size >= flash_size)
 			break;
-		
-		printk(KERN_INFO "%s: chip probing count %d\n", __FUNCTION__, idx);
-		
-		map_banks[idx] = (struct map_info *)kmalloc(sizeof(struct map_info), GFP_KERNEL);
+
+		printk(KERN_INFO "%s: chip probing count %d\n", __func__, idx);
+
+		map_banks[idx] = kzalloc(sizeof(struct map_info), GFP_KERNEL);
 		if(map_banks[idx] == NULL) {
 			ret = -ENOMEM;
 			/* FIXME: What if some MTD devices were probed already? */
 			goto error_mem;
 		}
 
-		memset((void *)map_banks[idx], 0, sizeof(struct map_info));
-		map_banks[idx]->name = (char *)kmalloc(16, GFP_KERNEL);
+		map_banks[idx]->name = kmalloc(16, GFP_KERNEL);
 
 		if (!map_banks[idx]->name) {
 			ret = -ENOMEM;
@@ -151,7 +149,7 @@ int __init init_tqm_mtd(void)
 		sprintf(map_banks[idx]->name, "TQM8xxL%d", idx);
 
 		map_banks[idx]->size = flash_size;
-		map_banks[idx]->buswidth = 4;
+		map_banks[idx]->bankwidth = 4;
 
 		simple_map_init(map_banks[idx]);
 
@@ -178,7 +176,7 @@ int __init init_tqm_mtd(void)
 			mtd_size += mtd_banks[idx]->size;
 			num_banks++;
 
-			printk(KERN_INFO "%s: bank%d, name:%s, size:%dbytes \n", __FUNCTION__, num_banks, 
+			printk(KERN_INFO "%s: bank%d, name:%s, size:%dbytes \n", __func__, num_banks,
 			mtd_banks[idx]->name, mtd_banks[idx]->size);
 		}
 	}
@@ -209,7 +207,7 @@ int __init init_tqm_mtd(void)
 		} else {
 			printk(KERN_NOTICE "TQM flash%d: Using %s partition definition\n",
 					idx, part_banks[idx].type);
-			add_mtd_partitions(mtd_banks[idx], part_banks[idx].mtd_part, 
+			add_mtd_partitions(mtd_banks[idx], part_banks[idx].mtd_part,
 								part_banks[idx].nums);
 		}
 	}
@@ -222,16 +220,14 @@ int __init init_tqm_mtd(void)
 error_mem:
 	for(idx = 0 ; idx < FLASH_BANK_MAX ; idx++) {
 		if(map_banks[idx] != NULL) {
-			if(map_banks[idx]->name != NULL) {
-				kfree(map_banks[idx]->name);
-				map_banks[idx]->name = NULL;
-			}
+			kfree(map_banks[idx]->name);
+			map_banks[idx]->name = NULL;
 			kfree(map_banks[idx]);
 			map_banks[idx] = NULL;
 		}
 	}
 error:
-	iounmap((void *)start_scan_addr);
+	iounmap(start_scan_addr);
 	return ret;
 }
 
@@ -250,7 +246,7 @@ static void __exit cleanup_tqm_mtd(void)
 	}
 
 	if (start_scan_addr) {
-		iounmap((void *)start_scan_addr);
+		iounmap(start_scan_addr);
 		start_scan_addr = 0;
 	}
 }

@@ -3,7 +3,7 @@
  *
  *	This is ALPHA test software. This code may break your machine,
  *	randomly fail to work with new releases, misbehave and/or generally
- *	screw up. It might even work. 
+ *	screw up. It might even work.
  *
  *	This code REQUIRES 2.1.15 or higher
  *
@@ -17,13 +17,13 @@
  *	X.25 001	Jonathan Naylor	Started coding.
  */
 
-#include <linux/config.h>
 #include <linux/if_arp.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <net/x25.h>
 
-struct list_head x25_route_list = LIST_HEAD_INIT(x25_route_list);
-rwlock_t x25_route_list_lock = RW_LOCK_UNLOCKED;
+LIST_HEAD(x25_route_list);
+DEFINE_RWLOCK(x25_route_list_lock);
 
 /*
  *	Add a new route.
@@ -120,6 +120,9 @@ void x25_route_device_down(struct net_device *dev)
 			__x25_remove_route(rt);
 	}
 	write_unlock_bh(&x25_route_list_lock);
+
+	/* Remove any related forwarding */
+	x25_clear_forward_by_dev(dev);
 }
 
 /*
@@ -127,15 +130,17 @@ void x25_route_device_down(struct net_device *dev)
  */
 struct net_device *x25_dev_get(char *devname)
 {
-	struct net_device *dev = dev_get_by_name(devname);
+	struct net_device *dev = dev_get_by_name(&init_net, devname);
 
 	if (dev &&
 	    (!(dev->flags & IFF_UP) || (dev->type != ARPHRD_X25
 #if defined(CONFIG_LLC) || defined(CONFIG_LLC_MODULE)
 					&& dev->type != ARPHRD_ETHER
 #endif
-					)))
+					))){
 		dev_put(dev);
+		dev = NULL;
+	}
 
 	return dev;
 }
@@ -174,7 +179,7 @@ struct x25_route *x25_get_route(struct x25_address *addr)
 /*
  *	Handle the ioctls that control the routing functions.
  */
-int x25_route_ioctl(unsigned int cmd, void *arg)
+int x25_route_ioctl(unsigned int cmd, void __user *arg)
 {
 	struct x25_route_struct rt;
 	struct net_device *dev;
@@ -188,7 +193,7 @@ int x25_route_ioctl(unsigned int cmd, void *arg)
 		goto out;
 
 	rc = -EINVAL;
-	if (rt.sigdigits < 0 || rt.sigdigits > 15)
+	if (rt.sigdigits > 15)
 		goto out;
 
 	dev = x25_dev_get(rt.device);

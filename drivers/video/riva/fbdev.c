@@ -29,28 +29,32 @@
  *	doublescan modes are broken
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/backlight.h>
+#include <linux/bitrev.h>
 #ifdef CONFIG_MTRR
 #include <asm/mtrr.h>
+#endif
+#ifdef CONFIG_PPC_OF
+#include <asm/prom.h>
+#include <asm/pci-bridge.h>
+#endif
+#ifdef CONFIG_PMAC_BACKLIGHT
+#include <asm/machdep.h>
+#include <asm/backlight.h>
 #endif
 
 #include "rivafb.h"
 #include "nvreg.h"
-
-#ifndef CONFIG_PCI		/* sanity check */
-#error This driver requires PCI support.
-#endif
 
 /* version number of this driver */
 #define RIVAFB_VERSION "0.9.5b"
@@ -60,19 +64,20 @@
  * various helpful macros and constants
  *
  * ------------------------------------------------------------------------- */
-
-#undef RIVAFBDEBUG
-#ifdef RIVAFBDEBUG
-#define DPRINTK(fmt, args...) printk(KERN_DEBUG "%s: " fmt, __FUNCTION__ , ## args)
+#ifdef CONFIG_FB_RIVA_DEBUG
+#define NVTRACE          printk
 #else
-#define DPRINTK(fmt, args...)
+#define NVTRACE          if(0) printk
 #endif
 
-#ifndef RIVA_NDEBUG
+#define NVTRACE_ENTER(...)  NVTRACE("%s START\n", __func__)
+#define NVTRACE_LEAVE(...)  NVTRACE("%s END\n", __func__)
+
+#ifdef CONFIG_FB_RIVA_DEBUG
 #define assert(expr) \
 	if(!(expr)) { \
 	printk( "Assertion failed! %s,%s,%s,line=%d\n",\
-	#expr,__FILE__,__FUNCTION__,__LINE__); \
+	#expr,__FILE__,__func__,__LINE__); \
 	BUG(); \
 	}
 #else
@@ -103,177 +108,92 @@ static int rivafb_blank(int blank, struct fb_info *info);
  *
  * ------------------------------------------------------------------------- */
 
-enum riva_chips {
-	CH_RIVA_128 = 0,
-	CH_RIVA_TNT,
-	CH_RIVA_TNT2,
-	CH_RIVA_UTNT2,
-	CH_RIVA_VTNT2,
-	CH_RIVA_UVTNT2,
-	CH_RIVA_ITNT2,
-	CH_GEFORCE_SDR,
-	CH_GEFORCE_DDR,
-	CH_QUADRO,
-	CH_GEFORCE2_MX,
-	CH_GEFORCE2_MX2,
-	CH_GEFORCE2_GO,
-	CH_QUADRO2_MXR,
-	CH_GEFORCE2_GTS,
-	CH_GEFORCE2_GTS2,
-	CH_GEFORCE2_ULTRA,
-	CH_QUADRO2_PRO,
-	CH_GEFORCE4_MX_460,
-	CH_GEFORCE4_MX_440,
-	CH_GEFORCE4_MX_420,
-	CH_GEFORCE4_440_GO,
-	CH_GEFORCE4_420_GO,
-	CH_GEFORCE4_420_GO_M32,
-	CH_QUADRO4_500XGL,
-	CH_GEFORCE4_440_GO_M64,
-	CH_QUADRO4_200,
-	CH_QUADRO4_550XGL,
-	CH_QUADRO4_500_GOGL,
-	CH_IGEFORCE2,
-	CH_GEFORCE3,
-	CH_GEFORCE3_1,
-	CH_GEFORCE3_2,
-	CH_QUADRO_DDC,
-	CH_GEFORCE4_TI_4600,
-	CH_GEFORCE4_TI_4400,
-	CH_GEFORCE4_TI_4200,
-	CH_QUADRO4_900XGL,
-	CH_QUADRO4_750XGL,
-	CH_QUADRO4_700XGL
-};
-
-/* directly indexed by riva_chips enum, above */
-static struct riva_chip_info {
-	const char *name;
-	unsigned arch_rev;
-} riva_chip_info[] __initdata = {
-	{ "RIVA-128", NV_ARCH_03 },
-	{ "RIVA-TNT", NV_ARCH_04 },
-	{ "RIVA-TNT2", NV_ARCH_04 },
-	{ "RIVA-UTNT2", NV_ARCH_04 },
-	{ "RIVA-VTNT2", NV_ARCH_04 },
-	{ "RIVA-UVTNT2", NV_ARCH_04 },
-	{ "RIVA-ITNT2", NV_ARCH_04 },
-	{ "GeForce-SDR", NV_ARCH_10 },
-	{ "GeForce-DDR", NV_ARCH_10 },
-	{ "Quadro", NV_ARCH_10 },
-	{ "GeForce2-MX", NV_ARCH_10 },
-	{ "GeForce2-MX", NV_ARCH_10 },
-	{ "GeForce2-GO", NV_ARCH_10 },
-	{ "Quadro2-MXR", NV_ARCH_10 },
-	{ "GeForce2-GTS", NV_ARCH_10 },
-	{ "GeForce2-GTS", NV_ARCH_10 },
-	{ "GeForce2-ULTRA", NV_ARCH_10 },
-	{ "Quadro2-PRO", NV_ARCH_10 },
-	{ "GeForce4-MX-460", NV_ARCH_20 },
-	{ "GeForce4-MX-440", NV_ARCH_20 },
-	{ "GeForce4-MX-420", NV_ARCH_20 },
-	{ "GeForce4-440-GO", NV_ARCH_20 },
-	{ "GeForce4-420-GO", NV_ARCH_20 },
-	{ "GeForce4-420-GO-M32", NV_ARCH_20 },
-	{ "Quadro4-500-XGL", NV_ARCH_20 },
-	{ "GeForce4-440-GO-M64", NV_ARCH_20 },
-	{ "Quadro4-200", NV_ARCH_20 },
-	{ "Quadro4-550-XGL", NV_ARCH_20 },
-	{ "Quadro4-500-GOGL", NV_ARCH_20 },
-	{ "GeForce2", NV_ARCH_20 },
-	{ "GeForce3", NV_ARCH_20 }, 
-	{ "GeForce3 Ti 200", NV_ARCH_20 },
-	{ "GeForce3 Ti 500", NV_ARCH_20 },
-	{ "Quadro DDC", NV_ARCH_20 },
-	{ "GeForce4 Ti 4600", NV_ARCH_20 },
-	{ "GeForce4 Ti 4400", NV_ARCH_20 },
-	{ "GeForce4 Ti 4200", NV_ARCH_20 },
-	{ "Quadro4-900-XGL", NV_ARCH_20 },
-	{ "Quadro4-750-XGL", NV_ARCH_20 },
-	{ "Quadro4-700-XGL", NV_ARCH_20 }
-};
-
 static struct pci_device_id rivafb_pci_tbl[] = {
 	{ PCI_VENDOR_ID_NVIDIA_SGS, PCI_DEVICE_ID_NVIDIA_SGS_RIVA128,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RIVA_128 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TNT,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RIVA_TNT },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TNT2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RIVA_TNT2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_UTNT2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RIVA_UTNT2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_VTNT2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RIVA_VTNT2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_UVTNT2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RIVA_VTNT2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_ITNT2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RIVA_ITNT2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_SDR,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE_SDR },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_DDR,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE_DDR },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_MX,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE2_MX },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_MX2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE2_MX2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_GO,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE2_GO },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO2_MXR,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO2_MXR },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_GTS,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE2_GTS },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_GTS2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE2_GTS2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_ULTRA,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE2_ULTRA },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO2_PRO,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO2_PRO },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_460,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_MX_460 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_440,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_MX_440 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	// NF2/IGP version, GeForce 4 MX, NV18
+	{ PCI_VENDOR_ID_NVIDIA, 0x01f0,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_420,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_MX_420 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_440_GO,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_440_GO },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_420_GO,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_420_GO },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_420_GO_M32,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_420_GO_M32 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_500XGL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO4_500XGL },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_440_GO_M64,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_440_GO_M64 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_200,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO4_200 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_550XGL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO4_550XGL },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_500_GOGL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO4_500_GOGL },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_IGEFORCE2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_IGEFORCE2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE3 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3_1,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE3_1 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3_2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE3_2 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_DDC,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO_DDC },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4600,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_TI_4600 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4400,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_TI_4400 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4200,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE4_TI_4200 },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
  	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_900XGL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO4_900XGL },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_750XGL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO4_750XGL },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_700XGL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO4_700XGL },
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO_5200,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0, } /* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, rivafb_pci_tbl);
@@ -285,25 +205,28 @@ MODULE_DEVICE_TABLE(pci, rivafb_pci_tbl);
  * ------------------------------------------------------------------------- */
 
 /* command line data, set in rivafb_setup() */
-static u32 pseudo_palette[17];
-static int flatpanel __initdata = -1; /* Autodetect later */
-static int forceCRTC __initdata = -1;
+static int flatpanel __devinitdata = -1; /* Autodetect later */
+static int forceCRTC __devinitdata = -1;
+static int noaccel   __devinitdata = 0;
 #ifdef CONFIG_MTRR
-static int nomtrr __initdata = 0;
+static int nomtrr __devinitdata = 0;
+#endif
+#ifdef CONFIG_PMAC_BACKLIGHT
+static int backlight __devinitdata = 1;
+#else
+static int backlight __devinitdata = 0;
 #endif
 
-#ifndef MODULE
-static char *mode_option __initdata = NULL;
-#endif
+static char *mode_option __devinitdata = NULL;
+static int  strictmode       = 0;
 
-static struct fb_fix_screeninfo rivafb_fix = {
-	.id		= "nVidia",
+static struct fb_fix_screeninfo __devinitdata rivafb_fix = {
 	.type		= FB_TYPE_PACKED_PIXELS,
 	.xpanstep	= 1,
 	.ypanstep	= 1,
 };
 
-static struct fb_var_screeninfo rivafb_default_var = {
+static struct fb_var_screeninfo __devinitdata rivafb_default_var = {
 	.xres		= 640,
 	.yres		= 480,
 	.xres_virtual	= 640,
@@ -316,7 +239,6 @@ static struct fb_var_screeninfo rivafb_default_var = {
 	.activate	= FB_ACTIVATE_NOW,
 	.height		= -1,
 	.width		= -1,
-	.accel_flags	= FB_ACCELF_TEXT,
 	.pixclock	= 39721,
 	.left_margin	= 40,
 	.right_margin	= 24,
@@ -347,6 +269,130 @@ static const struct riva_regs reg_template = {
 	{0x03, 0x01, 0x0F, 0x00, 0x0E},				/* SEQ  */
 	0xEB							/* MISC */
 };
+
+/*
+ * Backlight control
+ */
+#ifdef CONFIG_FB_RIVA_BACKLIGHT
+/* We do not have any information about which values are allowed, thus
+ * we used safe values.
+ */
+#define MIN_LEVEL 0x158
+#define MAX_LEVEL 0x534
+#define LEVEL_STEP ((MAX_LEVEL - MIN_LEVEL) / FB_BACKLIGHT_MAX)
+
+static int riva_bl_get_level_brightness(struct riva_par *par,
+		int level)
+{
+	struct fb_info *info = pci_get_drvdata(par->pdev);
+	int nlevel;
+
+	/* Get and convert the value */
+	/* No locking on bl_curve since accessing a single value */
+	nlevel = MIN_LEVEL + info->bl_curve[level] * LEVEL_STEP;
+
+	if (nlevel < 0)
+		nlevel = 0;
+	else if (nlevel < MIN_LEVEL)
+		nlevel = MIN_LEVEL;
+	else if (nlevel > MAX_LEVEL)
+		nlevel = MAX_LEVEL;
+
+	return nlevel;
+}
+
+static int riva_bl_update_status(struct backlight_device *bd)
+{
+	struct riva_par *par = bl_get_data(bd);
+	U032 tmp_pcrt, tmp_pmc;
+	int level;
+
+	if (bd->props.power != FB_BLANK_UNBLANK ||
+	    bd->props.fb_blank != FB_BLANK_UNBLANK)
+		level = 0;
+	else
+		level = bd->props.brightness;
+
+	tmp_pmc = NV_RD32(par->riva.PMC, 0x10F0) & 0x0000FFFF;
+	tmp_pcrt = NV_RD32(par->riva.PCRTC0, 0x081C) & 0xFFFFFFFC;
+	if(level > 0) {
+		tmp_pcrt |= 0x1;
+		tmp_pmc |= (1 << 31); /* backlight bit */
+		tmp_pmc |= riva_bl_get_level_brightness(par, level) << 16; /* level */
+	}
+	NV_WR32(par->riva.PCRTC0, 0x081C, tmp_pcrt);
+	NV_WR32(par->riva.PMC, 0x10F0, tmp_pmc);
+
+	return 0;
+}
+
+static int riva_bl_get_brightness(struct backlight_device *bd)
+{
+	return bd->props.brightness;
+}
+
+static const struct backlight_ops riva_bl_ops = {
+	.get_brightness = riva_bl_get_brightness,
+	.update_status	= riva_bl_update_status,
+};
+
+static void riva_bl_init(struct riva_par *par)
+{
+	struct backlight_properties props;
+	struct fb_info *info = pci_get_drvdata(par->pdev);
+	struct backlight_device *bd;
+	char name[12];
+
+	if (!par->FlatPanel)
+		return;
+
+#ifdef CONFIG_PMAC_BACKLIGHT
+	if (!machine_is(powermac) ||
+	    !pmac_has_backlight_type("mnca"))
+		return;
+#endif
+
+	snprintf(name, sizeof(name), "rivabl%d", info->node);
+
+	memset(&props, 0, sizeof(struct backlight_properties));
+	props.type = BACKLIGHT_RAW;
+	props.max_brightness = FB_BACKLIGHT_LEVELS - 1;
+	bd = backlight_device_register(name, info->dev, par, &riva_bl_ops,
+				       &props);
+	if (IS_ERR(bd)) {
+		info->bl_dev = NULL;
+		printk(KERN_WARNING "riva: Backlight registration failed\n");
+		goto error;
+	}
+
+	info->bl_dev = bd;
+	fb_bl_default_curve(info, 0,
+		MIN_LEVEL * FB_BACKLIGHT_MAX / MAX_LEVEL,
+		FB_BACKLIGHT_MAX);
+
+	bd->props.brightness = bd->props.max_brightness;
+	bd->props.power = FB_BLANK_UNBLANK;
+	backlight_update_status(bd);
+
+	printk("riva: Backlight initialized (%s)\n", name);
+
+	return;
+
+error:
+	return;
+}
+
+static void riva_bl_exit(struct fb_info *info)
+{
+	struct backlight_device *bd = info->bl_dev;
+
+	backlight_device_unregister(bd);
+	printk("riva: Backlight unloaded\n");
+}
+#else
+static inline void riva_bl_init(struct riva_par *par) {}
+static inline void riva_bl_exit(struct fb_info *info) {}
+#endif /* CONFIG_FB_RIVA_BACKLIGHT */
 
 /* ------------------------------------------------------------------------- *
  *
@@ -420,48 +466,13 @@ static inline unsigned char MISCin(struct riva_par *par)
 	return (VGA_RD08(par->riva.PVIO, 0x3cc));
 }
 
-static u8 byte_rev[256] = {
-	0x00, 0x80, 0x40, 0xc0, 0x20, 0xa0, 0x60, 0xe0,
-	0x10, 0x90, 0x50, 0xd0, 0x30, 0xb0, 0x70, 0xf0,
-	0x08, 0x88, 0x48, 0xc8, 0x28, 0xa8, 0x68, 0xe8,
-	0x18, 0x98, 0x58, 0xd8, 0x38, 0xb8, 0x78, 0xf8,
-	0x04, 0x84, 0x44, 0xc4, 0x24, 0xa4, 0x64, 0xe4,
-	0x14, 0x94, 0x54, 0xd4, 0x34, 0xb4, 0x74, 0xf4,
-	0x0c, 0x8c, 0x4c, 0xcc, 0x2c, 0xac, 0x6c, 0xec,
-	0x1c, 0x9c, 0x5c, 0xdc, 0x3c, 0xbc, 0x7c, 0xfc,
-	0x02, 0x82, 0x42, 0xc2, 0x22, 0xa2, 0x62, 0xe2,
-	0x12, 0x92, 0x52, 0xd2, 0x32, 0xb2, 0x72, 0xf2,
-	0x0a, 0x8a, 0x4a, 0xca, 0x2a, 0xaa, 0x6a, 0xea,
-	0x1a, 0x9a, 0x5a, 0xda, 0x3a, 0xba, 0x7a, 0xfa,
-	0x06, 0x86, 0x46, 0xc6, 0x26, 0xa6, 0x66, 0xe6,
-	0x16, 0x96, 0x56, 0xd6, 0x36, 0xb6, 0x76, 0xf6,
-	0x0e, 0x8e, 0x4e, 0xce, 0x2e, 0xae, 0x6e, 0xee,
-	0x1e, 0x9e, 0x5e, 0xde, 0x3e, 0xbe, 0x7e, 0xfe,
-	0x01, 0x81, 0x41, 0xc1, 0x21, 0xa1, 0x61, 0xe1,
-	0x11, 0x91, 0x51, 0xd1, 0x31, 0xb1, 0x71, 0xf1,
-	0x09, 0x89, 0x49, 0xc9, 0x29, 0xa9, 0x69, 0xe9,
-	0x19, 0x99, 0x59, 0xd9, 0x39, 0xb9, 0x79, 0xf9,
-	0x05, 0x85, 0x45, 0xc5, 0x25, 0xa5, 0x65, 0xe5,
-	0x15, 0x95, 0x55, 0xd5, 0x35, 0xb5, 0x75, 0xf5,
-	0x0d, 0x8d, 0x4d, 0xcd, 0x2d, 0xad, 0x6d, 0xed,
-	0x1d, 0x9d, 0x5d, 0xdd, 0x3d, 0xbd, 0x7d, 0xfd,
-	0x03, 0x83, 0x43, 0xc3, 0x23, 0xa3, 0x63, 0xe3,
-	0x13, 0x93, 0x53, 0xd3, 0x33, 0xb3, 0x73, 0xf3,
-	0x0b, 0x8b, 0x4b, 0xcb, 0x2b, 0xab, 0x6b, 0xeb,
-	0x1b, 0x9b, 0x5b, 0xdb, 0x3b, 0xbb, 0x7b, 0xfb,
-	0x07, 0x87, 0x47, 0xc7, 0x27, 0xa7, 0x67, 0xe7,
-	0x17, 0x97, 0x57, 0xd7, 0x37, 0xb7, 0x77, 0xf7,
-	0x0f, 0x8f, 0x4f, 0xcf, 0x2f, 0xaf, 0x6f, 0xef,
-	0x1f, 0x9f, 0x5f, 0xdf, 0x3f, 0xbf, 0x7f, 0xff,
-};
-
 static inline void reverse_order(u32 *l)
 {
 	u8 *a = (u8 *)l;
-	*a = byte_rev[*a], a++;
-	*a = byte_rev[*a], a++;
-	*a = byte_rev[*a], a++;
-	*a = byte_rev[*a];
+	a[0] = bitrev8(a[0]);
+	a[1] = bitrev8(a[1]);
+	a[2] = bitrev8(a[2]);
+	a[3] = bitrev8(a[3]);
 }
 
 /* ------------------------------------------------------------------------- *
@@ -488,53 +499,35 @@ static inline void reverse_order(u32 *l)
  * CALLED FROM:
  * rivafb_cursor()
  */
-static void rivafb_load_cursor_image(struct riva_par *par, u8 *data, 
-				     u8 *mask, u16 bg, u16 fg, u32 w, u32 h)
+static void rivafb_load_cursor_image(struct riva_par *par, u8 *data8,
+				     u16 bg, u16 fg, u32 w, u32 h)
 {
 	int i, j, k = 0;
-	u32 b, m, tmp;
+	u32 b, tmp;
+	u32 *data = (u32 *)data8;
+	bg = le16_to_cpu(bg);
+	fg = le16_to_cpu(fg);
+
+	w = (w + 1) & ~1;
 
 	for (i = 0; i < h; i++) {
-		b = *((u32 *)data)++;
-		m = *((u32 *)mask)++;
+		b = *data++;
 		reverse_order(&b);
 		
 		for (j = 0; j < w/2; j++) {
 			tmp = 0;
 #if defined (__BIG_ENDIAN)
-			if (m & (1 << 31)) {
-				fg |= 1 << 15;
-				bg |= 1 << 15;
-			}
 			tmp = (b & (1 << 31)) ? fg << 16 : bg << 16;
 			b <<= 1;
-			m <<= 1;
-
-			if (m & (1 << 31)) {
-				fg |= 1 << 15;
-				bg |= 1 << 15;
-			}
 			tmp |= (b & (1 << 31)) ? fg : bg;
 			b <<= 1;
-			m <<= 1;
 #else
-			if (m & 1) {
-				fg |= 1 << 15;
-				bg |= 1 << 15;
-			}
 			tmp = (b & 1) ? fg : bg;
 			b >>= 1;
-			m >>= 1;
-			
-			if (m & 1) {
-				fg |= 1 << 15;
-				bg |= 1 << 15;
-			}
 			tmp |= (b & 1) ? fg << 16 : bg << 16;
 			b >>= 1;
-			m >>= 1;
 #endif
-			writel(tmp, par->riva.CURSOR + k++);
+			writel(tmp, &par->riva.CURSOR[k++]);
 		}
 		k += (MAX_CURS - w)/2;
 	}
@@ -589,7 +582,7 @@ static void riva_rclut(RIVA_HW_INST *chip,
 		       unsigned char *green, unsigned char *blue)
 {
 	
-	VGA_WR08(chip->PDIO, 0x3c8, regnum);
+	VGA_WR08(chip->PDIO, 0x3c7, regnum);
 	*red = VGA_RD08(chip->PDIO, 0x3c9);
 	*green = VGA_RD08(chip->PDIO, 0x3c9);
 	*blue = VGA_RD08(chip->PDIO, 0x3c9);
@@ -611,6 +604,7 @@ static void riva_save_state(struct riva_par *par, struct riva_regs *regs)
 {
 	int i;
 
+	NVTRACE_ENTER();
 	par->riva.LockUnlock(&par->riva, 0);
 
 	par->riva.UnloadStateExt(&par->riva, &regs->ext);
@@ -628,6 +622,7 @@ static void riva_save_state(struct riva_par *par, struct riva_regs *regs)
 
 	for (i = 0; i < NUM_SEQ_REGS; i++)
 		regs->seq[i] = SEQin(par, i);
+	NVTRACE_LEAVE();
 }
 
 /**
@@ -649,6 +644,7 @@ static void riva_load_state(struct riva_par *par, struct riva_regs *regs)
 	RIVA_HW_STATE *state = &regs->ext;
 	int i;
 
+	NVTRACE_ENTER();
 	CRTCout(par, 0x11, 0x00);
 
 	par->riva.LockUnlock(&par->riva, 0);
@@ -675,6 +671,7 @@ static void riva_load_state(struct riva_par *par, struct riva_regs *regs)
 
 	for (i = 0; i < NUM_SEQ_REGS; i++)
 		SEQout(par, i, regs->seq[i]);
+	NVTRACE_LEAVE();
 }
 
 /**
@@ -687,16 +684,18 @@ static void riva_load_state(struct riva_par *par, struct riva_regs *regs)
  * CALLED FROM:
  * rivafb_set_par()
  */
-static void riva_load_video_mode(struct fb_info *info)
+static int riva_load_video_mode(struct fb_info *info)
 {
 	int bpp, width, hDisplaySize, hDisplay, hStart,
 	    hEnd, hTotal, height, vDisplay, vStart, vEnd, vTotal, dotClock;
 	int hBlankStart, hBlankEnd, vBlankStart, vBlankEnd;
-	struct riva_par *par = (struct riva_par *) info->par;
+	int rc;
+	struct riva_par *par = info->par;
 	struct riva_regs newmode;
 	
+	NVTRACE_ENTER();
 	/* time to calculate */
-	rivafb_blank(1, info);
+	rivafb_blank(FB_BLANK_NORMAL, info);
 
 	bpp = info->var.bits_per_pixel;
 	if (bpp == 16 && info->var.green.length == 5)
@@ -785,7 +784,7 @@ static void riva_load_video_mode(struct fb_info *info)
 		newmode.ext.interlace = 0xff; /* interlace off */
 
 	if (par->riva.Architecture >= NV_ARCH_10)
-		par->riva.CURSOR = (U032 *)(info->screen_base + par->riva.CursorStart);
+		par->riva.CURSOR = (U032 __iomem *)(info->screen_base + par->riva.CursorStart);
 
 	if (info->var.sync & FB_SYNC_HOR_HIGH_ACT)
 		newmode.misc_output &= ~0x40;
@@ -796,25 +795,32 @@ static void riva_load_video_mode(struct fb_info *info)
 	else
 		newmode.misc_output |= 0x80;	
 
-	par->riva.CalcStateExt(&par->riva, &newmode.ext, bpp, width,
-				  hDisplaySize, height, dotClock);
+	rc = CalcStateExt(&par->riva, &newmode.ext, bpp, width,
+			  hDisplaySize, height, dotClock);
+	if (rc)
+		goto out;
 
-	newmode.ext.scale = par->riva.PRAMDAC[0x00000848/4] & 0xfff000ff;
+	newmode.ext.scale = NV_RD32(par->riva.PRAMDAC, 0x00000848) &
+		0xfff000ff;
 	if (par->FlatPanel == 1) {
 		newmode.ext.pixel |= (1 << 7);
 		newmode.ext.scale |= (1 << 8);
 	}
 	if (par->SecondCRTC) {
-		newmode.ext.head  = par->riva.PCRTC0[0x00000860/4] & ~0x00001000;
-		newmode.ext.head2 = par->riva.PCRTC0[0x00002860/4] | 0x00001000;
+		newmode.ext.head  = NV_RD32(par->riva.PCRTC0, 0x00000860) &
+			~0x00001000;
+		newmode.ext.head2 = NV_RD32(par->riva.PCRTC0, 0x00002860) |
+			0x00001000;
 		newmode.ext.crtcOwner = 3;
 		newmode.ext.pllsel |= 0x20000800;
 		newmode.ext.vpll2 = newmode.ext.vpll;
 	} else if (par->riva.twoHeads) {
-		newmode.ext.head  =  par->riva.PCRTC0[0x00000860/4] | 0x00001000;
-		newmode.ext.head2 =  par->riva.PCRTC0[0x00002860/4] & ~0x00001000;
+		newmode.ext.head  =  NV_RD32(par->riva.PCRTC0, 0x00000860) |
+			0x00001000;
+		newmode.ext.head2 =  NV_RD32(par->riva.PCRTC0, 0x00002860) &
+			~0x00001000;
 		newmode.ext.crtcOwner = 0;
-		newmode.ext.vpll2 = par->riva.PRAMDAC0[0x00000520/4];
+		newmode.ext.vpll2 = NV_RD32(par->riva.PRAMDAC0, 0x00000520);
 	}
 	if (par->FlatPanel == 1) {
 		newmode.ext.pixel |= (1 << 7);
@@ -824,7 +830,33 @@ static void riva_load_video_mode(struct fb_info *info)
 	par->current_state = newmode;
 	riva_load_state(par, &par->current_state);
 	par->riva.LockUnlock(&par->riva, 0); /* important for HW cursor */
-	rivafb_blank(0, info);
+
+out:
+	rivafb_blank(FB_BLANK_UNBLANK, info);
+	NVTRACE_LEAVE();
+
+	return rc;
+}
+
+static void riva_update_var(struct fb_var_screeninfo *var,
+			    const struct fb_videomode *modedb)
+{
+	NVTRACE_ENTER();
+	var->xres = var->xres_virtual = modedb->xres;
+	var->yres = modedb->yres;
+        if (var->yres_virtual < var->yres)
+	    var->yres_virtual = var->yres;
+        var->xoffset = var->yoffset = 0;
+        var->pixclock = modedb->pixclock;
+        var->left_margin = modedb->left_margin;
+        var->right_margin = modedb->right_margin;
+        var->upper_margin = modedb->upper_margin;
+        var->lower_margin = modedb->lower_margin;
+        var->hsync_len = modedb->hsync_len;
+        var->vsync_len = modedb->vsync_len;
+        var->sync = modedb->sync;
+        var->vmode = modedb->vmode;
+	NVTRACE_LEAVE();
 }
 
 /**
@@ -860,19 +892,20 @@ static int rivafb_do_maximize(struct fb_info *info,
 	};
 	int i;
 
+	NVTRACE_ENTER();
 	/* use highest possible virtual resolution */
 	if (var->xres_virtual == -1 && var->yres_virtual == -1) {
 		printk(KERN_WARNING PFX
 		       "using maximum available virtual resolution\n");
 		for (i = 0; modes[i].xres != -1; i++) {
 			if (modes[i].xres * nom / den * modes[i].yres <
-			    info->fix.smem_len / 2)
+			    info->fix.smem_len)
 				break;
 		}
 		if (modes[i].xres == -1) {
 			printk(KERN_ERR PFX
 			       "could not find a virtual resolution that fits into video memory!!\n");
-			DPRINTK("EXIT - EINVAL error\n");
+			NVTRACE("EXIT - EINVAL error\n");
 			return -EINVAL;
 		}
 		var->xres_virtual = modes[i].xres;
@@ -883,13 +916,13 @@ static int rivafb_do_maximize(struct fb_info *info,
 		       var->xres_virtual, var->yres_virtual);
 	} else if (var->xres_virtual == -1) {
 		var->xres_virtual = (info->fix.smem_len * den /
-			(nom * var->yres_virtual * 2)) & ~15;
+			(nom * var->yres_virtual)) & ~15;
 		printk(KERN_WARNING PFX
 		       "setting virtual X resolution to %d\n", var->xres_virtual);
 	} else if (var->yres_virtual == -1) {
 		var->xres_virtual = (var->xres_virtual + 15) & ~15;
 		var->yres_virtual = info->fix.smem_len * den /
-			(nom * var->xres_virtual * 2);
+			(nom * var->xres_virtual);
 		printk(KERN_WARNING PFX
 		       "setting virtual Y resolution to %d\n", var->yres_virtual);
 	} else {
@@ -898,7 +931,7 @@ static int rivafb_do_maximize(struct fb_info *info,
 			printk(KERN_ERR PFX
 			       "mode %dx%dx%d rejected...resolution too high to fit into video memory!\n",
 			       var->xres, var->yres, var->bits_per_pixel);
-			DPRINTK("EXIT - EINVAL error\n");
+			NVTRACE("EXIT - EINVAL error\n");
 			return -EINVAL;
 		}
 	}
@@ -921,35 +954,52 @@ static int rivafb_do_maximize(struct fb_info *info,
 		       "virtual Y resolution (%d) is smaller than real\n", var->yres_virtual);
 		return -EINVAL;
 	}
+	if (var->yres_virtual > 0x7fff/nom)
+		var->yres_virtual = 0x7fff/nom;
+	if (var->xres_virtual > 0x7fff/nom)
+		var->xres_virtual = 0x7fff/nom;
+	NVTRACE_LEAVE();
 	return 0;
 }
 
+static void
+riva_set_pattern(struct riva_par *par, int clr0, int clr1, int pat0, int pat1)
+{
+	RIVA_FIFO_FREE(par->riva, Patt, 4);
+	NV_WR32(&par->riva.Patt->Color0, 0, clr0);
+	NV_WR32(&par->riva.Patt->Color1, 0, clr1);
+	NV_WR32(par->riva.Patt->Monochrome, 0, pat0);
+	NV_WR32(par->riva.Patt->Monochrome, 4, pat1);
+}
+
 /* acceleration routines */
-inline void wait_for_idle(struct riva_par *par)
+static inline void wait_for_idle(struct riva_par *par)
 {
 	while (par->riva.Busy(&par->riva));
 }
 
-/* set copy ROP, no mask */
-static void riva_setup_ROP(struct riva_par *par)
+/*
+ * Set ROP.  Translate X rop into ROP3.  Internal routine.
+ */
+static void
+riva_set_rop_solid(struct riva_par *par, int rop)
 {
-	RIVA_FIFO_FREE(par->riva, Patt, 5);
-	par->riva.Patt->Shape = 0;
-	par->riva.Patt->Color0 = 0xffffffff;
-	par->riva.Patt->Color1 = 0xffffffff;
-	par->riva.Patt->Monochrome[0] = 0xffffffff;
-	par->riva.Patt->Monochrome[1] = 0xffffffff;
+	riva_set_pattern(par, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF);
+        RIVA_FIFO_FREE(par->riva, Rop, 1);
+        NV_WR32(&par->riva.Rop->Rop3, 0, rop);
 
-	RIVA_FIFO_FREE(par->riva, Rop, 1);
-	par->riva.Rop->Rop3 = 0xCC;
 }
 
-void riva_setup_accel(struct riva_par *par)
+static void riva_setup_accel(struct fb_info *info)
 {
+	struct riva_par *par = info->par;
+
 	RIVA_FIFO_FREE(par->riva, Clip, 2);
-	par->riva.Clip->TopLeft     = 0x0;
-	par->riva.Clip->WidthHeight = 0x80008000;
-	riva_setup_ROP(par);
+	NV_WR32(&par->riva.Clip->TopLeft, 0, 0x0);
+	NV_WR32(&par->riva.Clip->WidthHeight, 0,
+		(info->var.xres_virtual & 0xffff) |
+		(info->var.yres_virtual << 16));
+	riva_set_rop_solid(par, 0xcc);
 	wait_for_idle(par);
 }
 
@@ -995,50 +1045,64 @@ static int riva_get_cmap_len(const struct fb_var_screeninfo *var)
 
 static int rivafb_open(struct fb_info *info, int user)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
-	int cnt = atomic_read(&par->ref_count);
+	struct riva_par *par = info->par;
 
-	if (!cnt) {
+	NVTRACE_ENTER();
+	mutex_lock(&par->open_lock);
+	if (!par->ref_count) {
+#ifdef CONFIG_X86
 		memset(&par->state, 0, sizeof(struct vgastate));
 		par->state.flags = VGA_SAVE_MODE  | VGA_SAVE_FONTS;
 		/* save the DAC for Riva128 */
 		if (par->riva.Architecture == NV_ARCH_03)
 			par->state.flags |= VGA_SAVE_CMAP;
 		save_vga(&par->state);
-
-		RivaGetConfig(&par->riva, par->Chipset);
+#endif
 		/* vgaHWunlock() + riva unlock (0x7F) */
 		CRTCout(par, 0x11, 0xFF);
 		par->riva.LockUnlock(&par->riva, 0);
 	
 		riva_save_state(par, &par->initial_state);
 	}
-	atomic_inc(&par->ref_count);
+	par->ref_count++;
+	mutex_unlock(&par->open_lock);
+	NVTRACE_LEAVE();
 	return 0;
 }
 
 static int rivafb_release(struct fb_info *info, int user)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
-	int cnt = atomic_read(&par->ref_count);
+	struct riva_par *par = info->par;
 
-	if (!cnt)
+	NVTRACE_ENTER();
+	mutex_lock(&par->open_lock);
+	if (!par->ref_count) {
+		mutex_unlock(&par->open_lock);
 		return -EINVAL;
-	if (cnt == 1) {
+	}
+	if (par->ref_count == 1) {
 		par->riva.LockUnlock(&par->riva, 0);
 		par->riva.LoadStateExt(&par->riva, &par->initial_state.ext);
 		riva_load_state(par, &par->initial_state);
+#ifdef CONFIG_X86
 		restore_vga(&par->state);
+#endif
 		par->riva.LockUnlock(&par->riva, 1);
 	}
-	atomic_dec(&par->ref_count);
+	par->ref_count--;
+	mutex_unlock(&par->open_lock);
+	NVTRACE_LEAVE();
 	return 0;
 }
 
 static int rivafb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 {
+	const struct fb_videomode *mode;
+	struct riva_par *par = info->par;
 	int nom, den;		/* translating from pixels->bytes */
+	int mode_valid = 0;
 	
+	NVTRACE_ENTER();
 	switch (var->bits_per_pixel) {
 	case 1 ... 8:
 		var->red.offset = var->green.offset = var->blue.offset = 0;
@@ -1051,6 +1115,9 @@ static int rivafb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 		/* fall through */
 	case 16:
 		var->bits_per_pixel = 16;
+		/* The Riva128 supports RGB555 only */
+		if (par->riva.Architecture == NV_ARCH_03)
+			var->green.length = 5;
 		if (var->green.length == 5) {
 			/* 0rrrrrgg gggbbbbb */
 			var->red.offset = 10;
@@ -1084,10 +1151,37 @@ static int rivafb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 		printk(KERN_ERR PFX
 		       "mode %dx%dx%d rejected...color depth not supported.\n",
 		       var->xres, var->yres, var->bits_per_pixel);
-		DPRINTK("EXIT, returning -EINVAL\n");
+		NVTRACE("EXIT, returning -EINVAL\n");
 		return -EINVAL;
 	}
 
+	if (!strictmode) {
+		if (!info->monspecs.vfmax || !info->monspecs.hfmax ||
+		    !info->monspecs.dclkmax || !fb_validate_mode(var, info))
+			mode_valid = 1;
+	}
+
+	/* calculate modeline if supported by monitor */
+	if (!mode_valid && info->monspecs.gtf) {
+		if (!fb_get_mode(FB_MAXTIMINGS, 0, var, info))
+			mode_valid = 1;
+	}
+
+	if (!mode_valid) {
+		mode = fb_find_best_mode(var, &info->modelist);
+		if (mode) {
+			riva_update_var(var, mode);
+			mode_valid = 1;
+		}
+	}
+
+	if (!mode_valid && info->monspecs.modedb_len)
+		return -EINVAL;
+
+	if (var->xres_virtual < var->xres)
+		var->xres_virtual = var->xres;
+	if (var->yres_virtual <= var->yres)
+		var->yres_virtual = -1;
 	if (rivafb_do_maximize(info, var, nom, den) < 0)
 		return -EINVAL;
 
@@ -1107,20 +1201,38 @@ static int rivafb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 	    var->green.msb_right =
 	    var->blue.msb_right =
 	    var->transp.offset = var->transp.length = var->transp.msb_right = 0;
+	NVTRACE_LEAVE();
 	return 0;
 }
 
 static int rivafb_set_par(struct fb_info *info)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
+	struct riva_par *par = info->par;
+	int rc = 0;
 
-	riva_load_video_mode(info);
-	riva_setup_accel(par);
+	NVTRACE_ENTER();
+	/* vgaHWunlock() + riva unlock (0x7F) */
+	CRTCout(par, 0x11, 0xFF);
+	par->riva.LockUnlock(&par->riva, 0);
+	rc = riva_load_video_mode(info);
+	if (rc)
+		goto out;
+	if(!(info->flags & FBINFO_HWACCEL_DISABLED))
+		riva_setup_accel(info);
 	
+	par->cursor_reset = 1;
 	info->fix.line_length = (info->var.xres_virtual * (info->var.bits_per_pixel >> 3));
 	info->fix.visual = (info->var.bits_per_pixel == 8) ?
 				FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_DIRECTCOLOR;
-	return 0;
+
+	if (info->flags & FBINFO_HWACCEL_DISABLED)
+		info->pixmap.scan_align = 1;
+	else
+		info->pixmap.scan_align = 4;
+
+out:
+	NVTRACE_LEAVE();
+	return rc;
 }
 
 /**
@@ -1139,64 +1251,49 @@ static int rivafb_set_par(struct fb_info *info)
 static int rivafb_pan_display(struct fb_var_screeninfo *var,
 			      struct fb_info *info)
 {
-	struct riva_par *par = (struct riva_par *)info->par;
+	struct riva_par *par = info->par;
 	unsigned int base;
 
-	if (var->xoffset > (var->xres_virtual - var->xres))
-		return -EINVAL;
-	if (var->yoffset > (var->yres_virtual - var->yres))
-		return -EINVAL;
-
-	if (var->vmode & FB_VMODE_YWRAP) {
-		if (var->yoffset < 0
-		    || var->yoffset >= info->var.yres_virtual
-		    || var->xoffset) return -EINVAL;
-	} else {
-		if (var->xoffset + info->var.xres > info->var.xres_virtual ||
-		    var->yoffset + info->var.yres > info->var.yres_virtual)
-			return -EINVAL;
-	}
-
+	NVTRACE_ENTER();
 	base = var->yoffset * info->fix.line_length + var->xoffset;
-
 	par->riva.SetStartAddress(&par->riva, base);
-
-	info->var.xoffset = var->xoffset;
-	info->var.yoffset = var->yoffset;
-
-	if (var->vmode & FB_VMODE_YWRAP)
-		info->var.vmode |= FB_VMODE_YWRAP;
-	else
-		info->var.vmode &= ~FB_VMODE_YWRAP;
+	NVTRACE_LEAVE();
 	return 0;
 }
 
 static int rivafb_blank(int blank, struct fb_info *info)
 {
-	struct riva_par *par= (struct riva_par *)info->par;
+	struct riva_par *par= info->par;
 	unsigned char tmp, vesa;
 
 	tmp = SEQin(par, 0x01) & ~0x20;	/* screen on/off */
 	vesa = CRTCin(par, 0x1a) & ~0xc0;	/* sync on/off */
 
-	if (blank) {
+	NVTRACE_ENTER();
+
+	if (blank)
 		tmp |= 0x20;
-		switch (blank - 1) {
-		case VESA_NO_BLANKING:
-			break;
-		case VESA_VSYNC_SUSPEND:
-			vesa |= 0x80;
-			break;
-		case VESA_HSYNC_SUSPEND:
-			vesa |= 0x40;
-			break;
-		case VESA_POWERDOWN:
-			vesa |= 0xc0;
-			break;
-		}
+
+	switch (blank) {
+	case FB_BLANK_UNBLANK:
+	case FB_BLANK_NORMAL:
+		break;
+	case FB_BLANK_VSYNC_SUSPEND:
+		vesa |= 0x80;
+		break;
+	case FB_BLANK_HSYNC_SUSPEND:
+		vesa |= 0x40;
+		break;
+	case FB_BLANK_POWERDOWN:
+		vesa |= 0xc0;
+		break;
 	}
+
 	SEQout(par, 0x01, tmp);
 	CRTCout(par, 0x1a, vesa);
+
+	NVTRACE_LEAVE();
+
 	return 0;
 }
 
@@ -1223,17 +1320,42 @@ static int rivafb_setcolreg(unsigned regno, unsigned red, unsigned green,
 			  unsigned blue, unsigned transp,
 			  struct fb_info *info)
 {
-	struct riva_par *par = (struct riva_par *)info->par;
+	struct riva_par *par = info->par;
 	RIVA_HW_INST *chip = &par->riva;
 	int i;
 
 	if (regno >= riva_get_cmap_len(&info->var))
-		return -EINVAL;
+			return -EINVAL;
 
 	if (info->var.grayscale) {
 		/* gray = 0.30*R + 0.59*G + 0.11*B */
 		red = green = blue =
 		    (red * 77 + green * 151 + blue * 28) >> 8;
+	}
+
+	if (regno < 16 && info->fix.visual == FB_VISUAL_DIRECTCOLOR) {
+		((u32 *) info->pseudo_palette)[regno] =
+			(regno << info->var.red.offset) |
+			(regno << info->var.green.offset) |
+			(regno << info->var.blue.offset);
+		/*
+		 * The Riva128 2D engine requires color information in
+		 * TrueColor format even if framebuffer is in DirectColor
+		 */
+		if (par->riva.Architecture == NV_ARCH_03) {
+			switch (info->var.bits_per_pixel) {
+			case 16:
+				par->palette[regno] = ((red & 0xf800) >> 1) |
+					((green & 0xf800) >> 6) |
+					((blue & 0xf800) >> 11);
+				break;
+			case 32:
+				par->palette[regno] = ((red & 0xff00) << 8) |
+					((green & 0xff00)) |
+					((blue & 0xff00) >> 8);
+				break;
+			}
+		}
 	}
 
 	switch (info->var.bits_per_pixel) {
@@ -1243,45 +1365,27 @@ static int rivafb_setcolreg(unsigned regno, unsigned red, unsigned green,
 		break;
 	case 16:
 		if (info->var.green.length == 5) {
-			if (regno < 16) {
-				/* 0rrrrrgg gggbbbbb */
-				((u32 *)info->pseudo_palette)[regno] =
-					((red & 0xf800) >> 1) |
-					((green & 0xf800) >> 6) |
-					((blue & 0xf800) >> 11);
-			}
-			for (i = 0; i < 8; i++) 
+			for (i = 0; i < 8; i++) {
 				riva_wclut(chip, regno*8+i, red >> 8,
 					   green >> 8, blue >> 8);
+			}
 		} else {
 			u8 r, g, b;
 
-			if (regno < 16) {
-				/* rrrrrggg gggbbbbb */
-				((u32 *)info->pseudo_palette)[regno] =
-					((red & 0xf800) >> 0) |
-					((green & 0xf800) >> 5) |
-					((blue & 0xf800) >> 11);
-			}
 			if (regno < 32) {
 				for (i = 0; i < 8; i++) {
-					riva_wclut(chip, regno*8+i, red >> 8, 
-						   green >> 8, blue >> 8);
+					riva_wclut(chip, regno*8+i,
+						   red >> 8, green >> 8,
+						   blue >> 8);
 				}
 			}
-			for (i = 0; i < 4; i++) {
-				riva_rclut(chip, regno*2+i, &r, &g, &b);
-				riva_wclut(chip, regno*4+i, r, green >> 8, b);
-			}
+			riva_rclut(chip, regno*4, &r, &g, &b);
+			for (i = 0; i < 4; i++)
+				riva_wclut(chip, regno*4+i, r,
+					   green >> 8, b);
 		}
 		break;
 	case 32:
-		if (regno < 16) {
-			((u32 *)info->pseudo_palette)[regno] =
-				((red & 0xff00) << 8) |
-				((green & 0xff00)) | ((blue & 0xff00) >> 8);
-			
-		}
 		riva_wclut(chip, regno, red >> 8, green >> 8, blue >> 8);
 		break;
 	default:
@@ -1305,13 +1409,22 @@ static int rivafb_setcolreg(unsigned regno, unsigned red, unsigned green,
  */
 static void rivafb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
+	struct riva_par *par = info->par;
 	u_int color, rop = 0;
+
+	if ((info->flags & FBINFO_HWACCEL_DISABLED)) {
+		cfb_fillrect(info, rect);
+		return;
+	}
 
 	if (info->var.bits_per_pixel == 8)
 		color = rect->color;
-	else
-		color = ((u32 *)info->pseudo_palette)[rect->color];
+	else {
+		if (par->riva.Architecture != NV_ARCH_03)
+			color = ((u32 *)info->pseudo_palette)[rect->color];
+		else
+			color = par->palette[rect->color];
+	}
 
 	switch (rect->rop) {
 	case ROP_XOR:
@@ -1323,19 +1436,20 @@ static void rivafb_fillrect(struct fb_info *info, const struct fb_fillrect *rect
 		break;
 	}
 
-	RIVA_FIFO_FREE(par->riva, Rop, 1);
-	par->riva.Rop->Rop3 = rop;
+	riva_set_rop_solid(par, rop);
 
 	RIVA_FIFO_FREE(par->riva, Bitmap, 1);
-	par->riva.Bitmap->Color1A = color;
+	NV_WR32(&par->riva.Bitmap->Color1A, 0, color);
 
 	RIVA_FIFO_FREE(par->riva, Bitmap, 2);
-	par->riva.Bitmap->UnclippedRectangle[0].TopLeft =
-			(rect->dx << 16) | rect->dy;
-	par->riva.Bitmap->UnclippedRectangle[0].WidthHeight =
-			(rect->width << 16) | rect->height;
-	RIVA_FIFO_FREE(par->riva, Rop, 1);
-	par->riva.Rop->Rop3 = 0xCC;	// back to COPY
+	NV_WR32(&par->riva.Bitmap->UnclippedRectangle[0].TopLeft, 0,
+		(rect->dx << 16) | rect->dy);
+	mb();
+	NV_WR32(&par->riva.Bitmap->UnclippedRectangle[0].WidthHeight, 0,
+		(rect->width << 16) | rect->height);
+	mb();
+	riva_set_rop_solid(par, 0xcc);
+
 }
 
 /**
@@ -1351,21 +1465,31 @@ static void rivafb_fillrect(struct fb_info *info, const struct fb_fillrect *rect
  */
 static void rivafb_copyarea(struct fb_info *info, const struct fb_copyarea *region)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
+	struct riva_par *par = info->par;
+
+	if ((info->flags & FBINFO_HWACCEL_DISABLED)) {
+		cfb_copyarea(info, region);
+		return;
+	}
 
 	RIVA_FIFO_FREE(par->riva, Blt, 3);
-	par->riva.Blt->TopLeftSrc  = (region->sy << 16) | region->sx;
-	par->riva.Blt->TopLeftDst  = (region->dy << 16) | region->dx;
-	par->riva.Blt->WidthHeight = (region->height << 16) | region->width;
-	wait_for_idle(par);
+	NV_WR32(&par->riva.Blt->TopLeftSrc, 0,
+		(region->sy << 16) | region->sx);
+	NV_WR32(&par->riva.Blt->TopLeftDst, 0,
+		(region->dy << 16) | region->dx);
+	mb();
+	NV_WR32(&par->riva.Blt->WidthHeight, 0,
+		(region->height << 16) | region->width);
+	mb();
 }
 
 static inline void convert_bgcolor_16(u32 *col)
 {
-	*col = ((*col & 0x00007C00) << 9)
-		| ((*col & 0x000003E0) << 6)
+	*col = ((*col & 0x0000F800) << 8)
+		| ((*col & 0x00007E0) << 5)
 		| ((*col & 0x0000001F) << 3)
 		|	   0xFF000000;
+	mb();
 }
 
 /**
@@ -1387,13 +1511,13 @@ static inline void convert_bgcolor_16(u32 *col)
 static void rivafb_imageblit(struct fb_info *info, 
 			     const struct fb_image *image)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
+	struct riva_par *par = info->par;
 	u32 fgx = 0, bgx = 0, width, tmp;
 	u8 *cdat = (u8 *) image->data;
-	volatile u32 *d;
+	volatile u32 __iomem *d;
 	int i, size;
 
-	if (image->depth != 1) {
+	if ((info->flags & FBINFO_HWACCEL_DISABLED) || image->depth != 1) {
 		cfb_imageblit(info, image);
 		return;
 	}
@@ -1404,31 +1528,33 @@ static void rivafb_imageblit(struct fb_info *info,
 		bgx = image->bg_color;
 		break;
 	case 16:
-		fgx = ((u32 *)info->pseudo_palette)[image->fg_color];
-		bgx = ((u32 *)info->pseudo_palette)[image->bg_color];
+	case 32:
+		if (par->riva.Architecture != NV_ARCH_03) {
+			fgx = ((u32 *)info->pseudo_palette)[image->fg_color];
+			bgx = ((u32 *)info->pseudo_palette)[image->bg_color];
+		} else {
+			fgx = par->palette[image->fg_color];
+			bgx = par->palette[image->bg_color];
+		}
 		if (info->var.green.length == 6)
 			convert_bgcolor_16(&bgx);	
-		break;
-	case 32:
-		fgx = ((u32 *)info->pseudo_palette)[image->fg_color];
-		bgx = ((u32 *)info->pseudo_palette)[image->bg_color];
 		break;
 	}
 
 	RIVA_FIFO_FREE(par->riva, Bitmap, 7);
-	par->riva.Bitmap->ClipE.TopLeft     = 
-		(image->dy << 16) | (image->dx & 0xFFFF);
-	par->riva.Bitmap->ClipE.BottomRight = 
+	NV_WR32(&par->riva.Bitmap->ClipE.TopLeft, 0,
+		(image->dy << 16) | (image->dx & 0xFFFF));
+	NV_WR32(&par->riva.Bitmap->ClipE.BottomRight, 0,
 		(((image->dy + image->height) << 16) |
-		 ((image->dx + image->width) & 0xffff));
-	par->riva.Bitmap->Color0E           = bgx;
-	par->riva.Bitmap->Color1E           = fgx;
-	par->riva.Bitmap->WidthHeightInE    = 
-		(image->height << 16) | ((image->width + 31) & ~31);
-	par->riva.Bitmap->WidthHeightOutE   = 
-		(image->height << 16) | ((image->width + 31) & ~31);
-	par->riva.Bitmap->PointE            = 
-		(image->dy << 16) | (image->dx & 0xFFFF);
+		 ((image->dx + image->width) & 0xffff)));
+	NV_WR32(&par->riva.Bitmap->Color0E, 0, bgx);
+	NV_WR32(&par->riva.Bitmap->Color1E, 0, fgx);
+	NV_WR32(&par->riva.Bitmap->WidthHeightInE, 0,
+		(image->height << 16) | ((image->width + 31) & ~31));
+	NV_WR32(&par->riva.Bitmap->WidthHeightOutE, 0,
+		(image->height << 16) | ((image->width + 31) & ~31));
+	NV_WR32(&par->riva.Bitmap->PointE, 0,
+		(image->dy << 16) | (image->dx & 0xFFFF));
 
 	d = &par->riva.Bitmap->MonochromeData01E;
 
@@ -1437,18 +1563,20 @@ static void rivafb_imageblit(struct fb_info *info,
 	while (size >= 16) {
 		RIVA_FIFO_FREE(par->riva, Bitmap, 16);
 		for (i = 0; i < 16; i++) {
-			tmp = *((u32 *)cdat)++;
+			tmp = *((u32 *)cdat);
+			cdat = (u8 *)((u32 *)cdat + 1);
 			reverse_order(&tmp);
-			d[i] = tmp;
+			NV_WR32(d, i*4, tmp);
 		}
 		size -= 16;
 	}
 	if (size) {
 		RIVA_FIFO_FREE(par->riva, Bitmap, size);
 		for (i = 0; i < size; i++) {
-			tmp = *((u32 *) cdat)++;
+			tmp = *((u32 *) cdat);
+			cdat = (u8 *)((u32 *)cdat + 1);
 			reverse_order(&tmp);
-			d[i] = tmp;
+			NV_WR32(d, i*4, tmp);
 		}
 	}
 }
@@ -1468,86 +1596,91 @@ static void rivafb_imageblit(struct fb_info *info,
  */
 static int rivafb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
+	struct riva_par *par = info->par;
 	u8 data[MAX_CURS * MAX_CURS/8];
-	u8 mask[MAX_CURS * MAX_CURS/8];
+	int i, set = cursor->set;
 	u16 fg, bg;
-	int i;
+
+	if (cursor->image.width > MAX_CURS || cursor->image.height > MAX_CURS)
+		return -ENXIO;
 
 	par->riva.ShowHideCursor(&par->riva, 0);
 
-	if (cursor->set & FB_CUR_SETPOS) {
+	if (par->cursor_reset) {
+		set = FB_CUR_SETALL;
+		par->cursor_reset = 0;
+	}
+
+	if (set & FB_CUR_SETSIZE)
+		memset_io(par->riva.CURSOR, 0, MAX_CURS * MAX_CURS * 2);
+
+	if (set & FB_CUR_SETPOS) {
 		u32 xx, yy, temp;
 
-		info->cursor.image.dx = cursor->image.dx;
-		info->cursor.image.dy = cursor->image.dy;
 		yy = cursor->image.dy - info->var.yoffset;
 		xx = cursor->image.dx - info->var.xoffset;
 		temp = xx & 0xFFFF;
 		temp |= yy << 16;
 
-		par->riva.PRAMDAC[0x0000300/4] = temp;
+		NV_WR32(par->riva.PRAMDAC, 0x0000300, temp);
 	}
 
-	if (cursor->set & FB_CUR_SETSIZE) {
-		info->cursor.image.height = cursor->image.height;
-		info->cursor.image.width = cursor->image.width;
-		memset_io(par->riva.CURSOR, 0, MAX_CURS * MAX_CURS * 2);
-	}
 
-	if (cursor->set & FB_CUR_SETCMAP) {
-		info->cursor.image.bg_color = cursor->image.bg_color;
-		info->cursor.image.fg_color = cursor->image.fg_color;
-	}
-
-	if (cursor->set & (FB_CUR_SETSHAPE | FB_CUR_SETCMAP)) {
-		u32 bg_idx = info->cursor.image.bg_color;
-		u32 fg_idx = info->cursor.image.fg_color;
-		u32 s_pitch = (info->cursor.image.width+7) >> 3;
+	if (set & (FB_CUR_SETSHAPE | FB_CUR_SETCMAP | FB_CUR_SETIMAGE)) {
+		u32 bg_idx = cursor->image.bg_color;
+		u32 fg_idx = cursor->image.fg_color;
+		u32 s_pitch = (cursor->image.width+7) >> 3;
 		u32 d_pitch = MAX_CURS/8;
 		u8 *dat = (u8 *) cursor->image.data;
-		u8 *msk = (u8 *) info->cursor.mask;
-		u8 src[64];	
+		u8 *msk = (u8 *) cursor->mask;
+		u8 *src;
 		
-		switch (info->cursor.rop) {
-		case ROP_XOR:
-			for (i = 0; i < s_pitch * info->cursor.image.height; i++)
+		src = kmalloc(s_pitch * cursor->image.height, GFP_ATOMIC);
+
+		if (src) {
+			switch (cursor->rop) {
+			case ROP_XOR:
+				for (i = 0; i < s_pitch * cursor->image.height; i++)
 					src[i] = dat[i] ^ msk[i];
-			break;
-		case ROP_COPY:
-		default:
-			for (i = 0; i < s_pitch * info->cursor.image.height; i++)
-				
+				break;
+			case ROP_COPY:
+			default:
+				for (i = 0; i < s_pitch * cursor->image.height; i++)
 					src[i] = dat[i] & msk[i];
-			break;
+				break;
+			}
+
+			fb_pad_aligned_buffer(data, d_pitch, src, s_pitch,
+						cursor->image.height);
+
+			bg = ((info->cmap.red[bg_idx] & 0xf8) << 7) |
+				((info->cmap.green[bg_idx] & 0xf8) << 2) |
+				((info->cmap.blue[bg_idx] & 0xf8) >> 3) |
+				1 << 15;
+
+			fg = ((info->cmap.red[fg_idx] & 0xf8) << 7) |
+				((info->cmap.green[fg_idx] & 0xf8) << 2) |
+				((info->cmap.blue[fg_idx] & 0xf8) >> 3) |
+				1 << 15;
+
+			par->riva.LockUnlock(&par->riva, 0);
+
+			rivafb_load_cursor_image(par, data, bg, fg,
+						 cursor->image.width,
+						 cursor->image.height);
+			kfree(src);
 		}
-		
-		move_buf_aligned(info, data, src, d_pitch, s_pitch, info->cursor.image.height);
-
-		move_buf_aligned(info, mask, msk, d_pitch, s_pitch, info->cursor.image.height);
-
-		bg = ((info->cmap.red[bg_idx] & 0xf8) << 7) |
-		     ((info->cmap.green[bg_idx] & 0xf8) << 2) |
-		     ((info->cmap.blue[bg_idx] & 0xf8) >> 3);
-
-		fg = ((info->cmap.red[fg_idx] & 0xf8) << 7) |
-		     ((info->cmap.green[fg_idx] & 0xf8) << 2) |
-		     ((info->cmap.blue[fg_idx] & 0xf8) >> 3);
-
-		par->riva.LockUnlock(&par->riva, 0);
-
-		rivafb_load_cursor_image(par, data, mask, bg, fg,
-					 info->cursor.image.width, 
-					 info->cursor.image.height);
 	}
-	if (info->cursor.enable)
+
+	if (cursor->enable)
 		par->riva.ShowHideCursor(&par->riva, 1);
+
 	return 0;
 }
 
 static int rivafb_sync(struct fb_info *info)
 {
-	struct riva_par *par = (struct riva_par *)info->par;
+	struct riva_par *par = info->par;
 
 	wait_for_idle(par);
 	return 0;
@@ -1578,145 +1711,158 @@ static struct fb_ops riva_fb_ops = {
 
 static int __devinit riva_set_fbinfo(struct fb_info *info)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
 	unsigned int cmap_len;
+	struct riva_par *par = info->par;
 
-	info->flags = FBINFO_FLAG_DEFAULT;
+	NVTRACE_ENTER();
+	info->flags = FBINFO_DEFAULT
+		    | FBINFO_HWACCEL_XPAN
+		    | FBINFO_HWACCEL_YPAN
+		    | FBINFO_HWACCEL_COPYAREA
+		    | FBINFO_HWACCEL_FILLRECT
+	            | FBINFO_HWACCEL_IMAGEBLIT;
+
+	/* Accel seems to not work properly on NV30 yet...*/
+	if ((par->riva.Architecture == NV_ARCH_30) || noaccel) {
+	    	printk(KERN_DEBUG PFX "disabling acceleration\n");
+  		info->flags |= FBINFO_HWACCEL_DISABLED;
+	}
+
 	info->var = rivafb_default_var;
-	info->fix = rivafb_fix;
-	info->fbops = &riva_fb_ops;
-	info->pseudo_palette = pseudo_palette;
+	info->fix.visual = (info->var.bits_per_pixel == 8) ?
+				FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_DIRECTCOLOR;
 
-#ifndef MODULE
-	if (mode_option)
-		fb_find_mode(&info->var, info, mode_option,
-			     NULL, 0, NULL, 8);
-#endif
-	if (par->use_default_var)
-		/* We will use the modified default var */
-		info->var = rivafb_default_var;
+	info->pseudo_palette = par->pseudo_palette;
 
 	cmap_len = riva_get_cmap_len(&info->var);
 	fb_alloc_cmap(&info->cmap, cmap_len, 0);	
 
-	info->pixmap.size = 64 * 1024;
+	info->pixmap.size = 8 * 1024;
 	info->pixmap.buf_align = 4;
-	info->pixmap.scan_align = 4;
+	info->pixmap.access_align = 32;
 	info->pixmap.flags = FB_PIXMAP_SYSTEM;
-	return 0;
+	info->var.yres_virtual = -1;
+	NVTRACE_LEAVE();
+	return (rivafb_check_var(&info->var, info));
 }
 
 #ifdef CONFIG_PPC_OF
-static int riva_get_EDID_OF(struct riva_par *par, struct pci_dev *pd)
+static int __devinit riva_get_EDID_OF(struct fb_info *info, struct pci_dev *pd)
 {
+	struct riva_par *par = info->par;
 	struct device_node *dp;
-	unsigned char *pedid = NULL;
+	const unsigned char *pedid = NULL;
+	const unsigned char *disptype = NULL;
+	static char *propnames[] = {
+		"DFP,EDID", "LCD,EDID", "EDID", "EDID1", "EDID,B", "EDID,A", NULL };
+	int i;
 
+	NVTRACE_ENTER();
 	dp = pci_device_to_OF_node(pd);
-	pedid = (unsigned char *)get_property(dp, "EDID,B", 0);
-
-	if (pedid) {
-		par->EDID = pedid;
-		return 1;
-	} else
-		return 0;
+	for (; dp != NULL; dp = dp->child) {
+		disptype = of_get_property(dp, "display-type", NULL);
+		if (disptype == NULL)
+			continue;
+		if (strncmp(disptype, "LCD", 3) != 0)
+			continue;
+		for (i = 0; propnames[i] != NULL; ++i) {
+			pedid = of_get_property(dp, propnames[i], NULL);
+			if (pedid != NULL) {
+				par->EDID = (unsigned char *)pedid;
+				NVTRACE("LCD found.\n");
+				return 1;
+			}
+		}
+	}
+	NVTRACE_LEAVE();
+	return 0;
 }
 #endif /* CONFIG_PPC_OF */
 
-static int riva_dfp_parse_EDID(struct riva_par *par)
+#if defined(CONFIG_FB_RIVA_I2C) && !defined(CONFIG_PPC_OF)
+static int __devinit riva_get_EDID_i2c(struct fb_info *info)
 {
-	unsigned char *block = par->EDID;
+	struct riva_par *par = info->par;
+	struct fb_var_screeninfo var;
+	int i;
 
-	if (!block)
-		return 0;
-
-	/* jump to detailed timing block section */
-	block += 54;
-
-	par->clock = (block[0] + (block[1] << 8));
-	par->panel_xres = (block[2] + ((block[4] & 0xf0) << 4));
-	par->hblank = (block[3] + ((block[4] & 0x0f) << 8));
-	par->panel_yres = (block[5] + ((block[7] & 0xf0) << 4));
-	par->vblank = (block[6] + ((block[7] & 0x0f) << 8));
-	par->hOver_plus = (block[8] + ((block[11] & 0xc0) << 2));
-	par->hSync_width = (block[9] + ((block[11] & 0x30) << 4));
-	par->vOver_plus = ((block[10] >> 4) + ((block[11] & 0x0c) << 2));
-	par->vSync_width = ((block[10] & 0x0f) + ((block[11] & 0x03) << 4));
-	par->interlaced = ((block[17] & 0x80) >> 7);
-	par->synct = ((block[17] & 0x18) >> 3);
-	par->misc = ((block[17] & 0x06) >> 1);
-	par->hAct_high = par->vAct_high = 0;
-	if (par->synct == 3) {
-		if (par->misc & 2)
-			par->hAct_high = 1;
-		if (par->misc & 1)
-			par->vAct_high = 1;
+	NVTRACE_ENTER();
+	riva_create_i2c_busses(par);
+	for (i = 0; i < 3; i++) {
+		if (!par->chan[i].par)
+			continue;
+		riva_probe_i2c_connector(par, i, &par->EDID);
+		if (par->EDID && !fb_parse_edid(par->EDID, &var)) {
+			printk(PFX "Found EDID Block from BUS %i\n", i);
+			break;
+		}
 	}
 
-	printk(KERN_INFO PFX
-			"detected DFP panel size from EDID: %dx%d\n", 
-			par->panel_xres, par->panel_yres);
-	par->got_dfpinfo = 1;
-	return 1;
+	NVTRACE_LEAVE();
+	return (par->EDID) ? 1 : 0;
 }
+#endif /* CONFIG_FB_RIVA_I2C */
 
-static void riva_update_default_var(struct fb_info *info)
+static void __devinit riva_update_default_var(struct fb_var_screeninfo *var,
+					      struct fb_info *info)
 {
-	struct fb_var_screeninfo *var = &rivafb_default_var;
-	struct riva_par *par = (struct riva_par *) info->par;
+	struct fb_monspecs *specs = &info->monspecs;
+	struct fb_videomode modedb;
 
-        var->xres = par->panel_xres;
-        var->yres = par->panel_yres;
-        var->xres_virtual = par->panel_xres;
-        var->yres_virtual = par->panel_yres;
-        var->xoffset = var->yoffset = 0;
-        var->bits_per_pixel = 8;
-        var->pixclock = 100000000 / par->clock;
-        var->left_margin = (par->hblank - par->hOver_plus - par->hSync_width);
-        var->right_margin = par->hOver_plus;
-        var->upper_margin = (par->vblank - par->vOver_plus - par->vSync_width);
-        var->lower_margin = par->vOver_plus;
-        var->hsync_len = par->hSync_width;
-        var->vsync_len = par->vSync_width;
-        var->sync = 0;
+	NVTRACE_ENTER();
+	/* respect mode options */
+	if (mode_option) {
+		fb_find_mode(var, info, mode_option,
+			     specs->modedb, specs->modedb_len,
+			     NULL, 8);
+	} else if (specs->modedb != NULL) {
+		/* get preferred timing */
+		if (info->monspecs.misc & FB_MISC_1ST_DETAIL) {
+			int i;
 
-        if (par->synct == 3) {
-                if (par->hAct_high)
-                        var->sync |= FB_SYNC_HOR_HIGH_ACT;
-                if (par->vAct_high)
-                        var->sync |= FB_SYNC_VERT_HIGH_ACT;
-        }
- 
-        var->vmode = 0;
-        if (par->interlaced)
-                var->vmode |= FB_VMODE_INTERLACED;
-
-	var->accel_flags |= FB_ACCELF_TEXT;
-        
-        par->use_default_var = 1;
+			for (i = 0; i < specs->modedb_len; i++) {
+				if (specs->modedb[i].flag & FB_MODE_IS_FIRST) {
+					modedb = specs->modedb[i];
+					break;
+				}
+			}
+		} else {
+			/* otherwise, get first mode in database */
+			modedb = specs->modedb[0];
+		}
+		var->bits_per_pixel = 8;
+		riva_update_var(var, &modedb);
+	}
+	NVTRACE_LEAVE();
 }
 
 
-static void riva_get_EDID(struct fb_info *info, struct pci_dev *pdev)
+static void __devinit riva_get_EDID(struct fb_info *info, struct pci_dev *pdev)
 {
+	NVTRACE_ENTER();
 #ifdef CONFIG_PPC_OF
 	if (!riva_get_EDID_OF(info, pdev))
-		printk("rivafb: could not retrieve EDID from OF\n");
-#else
-	/* XXX use other methods later */
+		printk(PFX "could not retrieve EDID from OF\n");
+#elif defined(CONFIG_FB_RIVA_I2C)
+	if (!riva_get_EDID_i2c(info))
+		printk(PFX "could not retrieve EDID from DDC/I2C\n");
 #endif
+	NVTRACE_LEAVE();
 }
 
 
-static void riva_get_dfpinfo(struct fb_info *info)
+static void __devinit riva_get_edidinfo(struct fb_info *info)
 {
-	struct riva_par *par = (struct riva_par *) info->par;
+	struct fb_var_screeninfo *var = &rivafb_default_var;
+	struct riva_par *par = info->par;
 
-	if (riva_dfp_parse_EDID(par))
-		riva_update_default_var(info);
+	fb_edid_to_monspecs(par->EDID, &info->monspecs);
+	fb_videomode_to_modelist(info->monspecs.modedb, info->monspecs.modedb_len,
+				 &info->modelist);
+	riva_update_default_var(var, info);
 
 	/* if user specified flatpanel, we respect that */
-	if (par->got_dfpinfo == 1)
+	if (info->monspecs.input & FB_DISP_DDI)
 		par->FlatPanel = 1;
 }
 
@@ -1726,38 +1872,100 @@ static void riva_get_dfpinfo(struct fb_info *info)
  *
  * ------------------------------------------------------------------------- */
 
+static u32 __devinit riva_get_arch(struct pci_dev *pd)
+{
+    	u32 arch = 0;
+
+	switch (pd->device & 0x0ff0) {
+		case 0x0100:   /* GeForce 256 */
+		case 0x0110:   /* GeForce2 MX */
+		case 0x0150:   /* GeForce2 */
+		case 0x0170:   /* GeForce4 MX */
+		case 0x0180:   /* GeForce4 MX (8x AGP) */
+		case 0x01A0:   /* nForce */
+		case 0x01F0:   /* nForce2 */
+		     arch =  NV_ARCH_10;
+		     break;
+		case 0x0200:   /* GeForce3 */
+		case 0x0250:   /* GeForce4 Ti */
+		case 0x0280:   /* GeForce4 Ti (8x AGP) */
+		     arch =  NV_ARCH_20;
+		     break;
+		case 0x0300:   /* GeForceFX 5800 */
+		case 0x0310:   /* GeForceFX 5600 */
+		case 0x0320:   /* GeForceFX 5200 */
+		case 0x0330:   /* GeForceFX 5900 */
+		case 0x0340:   /* GeForceFX 5700 */
+		     arch =  NV_ARCH_30;
+		     break;
+		case 0x0020:   /* TNT, TNT2 */
+		     arch =  NV_ARCH_04;
+		     break;
+		case 0x0010:   /* Riva128 */
+		     arch =  NV_ARCH_03;
+		     break;
+		default:   /* unknown architecture */
+		     break;
+	}
+	return arch;
+}
+
 static int __devinit rivafb_probe(struct pci_dev *pd,
 			     	const struct pci_device_id *ent)
 {
-	struct riva_chip_info *rci = &riva_chip_info[ent->driver_data];
 	struct riva_par *default_par;
 	struct fb_info *info;
+	int ret;
 
+	NVTRACE_ENTER();
 	assert(pd != NULL);
-	assert(rci != NULL);
 
-	info = kmalloc(sizeof(struct fb_info), GFP_KERNEL);
-	if (!info)
-		goto err_out;
+	info = framebuffer_alloc(sizeof(struct riva_par), &pd->dev);
+	if (!info) {
+		printk (KERN_ERR PFX "could not allocate memory\n");
+		ret = -ENOMEM;
+		goto err_ret;
+	}
+	default_par = info->par;
+	default_par->pdev = pd;
 
-	default_par = kmalloc(sizeof(struct riva_par), GFP_KERNEL);
-	if (!default_par)
-		goto err_out_kfree;
+	info->pixmap.addr = kzalloc(8 * 1024, GFP_KERNEL);
+	if (info->pixmap.addr == NULL) {
+	    	ret = -ENOMEM;
+		goto err_framebuffer_release;
+	}
 
-	memset(info, 0, sizeof(struct fb_info));
-	memset(default_par, 0, sizeof(struct riva_par));
+	ret = pci_enable_device(pd);
+	if (ret < 0) {
+		printk(KERN_ERR PFX "cannot enable PCI device\n");
+		goto err_free_pixmap;
+	}
 
-	info->pixmap.addr = kmalloc(64 * 1024, GFP_KERNEL);
-	if (info->pixmap.addr == NULL)
-		goto err_out_kfree1;
-	memset(info->pixmap.addr, 0, 64 * 1024);
+	ret = pci_request_regions(pd, "rivafb");
+	if (ret < 0) {
+		printk(KERN_ERR PFX "cannot request PCI regions\n");
+		goto err_disable_device;
+	}
 
-	strcat(rivafb_fix.id, rci->name);
-	default_par->riva.Architecture = rci->arch_rev;
+	mutex_init(&default_par->open_lock);
+	default_par->riva.Architecture = riva_get_arch(pd);
 
 	default_par->Chipset = (pd->vendor << 16) | pd->device;
 	printk(KERN_INFO PFX "nVidia device/chipset %X\n",default_par->Chipset);
 	
+	if(default_par->riva.Architecture == 0) {
+		printk(KERN_ERR PFX "unknown NV_ARCH\n");
+		ret=-ENODEV;
+		goto err_release_region;
+	}
+	if(default_par->riva.Architecture == NV_ARCH_10 ||
+	   default_par->riva.Architecture == NV_ARCH_20 ||
+	   default_par->riva.Architecture == NV_ARCH_30) {
+		sprintf(rivafb_fix.id, "NV%x", (pd->device & 0x0ff0) >> 4);
+	} else {
+		sprintf(rivafb_fix.id, "NV%x", default_par->riva.Architecture);
+	}
+
 	default_par->FlatPanel = flatpanel;
 	if (flatpanel == 1)
 		printk(KERN_INFO PFX "flatpanel support enabled\n");
@@ -1778,24 +1986,13 @@ static int __devinit rivafb_probe(struct pci_dev *pd,
 	rivafb_fix.mmio_start = pci_resource_start(pd, 0);
 	rivafb_fix.smem_start = pci_resource_start(pd, 1);
 
-	if (!request_mem_region(rivafb_fix.mmio_start,
-				rivafb_fix.mmio_len, "rivafb")) {
-		printk(KERN_ERR PFX "cannot reserve MMIO region\n");
-		goto err_out_kfree2;
-	}
-
 	default_par->ctrl_base = ioremap(rivafb_fix.mmio_start,
 					 rivafb_fix.mmio_len);
 	if (!default_par->ctrl_base) {
 		printk(KERN_ERR PFX "cannot ioremap MMIO base\n");
-		goto err_out_free_base0;
+		ret = -EIO;
+		goto err_release_region;
 	}
-
-	info->par = default_par;
-
-	riva_get_EDID(info, pd);
-
-	riva_get_dfpinfo(info);
 
 	switch (default_par->riva.Architecture) {
 	case NV_ARCH_03:
@@ -1803,47 +2000,38 @@ static int __devinit rivafb_probe(struct pci_dev *pd,
 		 * Since these cards were never made with more than 8 megabytes
 		 * we can safely allocate this separately.
 		 */
-		if (!request_mem_region(rivafb_fix.smem_start + 0x00C00000,
-					 0x00008000, "rivafb")) {
-			printk(KERN_ERR PFX "cannot reserve PRAMIN region\n");
-			goto err_out_iounmap_ctrl;
-		}
 		default_par->riva.PRAMIN = ioremap(rivafb_fix.smem_start + 0x00C00000, 0x00008000);
 		if (!default_par->riva.PRAMIN) {
 			printk(KERN_ERR PFX "cannot ioremap PRAMIN region\n");
-			goto err_out_free_nv3_pramin;
+			ret = -EIO;
+			goto err_iounmap_ctrl_base;
 		}
-		rivafb_fix.accel = FB_ACCEL_NV3;
 		break;
 	case NV_ARCH_04:
 	case NV_ARCH_10:
 	case NV_ARCH_20:
-		default_par->riva.PCRTC0 = (unsigned *)(default_par->ctrl_base + 0x00600000);
-		default_par->riva.PRAMIN = (unsigned *)(default_par->ctrl_base + 0x00710000);
-		rivafb_fix.accel = FB_ACCEL_NV4;
+	case NV_ARCH_30:
+		default_par->riva.PCRTC0 =
+			(u32 __iomem *)(default_par->ctrl_base + 0x00600000);
+		default_par->riva.PRAMIN =
+			(u32 __iomem *)(default_par->ctrl_base + 0x00710000);
 		break;
 	}
-
 	riva_common_setup(default_par);
 
 	if (default_par->riva.Architecture == NV_ARCH_03) {
-		default_par->riva.PCRTC = default_par->riva.PCRTC0 = default_par->riva.PGRAPH;
+		default_par->riva.PCRTC = default_par->riva.PCRTC0
+		                        = default_par->riva.PGRAPH;
 	}
 
 	rivafb_fix.smem_len = riva_get_memlen(default_par) * 1024;
 	default_par->dclk_max = riva_get_maxdclk(default_par) * 1000;
-
-	if (!request_mem_region(rivafb_fix.smem_start,
-				rivafb_fix.smem_len, "rivafb")) {
-		printk(KERN_ERR PFX "cannot reserve FB region\n");
-		goto err_out_iounmap_nv3_pramin;
-	}
-	
 	info->screen_base = ioremap(rivafb_fix.smem_start,
 				    rivafb_fix.smem_len);
 	if (!info->screen_base) {
 		printk(KERN_ERR PFX "cannot ioremap FB base\n");
-		goto err_out_free_base1;
+		ret = -EIO;
+		goto err_iounmap_pramin;
 	}
 
 #ifdef CONFIG_MTRR
@@ -1861,61 +2049,79 @@ static int __devinit rivafb_probe(struct pci_dev *pd,
 	}
 #endif /* CONFIG_MTRR */
 
-	if (riva_set_fbinfo(info) < 0) {
+	info->fbops = &riva_fb_ops;
+	info->fix = rivafb_fix;
+	riva_get_EDID(info, pd);
+	riva_get_edidinfo(info);
+
+	ret=riva_set_fbinfo(info);
+	if (ret < 0) {
 		printk(KERN_ERR PFX "error setting initial video mode\n");
-		goto err_out_iounmap_fb;
+		goto err_iounmap_screen_base;
 	}
 
-	if (register_framebuffer(info) < 0) {
-		printk(KERN_ERR PFX
-			"error registering riva framebuffer\n");
-		goto err_out_iounmap_fb;
-	}
+	fb_destroy_modedb(info->monspecs.modedb);
+	info->monspecs.modedb = NULL;
 
 	pci_set_drvdata(pd, info);
 
+	if (backlight)
+		riva_bl_init(info->par);
+
+	ret = register_framebuffer(info);
+	if (ret < 0) {
+		printk(KERN_ERR PFX
+			"error registering riva framebuffer\n");
+		goto err_iounmap_screen_base;
+	}
+
 	printk(KERN_INFO PFX
-		"PCI nVidia NV%x framebuffer ver %s (%s, %dMB @ 0x%lX)\n",
-		default_par->riva.Architecture,
-		RIVAFB_VERSION,
+		"PCI nVidia %s framebuffer ver %s (%dMB @ 0x%lX)\n",
 		info->fix.id,
+		RIVAFB_VERSION,
 		info->fix.smem_len / (1024 * 1024),
 		info->fix.smem_start);
+
+	NVTRACE_LEAVE();
 	return 0;
 
-err_out_iounmap_fb:
+err_iounmap_screen_base:
+#ifdef CONFIG_FB_RIVA_I2C
+	riva_delete_i2c_busses(info->par);
+#endif
 	iounmap(info->screen_base);
-err_out_free_base1:
-	release_mem_region(rivafb_fix.smem_start, rivafb_fix.smem_len);
-err_out_iounmap_nv3_pramin:
+err_iounmap_pramin:
 	if (default_par->riva.Architecture == NV_ARCH_03) 
-		iounmap((caddr_t)default_par->riva.PRAMIN);
-err_out_free_nv3_pramin:
-	if (default_par->riva.Architecture == NV_ARCH_03)
-		release_mem_region(rivafb_fix.smem_start + 0x00C00000, 0x00008000);
-err_out_iounmap_ctrl:
+		iounmap(default_par->riva.PRAMIN);
+err_iounmap_ctrl_base:
 	iounmap(default_par->ctrl_base);
-err_out_free_base0:
-	release_mem_region(rivafb_fix.mmio_start, rivafb_fix.mmio_len);
-err_out_kfree2:
+err_release_region:
+	pci_release_regions(pd);
+err_disable_device:
+err_free_pixmap:
 	kfree(info->pixmap.addr);
-err_out_kfree1:
-	kfree(default_par);
-err_out_kfree:
-	kfree(info);
-err_out:
-	return -ENODEV;
+err_framebuffer_release:
+	framebuffer_release(info);
+err_ret:
+	return ret;
 }
 
-static void __exit rivafb_remove(struct pci_dev *pd)
+static void __devexit rivafb_remove(struct pci_dev *pd)
 {
 	struct fb_info *info = pci_get_drvdata(pd);
-	struct riva_par *par = (struct riva_par *) info->par;
+	struct riva_par *par = info->par;
 	
-	if (!info)
-		return;
+	NVTRACE_ENTER();
+
+#ifdef CONFIG_FB_RIVA_I2C
+	riva_delete_i2c_busses(par);
+	kfree(par->EDID);
+#endif
 
 	unregister_framebuffer(info);
+
+	riva_bl_exit(info);
+
 #ifdef CONFIG_MTRR
 	if (par->mtrr.vram_valid)
 		mtrr_del(par->mtrr.vram, info->fix.smem_start,
@@ -1924,20 +2130,13 @@ static void __exit rivafb_remove(struct pci_dev *pd)
 
 	iounmap(par->ctrl_base);
 	iounmap(info->screen_base);
-
-	release_mem_region(info->fix.mmio_start,
-			   info->fix.mmio_len);
-	release_mem_region(info->fix.smem_start,
-			   info->fix.smem_len);
-
-	if (par->riva.Architecture == NV_ARCH_03) {
-		iounmap((caddr_t)par->riva.PRAMIN);
-		release_mem_region(info->fix.smem_start + 0x00C00000, 0x00008000);
-	}
+	if (par->riva.Architecture == NV_ARCH_03)
+		iounmap(par->riva.PRAMIN);
+	pci_release_regions(pd);
 	kfree(info->pixmap.addr);
-	kfree(par);
-	kfree(info);
+	framebuffer_release(info);
 	pci_set_drvdata(pd, NULL);
+	NVTRACE_LEAVE();
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1947,10 +2146,11 @@ static void __exit rivafb_remove(struct pci_dev *pd)
  * ------------------------------------------------------------------------- */
 
 #ifndef MODULE
-int __init rivafb_setup(char *options)
+static int __devinit rivafb_setup(char *options)
 {
 	char *this_opt;
 
+	NVTRACE_ENTER();
 	if (!options || !*options)
 		return 0;
 
@@ -1965,13 +2165,20 @@ int __init rivafb_setup(char *options)
 				forceCRTC = -1;
 		} else if (!strncmp(this_opt, "flatpanel", 9)) {
 			flatpanel = 1;
+		} else if (!strncmp(this_opt, "backlight:", 10)) {
+			backlight = simple_strtoul(this_opt+10, NULL, 0);
 #ifdef CONFIG_MTRR
 		} else if (!strncmp(this_opt, "nomtrr", 6)) {
 			nomtrr = 1;
 #endif
+		} else if (!strncmp(this_opt, "strictmode", 10)) {
+			strictmode = 1;
+		} else if (!strncmp(this_opt, "noaccel", 7)) {
+			noaccel = 1;
 		} else
 			mode_option = this_opt;
 	}
+	NVTRACE_LEAVE();
 	return 0;
 }
 #endif /* !MODULE */
@@ -1980,7 +2187,7 @@ static struct pci_driver rivafb_driver = {
 	.name		= "rivafb",
 	.id_table	= rivafb_pci_tbl,
 	.probe		= rivafb_probe,
-	.remove		= __exit_p(rivafb_remove),
+	.remove		= __devexit_p(rivafb_remove),
 };
 
 
@@ -1991,34 +2198,40 @@ static struct pci_driver rivafb_driver = {
  *
  * ------------------------------------------------------------------------- */
 
-int __init rivafb_init(void)
+static int __devinit rivafb_init(void)
 {
-	if (pci_register_driver(&rivafb_driver) > 0)
-		return 0;
-	pci_unregister_driver(&rivafb_driver);
-	return -ENODEV;
+#ifndef MODULE
+	char *option = NULL;
+
+	if (fb_get_options("rivafb", &option))
+		return -ENODEV;
+	rivafb_setup(option);
+#endif
+	return pci_register_driver(&rivafb_driver);
 }
 
 
-#ifdef MODULE
+module_init(rivafb_init);
+
 static void __exit rivafb_exit(void)
 {
 	pci_unregister_driver(&rivafb_driver);
 }
 
-module_init(rivafb_init);
 module_exit(rivafb_exit);
 
-MODULE_PARM(flatpanel, "i");
+module_param(noaccel, bool, 0);
+MODULE_PARM_DESC(noaccel, "bool: disable acceleration");
+module_param(flatpanel, int, 0);
 MODULE_PARM_DESC(flatpanel, "Enables experimental flat panel support for some chipsets. (0 or 1=enabled) (default=0)");
-MODULE_PARM(forceCRTC, "i");
+module_param(forceCRTC, int, 0);
 MODULE_PARM_DESC(forceCRTC, "Forces usage of a particular CRTC in case autodetection fails. (0 or 1) (default=autodetect)");
-
 #ifdef CONFIG_MTRR
-MODULE_PARM(nomtrr, "i");
+module_param(nomtrr, bool, 0);
 MODULE_PARM_DESC(nomtrr, "Disables MTRR support (0 or 1=disabled) (default=0)");
 #endif
-#endif /* MODULE */
+module_param(strictmode, bool, 0);
+MODULE_PARM_DESC(strictmode, "Only use video modes from EDID");
 
 MODULE_AUTHOR("Ani Joshi, maintainer");
 MODULE_DESCRIPTION("Framebuffer driver for nVidia Riva 128, TNT, TNT2, and the GeForce series");

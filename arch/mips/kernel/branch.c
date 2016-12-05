@@ -11,6 +11,8 @@
 #include <linux/signal.h>
 #include <asm/branch.h>
 #include <asm/cpu.h>
+#include <asm/cpu-features.h>
+#include <asm/fpu.h>
 #include <asm/inst.h>
 #include <asm/ptrace.h>
 #include <asm/uaccess.h>
@@ -20,7 +22,8 @@
  */
 int __compute_return_epc(struct pt_regs *regs)
 {
-	unsigned int *addr, bit, fcr31;
+	unsigned int __user *addr;
+	unsigned int bit, fcr31, dspcontrol;
 	long epc;
 	union mips_instruction insn;
 
@@ -31,13 +34,12 @@ int __compute_return_epc(struct pt_regs *regs)
 	/*
 	 * Read the instruction
 	 */
-	addr = (unsigned int *) epc;
+	addr = (unsigned int __user *) epc;
 	if (__get_user(insn.word, addr)) {
 		force_sig(SIGSEGV, current);
 		return -EFAULT;
 	}
 
-	regs->regs[0] = 0;
 	switch (insn.i_format.opcode) {
 	/*
 	 * jr and jalr are in r_format format.
@@ -94,6 +96,18 @@ int __compute_return_epc(struct pt_regs *regs)
 			if ((long)regs->regs[insn.i_format.rs] >= 0)
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
 			else
+				epc += 8;
+			regs->cp0_epc = epc;
+			break;
+		case bposge32_op:
+			if (!cpu_has_dsp)
+				goto sigill;
+
+			dspcontrol = rddsp(0x01);
+
+			if (dspcontrol >= 32) {
+				epc = epc + 4 + (insn.i_format.simmediate << 2);
+			} else
 				epc += 8;
 			regs->cp0_epc = epc;
 			break;
@@ -160,14 +174,17 @@ int __compute_return_epc(struct pt_regs *regs)
 	 * And now the FPA/cp1 branch instructions.
 	 */
 	case cop1_op:
-		if (!cpu_has_fpu)
-			fcr31 = current->thread.fpu.soft.fcr31;
-		else
+		preempt_disable();
+		if (is_fpu_owner())
 			asm volatile("cfc1\t%0,$31" : "=r" (fcr31));
+		else
+			fcr31 = current->thread.fpu.fcr31;
+		preempt_enable();
+
 		bit = (insn.i_format.rt >> 2);
 		bit += (bit != 0);
 		bit += 23;
-		switch (insn.i_format.rt) {
+		switch (insn.i_format.rt & 3) {
 		case 0:	/* bc1f */
 		case 2:	/* bc1fl */
 			if (~fcr31 & (1 << bit))
@@ -187,12 +204,50 @@ int __compute_return_epc(struct pt_regs *regs)
 			break;
 		}
 		break;
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
+	case lwc2_op: /* This is bbit0 on Octeon */
+		if ((regs->regs[insn.i_format.rs] & (1ull<<insn.i_format.rt))
+		     == 0)
+			epc = epc + 4 + (insn.i_format.simmediate << 2);
+		else
+			epc += 8;
+		regs->cp0_epc = epc;
+		break;
+	case ldc2_op: /* This is bbit032 on Octeon */
+		if ((regs->regs[insn.i_format.rs] &
+		    (1ull<<(insn.i_format.rt+32))) == 0)
+			epc = epc + 4 + (insn.i_format.simmediate << 2);
+		else
+			epc += 8;
+		regs->cp0_epc = epc;
+		break;
+	case swc2_op: /* This is bbit1 on Octeon */
+		if (regs->regs[insn.i_format.rs] & (1ull<<insn.i_format.rt))
+			epc = epc + 4 + (insn.i_format.simmediate << 2);
+		else
+			epc += 8;
+		regs->cp0_epc = epc;
+		break;
+	case sdc2_op: /* This is bbit132 on Octeon */
+		if (regs->regs[insn.i_format.rs] &
+		    (1ull<<(insn.i_format.rt+32)))
+			epc = epc + 4 + (insn.i_format.simmediate << 2);
+		else
+			epc += 8;
+		regs->cp0_epc = epc;
+		break;
+#endif
 	}
 
 	return 0;
 
 unaligned:
 	printk("%s: unaligned epc - sending SIGBUS.\n", current->comm);
+	force_sig(SIGBUS, current);
+	return -EFAULT;
+
+sigill:
+	printk("%s: DSP branch but not DSP ASE - sending SIGBUS.\n", current->comm);
 	force_sig(SIGBUS, current);
 	return -EFAULT;
 }

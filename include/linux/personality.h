@@ -1,6 +1,8 @@
 #ifndef _LINUX_PERSONALITY_H
 #define _LINUX_PERSONALITY_H
 
+#ifdef __KERNEL__
+
 /*
  * Handling of different ABIs (personalities).
  */
@@ -10,18 +12,9 @@ struct pt_regs;
 
 extern int		register_exec_domain(struct exec_domain *);
 extern int		unregister_exec_domain(struct exec_domain *);
-extern int		__set_personality(unsigned long);
+extern int		__set_personality(unsigned int);
 
-
-/*
- * Sysctl variables related to binary emulation.
- */
-extern unsigned long abi_defhandler_coff;
-extern unsigned long abi_defhandler_elf;
-extern unsigned long abi_defhandler_lcall7;
-extern unsigned long abi_defhandler_libcso;
-extern int abi_fake_utsname;
-
+#endif /* __KERNEL__ */
 
 /*
  * Flags for bug emulation.
@@ -29,13 +22,28 @@ extern int abi_fake_utsname;
  * These occupy the top three bytes.
  */
 enum {
+	ADDR_NO_RANDOMIZE = 	0x0040000,	/* disable randomization of VA space */
+	FDPIC_FUNCPTRS =	0x0080000,	/* userspace function ptrs point to descriptors
+						 * (signal handling)
+						 */
 	MMAP_PAGE_ZERO =	0x0100000,
+	ADDR_COMPAT_LAYOUT =	0x0200000,
+	READ_IMPLIES_EXEC =	0x0400000,
 	ADDR_LIMIT_32BIT =	0x0800000,
 	SHORT_INODE =		0x1000000,
 	WHOLE_SECONDS =		0x2000000,
 	STICKY_TIMEOUTS	=	0x4000000,
 	ADDR_LIMIT_3GB = 	0x8000000,
 };
+
+/*
+ * Security-relevant compatibility flags that must be
+ * cleared upon setuid or setgid exec:
+ */
+#define PER_CLEAR_ON_SETID (READ_IMPLIES_EXEC  | \
+			    ADDR_NO_RANDOMIZE  | \
+			    ADDR_COMPAT_LAYOUT | \
+			    MMAP_PAGE_ZERO)
 
 /*
  * Personality types.
@@ -46,6 +54,7 @@ enum {
 enum {
 	PER_LINUX =		0x0000,
 	PER_LINUX_32BIT =	0x0000 | ADDR_LIMIT_32BIT,
+	PER_LINUX_FDPIC =	0x0000 | FDPIC_FUNCPTRS,
 	PER_SVR4 =		0x0001 | STICKY_TIMEOUTS | MMAP_PAGE_ZERO,
 	PER_SVR3 =		0x0002 | STICKY_TIMEOUTS | SHORT_INODE,
 	PER_SCOSVR3 =		0x0003 | STICKY_TIMEOUTS |
@@ -69,6 +78,7 @@ enum {
 	PER_MASK =		0x00ff,
 };
 
+#ifdef __KERNEL__
 
 /*
  * Description of an execution domain.
@@ -98,15 +108,13 @@ struct exec_domain {
  */
 #define personality(pers)	(pers & PER_MASK)
 
-/*
- * Personality of the currently running process.
- */
-#define get_personality		(current->personality)
 
 /*
  * Change personality of the currently running process.
  */
 #define set_personality(pers) \
-	((current->personality == pers) ? 0 : __set_personality(pers))
+	((current->personality == (pers)) ? 0 : __set_personality(pers))
+
+#endif /* __KERNEL__ */
 
 #endif /* _LINUX_PERSONALITY_H */

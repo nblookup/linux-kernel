@@ -8,12 +8,10 @@
  *  Copyright (C) 2000-2002 David McCullough <davidm@snapgear.com>
  */
 
-#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include <asm/setup.h>
@@ -25,12 +23,14 @@
 
 #undef DEBUG
 
+#define VIRT_OFFSET (0x01000000)
+
 /*
  * Map some physical address range into the kernel address space.
  */
 void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 {
-	return (void *)physaddr;
+	return (void *)(physaddr + VIRT_OFFSET);
 }
 
 /*

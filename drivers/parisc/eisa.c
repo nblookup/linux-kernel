@@ -29,11 +29,10 @@
 
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/irq.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/eisa.h>
 
@@ -44,6 +43,7 @@
 #include <asm/parisc-device.h>
 #include <asm/delay.h>
 #include <asm/eisa_bus.h>
+#include <asm/eisa_eeprom.h>
 
 #if 0
 #define EISA_DBG(msg, arg... ) printk(KERN_DEBUG "eisa: " msg , ## arg )
@@ -54,7 +54,9 @@
 #define SNAKES_EEPROM_BASE_ADDR 0xF0810400
 #define MIRAGE_EEPROM_BASE_ADDR 0xF00C0400
 
-static spinlock_t eisa_irq_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(eisa_irq_lock);
+
+void __iomem *eisa_eeprom_addr __read_mostly;
 
 /* We can only have one EISA adapter in the system because neither
  * implementation can be flexed.
@@ -116,6 +118,16 @@ void eisa_out32(unsigned int data, unsigned short port)
 		gsc_writel(cpu_to_le32(data), eisa_permute(port));
 }
 
+#ifndef CONFIG_PCI
+/* We call these directly without PCI.  See asm/io.h. */
+EXPORT_SYMBOL(eisa_in8);
+EXPORT_SYMBOL(eisa_in16);
+EXPORT_SYMBOL(eisa_in32);
+EXPORT_SYMBOL(eisa_out8);
+EXPORT_SYMBOL(eisa_out16);
+EXPORT_SYMBOL(eisa_out32);
+#endif
+
 /* Interrupt handling */
 
 /* cached interrupt mask registers */
@@ -128,12 +140,13 @@ static int slave_mask;
  * in the furure. 
  */
 /* irq 13,8,2,1,0 must be edge */
-static unsigned int eisa_irq_level; /* default to edge triggered */
+static unsigned int eisa_irq_level __read_mostly; /* default to edge triggered */
 
 
 /* called by free irq */
-static void eisa_disable_irq(void *irq_dev, int irq)
+static void eisa_mask_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 	unsigned long flags;
 
 	EISA_DBG("disable irq %d\n", irq);
@@ -152,8 +165,9 @@ static void eisa_disable_irq(void *irq_dev, int irq)
 }
 
 /* called by request irq */
-static void eisa_enable_irq(void *irq_dev, int irq)
+static void eisa_unmask_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 	unsigned long flags;
 	EISA_DBG("enable irq %d\n", irq);
 		
@@ -170,52 +184,14 @@ static void eisa_enable_irq(void *irq_dev, int irq)
 	EISA_DBG("pic1 mask %02x\n", eisa_in8(0xa1));
 }
 
-static void eisa_mask_irq(void *irq_dev, int irq)
-{
-	unsigned long flags;
-	EISA_DBG("mask irq %d\n", irq);
-	
-        /* mask irq */
-	spin_lock_irqsave(&eisa_irq_lock, flags);
-	if (irq & 8) {
-		slave_mask |= (1 << (irq&7));
-		eisa_out8(slave_mask, 0xa1);
-	} else {
-		master_mask |= (1 << (irq&7));
-		eisa_out8(master_mask, 0x21);
-	}
-	spin_unlock_irqrestore(&eisa_irq_lock, flags);
-}
-
-static void eisa_unmask_irq(void *irq_dev, int irq)
-{
-	unsigned long flags;
-	EISA_DBG("unmask irq %d\n", irq);
-        
-	/* unmask */
-	spin_lock_irqsave(&eisa_irq_lock, flags);
-	if (irq & 8) {
-		slave_mask &= ~(1 << (irq&7));
-		eisa_out8(slave_mask, 0xa1);
-	} else {
-		master_mask &= ~(1 << (irq&7));
-		eisa_out8(master_mask, 0x21);
-	}
-	spin_unlock_irqrestore(&eisa_irq_lock, flags);
-}
-
-static struct irqaction action[IRQ_PER_REGION];
-
-/* EISA needs to be fixed at IRQ region #0 (EISA_IRQ_REGION) */
-static struct irq_region eisa_irq_region = {
-	.ops	= { eisa_disable_irq, eisa_enable_irq, eisa_mask_irq, eisa_unmask_irq },
-	.data	= { .name = "EISA", .irqbase = 0 },
-	.action	= action,
+static struct irq_chip eisa_interrupt_type = {
+	.name		=	"EISA",
+	.irq_unmask	=	eisa_unmask_irq,
+	.irq_mask	=	eisa_mask_irq,
 };
 
-static irqreturn_t eisa_irq(int _, void *intr_dev, struct pt_regs *regs)
+static irqreturn_t eisa_irq(int wax_irq, void *intr_dev)
 {
-	extern void do_irq(struct irqaction *a, int i, struct pt_regs *p);
 	int irq = gsc_readb(0xfc01f000); /* EISA supports 16 irqs */
 	unsigned long flags;
         
@@ -249,8 +225,7 @@ static irqreturn_t eisa_irq(int _, void *intr_dev, struct pt_regs *regs)
 	}
 	spin_unlock_irqrestore(&eisa_irq_lock, flags);
 
-   
-	do_irq(&eisa_irq_region.action[irq], EISA_IRQ_REGION + irq, regs);
+	generic_handle_irq(irq);
    
 	spin_lock_irqsave(&eisa_irq_lock, flags);
 	/* unmask */
@@ -265,11 +240,16 @@ static irqreturn_t eisa_irq(int _, void *intr_dev, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t dummy_irq2_handler(int _, void *dev, struct pt_regs *regs)
+static irqreturn_t dummy_irq2_handler(int _, void *dev)
 {
 	printk(KERN_ALERT "eisa: uhh, irq2?\n");
 	return IRQ_HANDLED;
 }
+
+static struct irqaction irq2_action = {
+	.handler = dummy_irq2_handler,
+	.name = "cascade",
+};
 
 static void init_eisa_pic(void)
 {
@@ -319,14 +299,14 @@ static void init_eisa_pic(void)
 
 #define is_mongoose(dev) (dev->id.sversion == 0x00076)
 
-static int __devinit eisa_probe(struct parisc_device *dev)
+static int __init eisa_probe(struct parisc_device *dev)
 {
-	int result;
+	int i, result;
 
 	char *name = is_mongoose(dev) ? "Mongoose" : "Wax";
 
 	printk(KERN_INFO "%s EISA Adapter found at 0x%08lx\n", 
-		name, dev->hpa);
+		name, (unsigned long)dev->hpa.start);
 
 	eisa_dev.hba.dev = dev;
 	eisa_dev.hba.iommu = ccio_get_iommu(dev);
@@ -351,20 +331,21 @@ static int __devinit eisa_probe(struct parisc_device *dev)
 	}
 	pcibios_register_hba(&eisa_dev.hba);
 
-	result = request_irq(dev->irq, eisa_irq, SA_SHIRQ, "EISA", NULL);
+	result = request_irq(dev->irq, eisa_irq, IRQF_SHARED, "EISA", &eisa_dev);
 	if (result) {
 		printk(KERN_ERR "EISA: request_irq failed!\n");
 		return result;
 	}
 	
 	/* Reserve IRQ2 */
-	action[2].handler = dummy_irq2_handler;
-	action[2].name = "cascade";
-	
-	eisa_irq_region.data.dev = dev;
-	irq_region[0] = &eisa_irq_region;
+	setup_irq(2, &irq2_action);
+	for (i = 0; i < 16; i++) {
+		irq_set_chip_and_handler(i, &eisa_interrupt_type,
+					 handle_simple_irq);
+	}
 	
 	EISA_bus = 1;
+
 	if (dev->num_addrs) {
 		/* newer firmware hand out the eeprom address */
 		eisa_dev.eeprom_addr = dev->addr[0];
@@ -376,14 +357,15 @@ static int __devinit eisa_probe(struct parisc_device *dev)
 			eisa_dev.eeprom_addr = MIRAGE_EEPROM_BASE_ADDR;
 		}
 	}
-	eisa_eeprom_init(eisa_dev.eeprom_addr);
-	result = eisa_enumerator(eisa_dev.eeprom_addr, &eisa_dev.hba.io_space, &eisa_dev.hba.lmmio_space);
+	eisa_eeprom_addr = ioremap_nocache(eisa_dev.eeprom_addr, HPEE_MAX_LENGTH);
+	result = eisa_enumerator(eisa_dev.eeprom_addr, &eisa_dev.hba.io_space,
+			&eisa_dev.hba.lmmio_space);
 	init_eisa_pic();
 
 	if (result >= 0) {
 		/* FIXME : Don't enumerate the bus twice. */
 		eisa_dev.root.dev = &dev->dev;
-		dev->dev.driver_data = &eisa_dev.root;
+		dev_set_drvdata(&dev->dev, &eisa_dev.root);
 		eisa_dev.root.bus_base_addr = 0;
 		eisa_dev.root.res = &eisa_dev.hba.io_space;
 		eisa_dev.root.slots = result;
@@ -397,7 +379,7 @@ static int __devinit eisa_probe(struct parisc_device *dev)
 	return 0;
 }
 
-static struct parisc_device_id eisa_tbl[] = {
+static const struct parisc_device_id eisa_tbl[] = {
 	{ HPHW_BA, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x00076 }, /* Mongoose */
 	{ HPHW_BA, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x00090 }, /* Wax EISA */
 	{ 0, }
@@ -406,7 +388,7 @@ static struct parisc_device_id eisa_tbl[] = {
 MODULE_DEVICE_TABLE(parisc, eisa_tbl);
 
 static struct parisc_driver eisa_driver = {
-	.name =		"EISA Bus Adapter",
+	.name =		"eisa_ba",
 	.id_table =	eisa_tbl,
 	.probe =	eisa_probe,
 };

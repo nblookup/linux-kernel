@@ -8,7 +8,6 @@
 #ifndef _SUNHME_H
 #define _SUNHME_H
 
-#include <linux/config.h>
 #include <linux/pci.h>
 
 /* Happy Meal global registers. */
@@ -224,7 +223,7 @@
 /* BigMac receive config register. */
 #define BIGMAC_RXCFG_ENABLE   0x00000001 /* Enable the receiver             */
 #define BIGMAC_RXCFG_PSTRIP   0x00000020 /* Pad byte strip enable           */
-#define BIGMAC_RXCFG_PMISC    0x00000040 /* Enable promiscous mode          */
+#define BIGMAC_RXCFG_PMISC    0x00000040 /* Enable promiscuous mode          */
 #define BIGMAC_RXCFG_DERR     0x00000080 /* Disable error checking          */
 #define BIGMAC_RXCFG_DCRCS    0x00000100 /* Disable CRC stripping           */
 #define BIGMAC_RXCFG_REJME    0x00000200 /* Reject packets addressed to me  */
@@ -303,9 +302,11 @@
  * Always write the address first before setting the ownership
  * bits to avoid races with the hardware scanning the ring.
  */
+typedef u32 __bitwise__ hme32;
+
 struct happy_meal_rxd {
-	u32 rx_flags;
-	u32 rx_addr;
+	hme32 rx_flags;
+	hme32 rx_addr;
 };
 
 #define RXFLAG_OWN         0x80000000 /* 1 = hardware, 0 = software */
@@ -314,8 +315,8 @@ struct happy_meal_rxd {
 #define RXFLAG_CSUM        0x0000ffff /* HW computed checksum       */
 
 struct happy_meal_txd {
-	u32 tx_flags;
-	u32 tx_addr;
+	hme32 tx_flags;
+	hme32 tx_addr;
 };
 
 #define TXFLAG_OWN         0x80000000 /* 1 = hardware, 0 = software */
@@ -397,20 +398,18 @@ struct quattro;
 
 /* Happy happy, joy joy! */
 struct happy_meal {
-	unsigned long	gregs;			/* Happy meal global registers       */
+	void __iomem	*gregs;			/* Happy meal global registers       */
 	struct hmeal_init_block  *happy_block;	/* RX and TX descriptors (CPU addr)  */
 
 #if defined(CONFIG_SBUS) && defined(CONFIG_PCI)
-	u32 (*read_desc32)(u32 *);
+	u32 (*read_desc32)(hme32 *);
 	void (*write_txd)(struct happy_meal_txd *, u32, u32);
 	void (*write_rxd)(struct happy_meal_rxd *, u32, u32);
-	u32 (*dma_map)(void *, void *, long, int);
-	void (*dma_unmap)(void *, u32, long, int);
-	void (*dma_sync)(void *, u32, long, int);
 #endif
 
-	/* This is either a sbus_dev or a pci_dev. */
+	/* This is either an platform_device or a pci_dev. */
 	void			  *happy_dev;
+	struct device		  *dma_dev;
 
 	spinlock_t		  happy_lock;
 
@@ -422,14 +421,14 @@ struct happy_meal {
 	struct net_device_stats	  net_stats;      /* Statistical counters              */
 
 #if defined(CONFIG_SBUS) && defined(CONFIG_PCI)
-	u32 (*read32)(unsigned long);
-	void (*write32)(unsigned long, u32);
+	u32 (*read32)(void __iomem *);
+	void (*write32)(void __iomem *, u32);
 #endif
 
-	unsigned long	etxregs;        /* External transmitter regs         */
-	unsigned long	erxregs;        /* External receiver regs            */
-	unsigned long	bigmacregs;     /* BIGMAC core regs		     */
-	unsigned long	tcvregs;        /* MIF transceiver regs              */
+	void __iomem	*etxregs;        /* External transmitter regs        */
+	void __iomem	*erxregs;        /* External receiver regs           */
+	void __iomem	*bigmacregs;     /* BIGMAC core regs		     */
+	void __iomem	*tcvregs;        /* MIF transceiver regs             */
 
 	dma_addr_t                hblock_dvma;    /* DVMA visible address happy block  */
 	unsigned int              happy_flags;    /* Driver state flags                */
@@ -460,7 +459,6 @@ struct happy_meal {
 	struct net_device	 *dev;		/* Backpointer                       */
 	struct quattro		 *qfe_parent;	/* For Quattro cards                 */
 	int			  qfe_ent;	/* Which instance on quattro         */
-	struct happy_meal         *next_module;
 };
 
 /* Here are the happy flags. */

@@ -9,10 +9,12 @@
  */
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/bootmem.h>
 #include <linux/spinlock.h>
+#include <linux/gfp.h>
 #include <asm/mipsregs.h>
 #include <asm/jazz.h>
 #include <asm/io.h>
@@ -26,9 +28,9 @@
  */
 #define CONF_DEBUG_VDMA 0
 
-static unsigned long vdma_pagetable_start;
+static VDMA_PGTBL_ENTRY *pgtbl;
 
-static spinlock_t vdma_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(vdma_lock);
 
 /*
  * Debug stuff
@@ -45,7 +47,6 @@ static int debuglvl = 3;
  */
 static inline void vdma_pgtbl_init(void)
 {
-	VDMA_PGTBL_ENTRY *pgtbl = (VDMA_PGTBL_ENTRY *) vdma_pagetable_start;
 	unsigned long paddr = 0;
 	int i;
 
@@ -59,30 +60,30 @@ static inline void vdma_pgtbl_init(void)
 /*
  * Initialize the Jazz R4030 dma controller
  */
-void __init vdma_init(void)
+static int __init vdma_init(void)
 {
 	/*
 	 * Allocate 32k of memory for DMA page tables.  This needs to be page
 	 * aligned and should be uncached to avoid cache flushing after every
 	 * update.
 	 */
-	vdma_pagetable_start = alloc_bootmem_low_pages(VDMA_PGTBL_SIZE);
-	if (!vdma_pagetable_start)
-		BUG();
-	dma_cache_wback_inv(vdma_pagetable_start, VDMA_PGTBL_SIZE);
-	vdma_pagetable_start = KSEG1ADDR(vdma_pagetable_start);
+	pgtbl = (VDMA_PGTBL_ENTRY *)__get_free_pages(GFP_KERNEL | GFP_DMA,
+						    get_order(VDMA_PGTBL_SIZE));
+	BUG_ON(!pgtbl);
+	dma_cache_wback_inv((unsigned long)pgtbl, VDMA_PGTBL_SIZE);
+	pgtbl = (VDMA_PGTBL_ENTRY *)KSEG1ADDR(pgtbl);
 
 	/*
 	 * Clear the R4030 translation table
 	 */
 	vdma_pgtbl_init();
 
-	r4030_write_reg32(JAZZ_R4030_TRSTBL_BASE,
-			  PHYSADDR(vdma_pagetable_start));
+	r4030_write_reg32(JAZZ_R4030_TRSTBL_BASE, CPHYSADDR(pgtbl));
 	r4030_write_reg32(JAZZ_R4030_TRSTBL_LIM, VDMA_PGTBL_SIZE);
 	r4030_write_reg32(JAZZ_R4030_TRSTBL_INV, 0);
 
-	printk("VDMA: R4030 DMA pagetables initialized.\n");
+	printk(KERN_INFO "VDMA: R4030 DMA pagetables initialized.\n");
+	return 0;
 }
 
 /*
@@ -90,7 +91,6 @@ void __init vdma_init(void)
  */
 unsigned long vdma_alloc(unsigned long paddr, unsigned long size)
 {
-	VDMA_PGTBL_ENTRY *entry = (VDMA_PGTBL_ENTRY *) vdma_pagetable_start;
 	int first, last, pages, frame, i;
 	unsigned long laddr, flags;
 
@@ -112,10 +112,10 @@ unsigned long vdma_alloc(unsigned long paddr, unsigned long size)
 	/*
 	 * Find free chunk
 	 */
-	pages = (size + 4095) >> 12;	/* no. of pages to allocate */
+	pages = VDMA_PAGE(paddr + size) - VDMA_PAGE(paddr) + 1;
 	first = 0;
 	while (1) {
-		while (entry[first].owner != VDMA_PAGE_EMPTY &&
+		while (pgtbl[first].owner != VDMA_PAGE_EMPTY &&
 		       first < VDMA_PGTBL_ENTRIES) first++;
 		if (first + pages > VDMA_PGTBL_ENTRIES) {	/* nothing free */
 			spin_unlock_irqrestore(&vdma_lock, flags);
@@ -123,12 +123,13 @@ unsigned long vdma_alloc(unsigned long paddr, unsigned long size)
 		}
 
 		last = first + 1;
-		while (entry[last].owner == VDMA_PAGE_EMPTY
+		while (pgtbl[last].owner == VDMA_PAGE_EMPTY
 		       && last - first < pages)
 			last++;
 
 		if (last - first == pages)
 			break;	/* found */
+		first = last + 1;
 	}
 
 	/*
@@ -138,8 +139,8 @@ unsigned long vdma_alloc(unsigned long paddr, unsigned long size)
 	frame = paddr & ~(VDMA_PAGESIZE - 1);
 
 	for (i = first; i < last; i++) {
-		entry[i].frame = frame;
-		entry[i].owner = laddr;
+		pgtbl[i].frame = frame;
+		pgtbl[i].owner = laddr;
 		frame += VDMA_PAGESIZE;
 	}
 
@@ -158,10 +159,10 @@ unsigned long vdma_alloc(unsigned long paddr, unsigned long size)
 			printk("%08x ", i << 12);
 		printk("\nPADDR: ");
 		for (i = first; i < last; i++)
-			printk("%08x ", entry[i].frame);
+			printk("%08x ", pgtbl[i].frame);
 		printk("\nOWNER: ");
 		for (i = first; i < last; i++)
-			printk("%08x ", entry[i].owner);
+			printk("%08x ", pgtbl[i].owner);
 		printk("\n");
 	}
 
@@ -170,6 +171,8 @@ unsigned long vdma_alloc(unsigned long paddr, unsigned long size)
 	return laddr;
 }
 
+EXPORT_SYMBOL(vdma_alloc);
+
 /*
  * Free previously allocated dma translation pages
  * Note that this does NOT change the translation table,
@@ -177,7 +180,6 @@ unsigned long vdma_alloc(unsigned long paddr, unsigned long size)
  */
 int vdma_free(unsigned long laddr)
 {
-	VDMA_PGTBL_ENTRY *pgtbl = (VDMA_PGTBL_ENTRY *) vdma_pagetable_start;
 	int i;
 
 	i = laddr >> 12;
@@ -189,7 +191,7 @@ int vdma_free(unsigned long laddr)
 		return -1;
 	}
 
-	while (pgtbl[i].owner == laddr && i < VDMA_PGTBL_ENTRIES) {
+	while (i < VDMA_PGTBL_ENTRIES && pgtbl[i].owner == laddr) {
 		pgtbl[i].owner = VDMA_PAGE_EMPTY;
 		i++;
 	}
@@ -201,15 +203,15 @@ int vdma_free(unsigned long laddr)
 	return 0;
 }
 
+EXPORT_SYMBOL(vdma_free);
+
 /*
  * Map certain page(s) to another physical address.
  * Caller must have allocated the page(s) before.
  */
 int vdma_remap(unsigned long laddr, unsigned long paddr, unsigned long size)
 {
-	VDMA_PGTBL_ENTRY *pgtbl =
-	    (VDMA_PGTBL_ENTRY *) vdma_pagetable_start;
-	int first, pages, npages;
+	int first, pages;
 
 	if (laddr > 0xffffff) {
 		if (vdma_debug)
@@ -226,8 +228,7 @@ int vdma_remap(unsigned long laddr, unsigned long paddr, unsigned long size)
 		return -EINVAL;	/* invalid physical address */
 	}
 
-	npages = pages =
-	    (((paddr & (VDMA_PAGESIZE - 1)) + size) >> 12) + 1;
+	pages = (((paddr & (VDMA_PAGESIZE - 1)) + size) >> 12) + 1;
 	first = laddr >> 12;
 	if (vdma_debug)
 		printk("vdma_remap: first=%x, pages=%x\n", first, pages);
@@ -283,8 +284,6 @@ unsigned long vdma_phys2log(unsigned long paddr)
 {
 	int i;
 	int frame;
-	VDMA_PGTBL_ENTRY *pgtbl =
-	    (VDMA_PGTBL_ENTRY *) vdma_pagetable_start;
 
 	frame = paddr & ~(VDMA_PAGESIZE - 1);
 
@@ -299,16 +298,17 @@ unsigned long vdma_phys2log(unsigned long paddr)
 	return (i << 12) + (paddr & (VDMA_PAGESIZE - 1));
 }
 
+EXPORT_SYMBOL(vdma_phys2log);
+
 /*
  * Translate a logical DMA address to a physical address
  */
 unsigned long vdma_log2phys(unsigned long laddr)
 {
-	VDMA_PGTBL_ENTRY *pgtbl =
-	    (VDMA_PGTBL_ENTRY *) vdma_pagetable_start;
-
 	return pgtbl[laddr >> 12].frame + (laddr & (VDMA_PAGESIZE - 1));
 }
+
+EXPORT_SYMBOL(vdma_log2phys);
 
 /*
  * Print DMA statistics
@@ -387,6 +387,8 @@ void vdma_enable(int channel)
 			  R4030_CHNL_ENABLE);
 }
 
+EXPORT_SYMBOL(vdma_enable);
+
 /*
  * Disable a DMA channel
  */
@@ -421,6 +423,8 @@ void vdma_disable(int channel)
 	 */
 	*((volatile unsigned int *) JAZZ_DUMMY_DEVICE);
 }
+
+EXPORT_SYMBOL(vdma_disable);
 
 /*
  * Set DMA mode. This function accepts the mode values used
@@ -489,6 +493,8 @@ void vdma_set_mode(int channel, int mode)
 	}
 }
 
+EXPORT_SYMBOL(vdma_set_mode);
+
 /*
  * Set Transfer Address
  */
@@ -501,6 +507,8 @@ void vdma_set_addr(int channel, long addr)
 	r4030_write_reg32(JAZZ_R4030_CHNL_ADDR + (channel << 5), addr);
 }
 
+EXPORT_SYMBOL(vdma_set_addr);
+
 /*
  * Set Transfer Count
  */
@@ -512,6 +520,8 @@ void vdma_set_count(int channel, int count)
 
 	r4030_write_reg32(JAZZ_R4030_CHNL_COUNT + (channel << 5), count);
 }
+
+EXPORT_SYMBOL(vdma_set_count);
 
 /*
  * Get Residual
@@ -544,3 +554,5 @@ int vdma_get_enable(int channel)
 
 	return enable;
 }
+
+arch_initcall(vdma_init);

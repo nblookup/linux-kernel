@@ -11,11 +11,11 @@
 #include <linux/device.h>
 #include <linux/init.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/irq.h>
 #include <asm/signal.h>
-#include <asm/arch/assabet.h>
+#include <mach/assabet.h>
 
 #include "sa1100_generic.h"
 
@@ -25,23 +25,23 @@ static struct pcmcia_irqs irqs[] = {
 	{ 1, ASSABET_IRQ_GPIO_CF_BVD1, "CF BVD1" },
 };
 
-static int assabet_pcmcia_hw_init(struct sa1100_pcmcia_socket *skt)
+static int assabet_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 {
-	skt->irq = ASSABET_IRQ_GPIO_CF_IRQ;
+	skt->socket.pci_irq = ASSABET_IRQ_GPIO_CF_IRQ;
 
-	return sa11xx_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	return soc_pcmcia_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
 /*
  * Release all resources.
  */
-static void assabet_pcmcia_hw_shutdown(struct sa1100_pcmcia_socket *skt)
+static void assabet_pcmcia_hw_shutdown(struct soc_pcmcia_socket *skt)
 {
-	sa11xx_free_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	soc_pcmcia_free_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
 static void
-assabet_pcmcia_socket_state(struct sa1100_pcmcia_socket *skt, struct pcmcia_state *state)
+assabet_pcmcia_socket_state(struct soc_pcmcia_socket *skt, struct pcmcia_state *state)
 {
 	unsigned long levels = GPLR;
 
@@ -55,7 +55,7 @@ assabet_pcmcia_socket_state(struct sa1100_pcmcia_socket *skt, struct pcmcia_stat
 }
 
 static int
-assabet_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt, const socket_state_t *state)
+assabet_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state_t *state)
 {
 	unsigned int mask;
 
@@ -66,14 +66,14 @@ assabet_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt, const socket_s
 
 	case 50:
 		printk(KERN_WARNING "%s(): CS asked for 5V, applying 3.3V...\n",
-			__FUNCTION__);
+			__func__);
 
 	case 33:  /* Can only apply 3.3V to the CF slot. */
 		mask = ASSABET_BCR_CF_PWR;
 		break;
 
 	default:
-		printk(KERN_ERR "%s(): unrecognized Vcc %u\n", __FUNCTION__,
+		printk(KERN_ERR "%s(): unrecognized Vcc %u\n", __func__,
 			state->Vcc);
 		return -1;
 	}
@@ -93,22 +93,22 @@ assabet_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt, const socket_s
  * be called at initialisation, power management event, or
  * pcmcia event.
  */
-static void assabet_pcmcia_socket_init(struct sa1100_pcmcia_socket *skt)
+static void assabet_pcmcia_socket_init(struct soc_pcmcia_socket *skt)
 {
 	/*
 	 * Enable CF bus
 	 */
 	ASSABET_BCR_clear(ASSABET_BCR_CF_BUS_OFF);
 
-	sa11xx_enable_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	soc_pcmcia_enable_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
 /*
  * Disable card status IRQs on suspend.
  */
-static void assabet_pcmcia_socket_suspend(struct sa1100_pcmcia_socket *skt)
+static void assabet_pcmcia_socket_suspend(struct soc_pcmcia_socket *skt)
 {
-	sa11xx_disable_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	soc_pcmcia_disable_irqs(skt, irqs, ARRAY_SIZE(irqs));
 
 	/*
 	 * Tristate the CF bus signals.  Also assert CF
@@ -130,7 +130,7 @@ static struct pcmcia_low_level assabet_pcmcia_ops = {
 	.socket_suspend		= assabet_pcmcia_socket_suspend,
 };
 
-int __init pcmcia_assabet_init(struct device *dev)
+int __devinit pcmcia_assabet_init(struct device *dev)
 {
 	int ret = -ENODEV;
 

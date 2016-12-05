@@ -22,10 +22,10 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/sizes.h>
-#include <asm/io.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
@@ -33,10 +33,9 @@
 #include <asm/page.h>
 
 #include <asm/mach/map.h>
-#include <asm/arch/autcpu12.h>
+#include <mach/autcpu12.h>
 
-extern void clps711x_map_io(void);
-extern void clps711x_init_irq(void);
+#include "common.h"
 
 /*
  * The on-chip registers are given a size of 1MB so that a section can
@@ -47,10 +46,14 @@ extern void clps711x_init_irq(void);
 */
 
 static struct map_desc autcpu12_io_desc[] __initdata = {
- /* virtual, physical, length, type */
- /* memory-mapped extra io and CS8900A Ethernet chip */
- /* ethernet chip */
- 	{ AUTCPU12_VIRT_CS8900A, AUTCPU12_PHYS_CS8900A, SZ_1M, MT_DEVICE }
+	/* memory-mapped extra io and CS8900A Ethernet chip */
+ 	/* ethernet chip */
+ 	{
+		.virtual	= AUTCPU12_VIRT_CS8900A,
+		.pfn		= __phys_to_pfn(AUTCPU12_PHYS_CS8900A),
+		.length		= SZ_1M,
+		.type		= MT_DEVICE
+	}
 };
 
 void __init autcpu12_map_io(void)
@@ -60,10 +63,10 @@ void __init autcpu12_map_io(void)
 }
 
 MACHINE_START(AUTCPU12, "autronix autcpu12")
-	MAINTAINER("Thomas Gleixner")
-        BOOT_MEM(0xc0000000, 0x80000000, 0xff000000)
-	BOOT_PARAMS(0xc0020000)
-	MAPIO(autcpu12_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: Thomas Gleixner */
+	.boot_params	= 0xc0020000,
+	.map_io		= autcpu12_map_io,
+	.init_irq	= clps711x_init_irq,
+	.timer		= &clps711x_timer,
 MACHINE_END
 

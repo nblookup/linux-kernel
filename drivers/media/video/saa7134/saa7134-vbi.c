@@ -1,4 +1,5 @@
 /*
+ *
  * device driver for philips saa7134 based TV cards
  * video4linux video interface
  *
@@ -23,23 +24,22 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
 
 #include "saa7134-reg.h"
 #include "saa7134.h"
 
 /* ------------------------------------------------------------------ */
 
-static unsigned int vbi_debug  = 0;
-MODULE_PARM(vbi_debug,"i");
+static unsigned int vbi_debug;
+module_param(vbi_debug, int, 0644);
 MODULE_PARM_DESC(vbi_debug,"enable debug messages [vbi]");
 
 static unsigned int vbibufs = 4;
-MODULE_PARM(vbibufs,"i");
+module_param(vbibufs, int, 0444);
 MODULE_PARM_DESC(vbibufs,"number of vbi buffers, range 2-32");
 
 #define dprintk(fmt, arg...)	if (vbi_debug) \
-	printk(KERN_DEBUG "%s/vbi: " fmt, dev->name, ## arg)
+	printk(KERN_DEBUG "%s/vbi: " fmt, dev->name , ## arg)
 
 /* ------------------------------------------------------------------ */
 
@@ -51,16 +51,16 @@ static void task_init(struct saa7134_dev *dev, struct saa7134_buf *buf,
 		      int task)
 {
 	struct saa7134_tvnorm *norm = dev->tvnorm;
-	
+
 	/* setup video scaler */
 	saa_writeb(SAA7134_VBI_H_START1(task), norm->h_start     &  0xff);
 	saa_writeb(SAA7134_VBI_H_START2(task), norm->h_start     >> 8);
 	saa_writeb(SAA7134_VBI_H_STOP1(task),  norm->h_stop      &  0xff);
 	saa_writeb(SAA7134_VBI_H_STOP2(task),  norm->h_stop      >> 8);
-	saa_writeb(SAA7134_VBI_V_START1(task), norm->vbi_v_start &  0xff);
-	saa_writeb(SAA7134_VBI_V_START2(task), norm->vbi_v_start >> 8);
-	saa_writeb(SAA7134_VBI_V_STOP1(task),  norm->vbi_v_stop  &  0xff);
-	saa_writeb(SAA7134_VBI_V_STOP2(task),  norm->vbi_v_stop  >> 8);
+	saa_writeb(SAA7134_VBI_V_START1(task), norm->vbi_v_start_0 &  0xff);
+	saa_writeb(SAA7134_VBI_V_START2(task), norm->vbi_v_start_0 >> 8);
+	saa_writeb(SAA7134_VBI_V_STOP1(task),  norm->vbi_v_stop_0  &  0xff);
+	saa_writeb(SAA7134_VBI_V_STOP2(task),  norm->vbi_v_stop_0  >> 8);
 
 	saa_writeb(SAA7134_VBI_H_SCALE_INC1(task),        VBI_SCALE & 0xff);
 	saa_writeb(SAA7134_VBI_H_SCALE_INC2(task),        VBI_SCALE >> 8);
@@ -84,7 +84,7 @@ static int buffer_activate(struct saa7134_dev *dev,
 	unsigned long control,base;
 
 	dprintk("buffer_activate [%p]\n",buf);
-	buf->vb.state = STATE_ACTIVE;
+	buf->vb.state = VIDEOBUF_ACTIVE;
 	buf->top_seen = 0;
 
 	task_init(dev,buf,TASK_A);
@@ -113,74 +113,65 @@ static int buffer_activate(struct saa7134_dev *dev,
 	return 0;
 }
 
-static int buffer_prepare(struct file *file, struct videobuf_buffer *vb,
+static int buffer_prepare(struct videobuf_queue *q,
+			  struct videobuf_buffer *vb,
 			  enum v4l2_field field)
 {
-	struct saa7134_fh *fh   = file->private_data;
+	struct saa7134_fh *fh   = q->priv_data;
 	struct saa7134_dev *dev = fh->dev;
-	struct saa7134_buf *buf = (struct saa7134_buf *)vb;
+	struct saa7134_buf *buf = container_of(vb,struct saa7134_buf,vb);
 	struct saa7134_tvnorm *norm = dev->tvnorm;
 	unsigned int lines, llength, size;
 	int err;
 
-	lines   = norm->vbi_v_stop - norm->vbi_v_start +1;
+	lines   = norm->vbi_v_stop_0 - norm->vbi_v_start_0 +1;
 	if (lines > VBI_LINE_COUNT)
 		lines = VBI_LINE_COUNT;
-#if 1
 	llength = VBI_LINE_LENGTH;
-#else
-	llength = (norm->h_stop - norm->h_start +1) * 2;
-	if (llength > VBI_LINE_LENGTH)
-		llength = VBI_LINE_LENGTH;
-#endif
 	size = lines * llength * 2;
 	if (0 != buf->vb.baddr  &&  buf->vb.bsize < size)
 		return -EINVAL;
 
 	if (buf->vb.size != size)
-		saa7134_dma_free(dev,buf);
+		saa7134_dma_free(q,buf);
 
-	if (STATE_NEEDS_INIT == buf->vb.state) {
+	if (VIDEOBUF_NEEDS_INIT == buf->vb.state) {
+		struct videobuf_dmabuf *dma=videobuf_to_dma(&buf->vb);
+
 		buf->vb.width  = llength;
 		buf->vb.height = lines;
 		buf->vb.size   = size;
 		buf->pt        = &fh->pt_vbi;
 
-		err = videobuf_iolock(dev->pci,&buf->vb,NULL);
+		err = videobuf_iolock(q,&buf->vb,NULL);
 		if (err)
 			goto oops;
 		err = saa7134_pgtable_build(dev->pci,buf->pt,
-					    buf->vb.dma.sglist,
-					    buf->vb.dma.sglen,
+					    dma->sglist,
+					    dma->sglen,
 					    saa7134_buffer_startpage(buf));
 		if (err)
 			goto oops;
 	}
-	buf->vb.state = STATE_PREPARED;
+	buf->vb.state = VIDEOBUF_PREPARED;
 	buf->activate = buffer_activate;
 	buf->vb.field = field;
 	return 0;
 
  oops:
-	saa7134_dma_free(dev,buf);
+	saa7134_dma_free(q,buf);
 	return err;
 }
 
 static int
-buffer_setup(struct file *file, unsigned int *count, unsigned int *size)
+buffer_setup(struct videobuf_queue *q, unsigned int *count, unsigned int *size)
 {
-	struct saa7134_fh *fh   = file->private_data;
+	struct saa7134_fh *fh   = q->priv_data;
 	struct saa7134_dev *dev = fh->dev;
 	int llength,lines;
-	
-	lines   = dev->tvnorm->vbi_v_stop - dev->tvnorm->vbi_v_start +1;
-#if 1
+
+	lines   = dev->tvnorm->vbi_v_stop_0 - dev->tvnorm->vbi_v_start_0 +1;
 	llength = VBI_LINE_LENGTH;
-#else
-	llength = (norm->h_stop - norm->h_start +1) * 2;
-	if (llength > VBI_LINE_LENGTH)
-		llength = VBI_LINE_LENGTH;
-#endif
 	*size = lines * llength * 2;
 	if (0 == *count)
 		*count = vbibufs;
@@ -188,22 +179,20 @@ buffer_setup(struct file *file, unsigned int *count, unsigned int *size)
 	return 0;
 }
 
-static void buffer_queue(struct file *file, struct videobuf_buffer *vb)
+static void buffer_queue(struct videobuf_queue *q, struct videobuf_buffer *vb)
 {
-	struct saa7134_fh *fh = file->private_data;
+	struct saa7134_fh *fh = q->priv_data;
 	struct saa7134_dev *dev = fh->dev;
-	struct saa7134_buf *buf = (struct saa7134_buf *)vb;
-	
+	struct saa7134_buf *buf = container_of(vb,struct saa7134_buf,vb);
+
 	saa7134_buffer_queue(dev,&dev->vbi_q,buf);
 }
 
-static void buffer_release(struct file *file, struct videobuf_buffer *vb)
+static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
 {
-	struct saa7134_fh *fh   = file->private_data;
-	struct saa7134_dev *dev = fh->dev;
-	struct saa7134_buf *buf = (struct saa7134_buf *)vb;
-	
-	saa7134_dma_free(dev,buf);
+	struct saa7134_buf *buf = container_of(vb,struct saa7134_buf,vb);
+
+	saa7134_dma_free(q,buf);
 }
 
 struct videobuf_queue_ops saa7134_vbi_qops = {
@@ -250,7 +239,7 @@ void saa7134_irq_vbi_done(struct saa7134_dev *dev, unsigned long status)
 			goto done;
 
 		dev->vbi_q.curr->vb.field_count = dev->vbi_fieldcount;
-		saa7134_buffer_finish(dev,&dev->vbi_q,STATE_DONE);
+		saa7134_buffer_finish(dev,&dev->vbi_q,VIDEOBUF_DONE);
 	}
 	saa7134_buffer_next(dev,&dev->vbi_q);
 

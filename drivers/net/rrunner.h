@@ -1,7 +1,6 @@
 #ifndef _RRUNNER_H_
 #define _RRUNNER_H_
 
-#include <linux/config.h>
 #include <linux/interrupt.h>
 
 #if ((BITS_PER_LONG != 32) && (BITS_PER_LONG != 64))
@@ -168,7 +167,7 @@ struct rr_regs {
 /*
  * Host control register bits.
  */
-	
+
 #define RR_INT		0x01
 #define RR_CLEAR_INT	0x02
 #define NO_SWAP		0x04000004
@@ -239,9 +238,9 @@ struct rr_regs {
 /*
  * Receive state
  *
- * RoadRunner HIPPI Receive State Register controls and monitors the 
+ * RoadRunner HIPPI Receive State Register controls and monitors the
  * HIPPI receive interface in the NIC. Look at err bits when a HIPPI
- * receive Error Event occurs. 
+ * receive Error Event occurs.
  */
 
 #define ENABLE_NEW_CON		0x01
@@ -510,7 +509,7 @@ static inline void set_rraddr(rraddr *ra, dma_addr_t addr)
 }
 
 
-static inline void set_rxaddr(struct rr_regs *regs, volatile dma_addr_t addr)
+static inline void set_rxaddr(struct rr_regs __iomem *regs, volatile dma_addr_t addr)
 {
 	unsigned long baddr = addr;
 #if (BITS_PER_LONG == 64) && defined(__LITTLE_ENDIAN)
@@ -527,7 +526,7 @@ static inline void set_rxaddr(struct rr_regs *regs, volatile dma_addr_t addr)
 }
 
 
-static inline void set_infoaddr(struct rr_regs *regs, volatile dma_addr_t addr)
+static inline void set_infoaddr(struct rr_regs __iomem *regs, volatile dma_addr_t addr)
 {
 	unsigned long baddr = addr;
 #if (BITS_PER_LONG == 64) && defined(__LITTLE_ENDIAN)
@@ -701,7 +700,7 @@ struct rr_stats {
 	u32	StatUpdtT;
 	u32	StatUpdtC;
 	u32	WatchDog;
-	u32	Trace;	
+	u32	Trace;
 
 	/* Serial HIPPI */
 	u32	LnkRdyEst;
@@ -808,7 +807,7 @@ struct rr_private
 	/* Alignment ok ? */
 	struct sk_buff		*rx_skbuff[RX_RING_ENTRIES];
 	struct sk_buff		*tx_skbuff[TX_RING_ENTRIES];
-	struct rr_regs		*regs;		/* Register base */
+	struct rr_regs		__iomem *regs;		/* Register base */
 	struct ring_ctrl	*rx_ctrl;	/* Receive ring control */
 	struct rr_info		*info;		/* Shared info page */
 	dma_addr_t 		rx_ctrl_dma;
@@ -820,7 +819,6 @@ struct rr_private
 	u32			tx_full;
 	u32			fw_rev;
 	volatile short		fw_running;
-	struct net_device_stats stats;
 	struct pci_dev		*pci_dev;
 };
 
@@ -830,18 +828,18 @@ struct rr_private
  */
 static int rr_init(struct net_device *dev);
 static int rr_init1(struct net_device *dev);
-static irqreturn_t rr_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t rr_interrupt(int irq, void *dev_id);
 
 static int rr_open(struct net_device *dev);
-static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t rr_start_xmit(struct sk_buff *skb,
+				 struct net_device *dev);
 static int rr_close(struct net_device *dev);
-static struct net_device_stats *rr_get_stats(struct net_device *dev);
 static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 static unsigned int rr_read_eeprom(struct rr_private *rrpriv,
 				   unsigned long offset,
 				   unsigned char *buf,
 				   unsigned long length);
-static u32 rr_read_eeprom_word(struct rr_private *rrpriv, void * offset);
+static u32 rr_read_eeprom_word(struct rr_private *rrpriv, size_t offset);
 static int rr_load_firmware(struct net_device *dev);
 static inline void rr_raz_tx(struct rr_private *, struct net_device *);
 static inline void rr_raz_rx(struct rr_private *, struct net_device *);

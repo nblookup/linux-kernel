@@ -1,5 +1,5 @@
 /*
- * sound/sound_timer.c
+ * sound/oss/sound_timer.c
  */
 /*
  * Copyright (C) by Hannu Savolainen 1993-1997
@@ -26,7 +26,7 @@ static unsigned long prev_event_time;
 static volatile unsigned long usecs_per_tmr;	/* Length of the current interval */
 
 static struct sound_lowlev_timer *tmr;
-static spinlock_t lock;
+static DEFINE_SPINLOCK(lock);
 
 static unsigned long tmr2ticks(int tmr_value)
 {
@@ -76,6 +76,7 @@ void sound_timer_syncinterval(unsigned int new_usecs)
 	tmr_ctr = 0;
 	usecs_per_tmr = new_usecs;
 }
+EXPORT_SYMBOL(sound_timer_syncinterval);
 
 static void tmr_reset(void)
 {
@@ -177,8 +178,9 @@ static unsigned long timer_get_time(int dev)
 	return curr_ticks;
 }
 
-static int timer_ioctl(int dev, unsigned int cmd, caddr_t arg)
+static int timer_ioctl(int dev, unsigned int cmd, void __user *arg)
 {
+	int __user *p = arg;
 	int val;
 
 	switch (cmd) 
@@ -201,7 +203,7 @@ static int timer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 			return 0;
 
 		case SNDCTL_TMR_TIMEBASE:
-			if (get_user(val, (int *)arg))
+			if (get_user(val, p))
 				return -EFAULT;
 			if (val) 
 			{
@@ -215,7 +217,7 @@ static int timer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 			break;
 
 		case SNDCTL_TMR_TEMPO:
-			if (get_user(val, (int *)arg))
+			if (get_user(val, p))
 				return -EFAULT;
 			if (val) 
 			{
@@ -233,7 +235,7 @@ static int timer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 			break;
 
 		case SNDCTL_SEQ_CTRLRATE:
-			if (get_user(val, (int *)arg))
+			if (get_user(val, p))
 				return -EFAULT;
 			if (val != 0)	/* Can't change */
 				return -EINVAL;
@@ -248,7 +250,7 @@ static int timer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 		default:
 			return -EINVAL;
 	}
-	return put_user(val, (int *)arg);
+	return put_user(val, p);
 }
 
 static void timer_arm(int dev, long time)
@@ -299,6 +301,7 @@ void sound_timer_interrupt(void)
 	}
 	spin_unlock_irqrestore(&lock,flags);
 }
+EXPORT_SYMBOL(sound_timer_interrupt);
 
 void  sound_timer_init(struct sound_lowlev_timer *t, char *name)
 {
@@ -320,3 +323,5 @@ void  sound_timer_init(struct sound_lowlev_timer *t, char *name)
 	strcpy(sound_timer.info.name, name);
 	sound_timer_devs[n] = &sound_timer;
 }
+EXPORT_SYMBOL(sound_timer_init);
+

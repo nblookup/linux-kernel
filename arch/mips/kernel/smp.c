@@ -16,234 +16,131 @@
  * Copyright (C) 2000, 2001 Kanoj Sarcar
  * Copyright (C) 2000, 2001 Ralf Baechle
  * Copyright (C) 2000, 2001 Silicon Graphics, Inc.
- * Copyright (C) 2000, 2001 Broadcom Corporation
+ * Copyright (C) 2000, 2001, 2003 Broadcom Corporation
  */
-#include <linux/config.h>
 #include <linux/cache.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/smp.h>
 #include <linux/spinlock.h>
 #include <linux/threads.h>
 #include <linux/module.h>
 #include <linux/time.h>
 #include <linux/timex.h>
 #include <linux/sched.h>
+#include <linux/cpumask.h>
+#include <linux/cpu.h>
+#include <linux/err.h>
+#include <linux/ftrace.h>
 
 #include <asm/atomic.h>
 #include <asm/cpu.h>
 #include <asm/processor.h>
+#include <asm/r4k-timer.h>
 #include <asm/system.h>
-#include <asm/hardirq.h>
 #include <asm/mmu_context.h>
-#include <asm/smp.h>
+#include <asm/time.h>
 
-int smp_threads_ready;	/* Not used */
+#ifdef CONFIG_MIPS_MT_SMTC
+#include <asm/mipsmtregs.h>
+#endif /* CONFIG_MIPS_MT_SMTC */
 
-// static atomic_t cpus_booted = ATOMIC_INIT(0);
-atomic_t cpus_booted = ATOMIC_INIT(0);
+volatile cpumask_t cpu_callin_map;	/* Bitmask of started secondaries */
 
-cpumask_t phys_cpu_present_map;		/* Bitmask of physically CPUs */
-cpumask_t cpu_online_map;		/* Bitmask of currently online CPUs */
-int __cpu_number_map[NR_CPUS];
-int __cpu_logical_map[NR_CPUS];
+int __cpu_number_map[NR_CPUS];		/* Map physical to logical */
+EXPORT_SYMBOL(__cpu_number_map);
 
-EXPORT_SYMBOL(cpu_online_map);
+int __cpu_logical_map[NR_CPUS];		/* Map logical to physical */
+EXPORT_SYMBOL(__cpu_logical_map);
 
-/* These are defined by the board-specific code. */
+/* Number of TCs (or siblings in Intel speak) per CPU core */
+int smp_num_siblings = 1;
+EXPORT_SYMBOL(smp_num_siblings);
 
-/*
- * Cause the function described by call_data to be executed on the passed
- * cpu.  When the function has finished, increment the finished field of
- * call_data.
- */
-void core_send_ipi(int cpu, unsigned int action);
+/* representing the TCs (or siblings in Intel speak) of each logical CPU */
+cpumask_t cpu_sibling_map[NR_CPUS] __read_mostly;
+EXPORT_SYMBOL(cpu_sibling_map);
 
-/*
- * Clear all undefined state in the cpu, set up sp and gp to the passed
- * values, and kick the cpu into smp_bootstrap();
- */
-void prom_boot_secondary(int cpu, unsigned long sp, unsigned long gp);
+/* representing cpus for which sibling maps can be computed */
+static cpumask_t cpu_sibling_setup_map;
 
-/*
- *  After we've done initial boot, this function is called to allow the
- *  board code to clean up state, if needed
- */
-void prom_init_secondary(void);
-
-void prom_smp_finish(void);
-
-cycles_t cacheflush_time;
-unsigned long cache_decay_ticks;
-
-void smp_tune_scheduling (void)
+static inline void set_cpu_sibling_map(int cpu)
 {
-	struct cache_desc *cd = &current_cpu_data.scache;
-	unsigned long cachesize;       /* kB   */
-	unsigned long bandwidth = 350; /* MB/s */
-	unsigned long cpu_khz;
+	int i;
 
-	/*
-	 * Crude estimate until we actually meassure ...
-	 */
-	cpu_khz = loops_per_jiffy * 2 * HZ / 1000;
+	cpu_set(cpu, cpu_sibling_setup_map);
 
-	/*
-	 * Rough estimation for SMP scheduling, this is the number of
-	 * cycles it takes for a fully memory-limited process to flush
-	 * the SMP-local cache.
-	 *
-	 * (For a P5 this pretty much means we will choose another idle
-	 *  CPU almost always at wakeup time (this is due to the small
-	 *  L1 cache), on PIIs it's around 50-100 usecs, depending on
-	 *  the cache size)
-	 */
-	if (!cpu_khz) {
-		/*
-		 * This basically disables processor-affinity scheduling on SMP
-		 * without a cycle counter.  Currently all SMP capable MIPS
-		 * processors have a cycle counter.
-		 */
-		cacheflush_time = 0;
-		return;
-	}
-
-	cachesize = cd->linesz * cd->sets * cd->ways;
-	cacheflush_time = (cpu_khz>>10) * (cachesize<<10) / bandwidth;
-	cache_decay_ticks = (long)cacheflush_time/cpu_khz * HZ / 1000;
-
-	printk("per-CPU timeslice cutoff: %ld.%02ld usecs.\n",
-		(long)cacheflush_time/(cpu_khz/1000),
-		((long)cacheflush_time*100/(cpu_khz/1000)) % 100);
-	printk("task migration cache decay timeout: %ld msecs.\n",
-		(cache_decay_ticks + 1) * 1000 / HZ);
+	if (smp_num_siblings > 1) {
+		for_each_cpu_mask(i, cpu_sibling_setup_map) {
+			if (cpu_data[cpu].core == cpu_data[i].core) {
+				cpu_set(i, cpu_sibling_map[cpu]);
+				cpu_set(cpu, cpu_sibling_map[i]);
+			}
+		}
+	} else
+		cpu_set(cpu, cpu_sibling_map[cpu]);
 }
 
-void __init smp_callin(void)
+struct plat_smp_ops *mp_ops;
+
+__cpuinit void register_smp_ops(struct plat_smp_ops *ops)
 {
-#if 0
-	calibrate_delay();
-	smp_store_cpu_info(cpuid);
-#endif
+	if (mp_ops)
+		printk(KERN_WARNING "Overriding previously set SMP ops\n");
+
+	mp_ops = ops;
 }
 
-#ifndef CONFIG_SGI_IP27
 /*
- * Hook for doing final board-specific setup after the generic smp setup
- * is done
+ * First C code run on the secondary CPUs after being started up by
+ * the master.
  */
-asmlinkage void start_secondary(void)
+asmlinkage __cpuinit void start_secondary(void)
 {
-	unsigned int cpu = smp_processor_id();
+	unsigned int cpu;
 
+#ifdef CONFIG_MIPS_MT_SMTC
+	/* Only do cpu_probe for first TC of CPU */
+	if ((read_c0_tcbind() & TCBIND_CURTC) == 0)
+#endif /* CONFIG_MIPS_MT_SMTC */
 	cpu_probe();
-	prom_init_secondary();
+	cpu_report();
 	per_cpu_trap_init();
+	mips_clockevent_init();
+	mp_ops->init_secondary();
 
 	/*
 	 * XXX parity protection should be folded in here when it's converted
 	 * to an option instead of something based on .cputype
 	 */
-	pgd_current[cpu] = init_mm.pgd;
+
+	calibrate_delay();
+	preempt_disable();
+	cpu = smp_processor_id();
 	cpu_data[cpu].udelay_val = loops_per_jiffy;
-	prom_smp_finish();
-	printk("Slave cpu booted successfully\n");
-	cpu_set(cpu, cpu_online_map);
-	atomic_inc(&cpus_booted);
+
+	notify_cpu_starting(cpu);
+
+	mp_ops->smp_finish();
+	set_cpu_sibling_map(cpu);
+
+	cpu_set(cpu, cpu_callin_map);
+
+	synchronise_count_slave();
+
 	cpu_idle();
 }
-#endif /* CONFIG_SGI_IP27 */
 
 /*
- * this function sends a 'reschedule' IPI to another CPU.
- * it goes straight through and wastes no time serializing
- * anything. Worst case is that we lose a reschedule ...
+ * Call into both interrupt handlers, as we share the IPI for them
  */
-void smp_send_reschedule(int cpu)
+void __irq_entry smp_call_function_interrupt(void)
 {
-	core_send_ipi(cpu, SMP_RESCHEDULE_YOURSELF);
-}
-
-spinlock_t smp_call_lock = SPIN_LOCK_UNLOCKED;
-
-struct call_data_struct *call_data;
-
-/*
- * Run a function on all other CPUs.
- *  <func>      The function to run. This must be fast and non-blocking.
- *  <info>      An arbitrary pointer to pass to the function.
- *  <retry>     If true, keep retrying until ready.
- *  <wait>      If true, wait until function has completed on other CPUs.
- *  [RETURNS]   0 on success, else a negative status code.
- *
- * Does not return until remote CPUs are nearly ready to execute <func>
- * or are or have executed.
- *
- * You must not call this function with disabled interrupts or from a
- * hardware interrupt handler or from a bottom half handler.
- */
-int smp_call_function (void (*func) (void *info), void *info, int retry,
-								int wait)
-{
-	struct call_data_struct data;
-	int i, cpus = num_online_cpus() - 1;
-	int cpu = smp_processor_id();
-
-	if (!cpus)
-		return 0;
-
-	data.func = func;
-	data.info = info;
-	atomic_set(&data.started, 0);
-	data.wait = wait;
-	if (wait)
-		atomic_set(&data.finished, 0);
-
-	spin_lock(&smp_call_lock);
-	call_data = &data;
-
-	/* Send a message to all other CPUs and wait for them to respond */
-	for (i = 0; i < NR_CPUS; i++)
-		if (cpu_online(cpu) && i != cpu)
-			core_send_ipi(i, SMP_CALL_FUNCTION);
-
-	/* Wait for response */
-	/* FIXME: lock-up detection, backtrace on lock-up */
-	while (atomic_read(&data.started) != cpus)
-		barrier();
-
-	if (wait)
-		while (atomic_read(&data.finished) != cpus)
-			barrier();
-	spin_unlock(&smp_call_lock);
-
-	return 0;
-}
-
-void smp_call_function_interrupt(void)
-{
-	void (*func) (void *info) = call_data->func;
-	void *info = call_data->info;
-	int wait = call_data->wait;
-
-	/*
-	 * Notify initiating CPU that I've grabbed the data and am
-	 * about to execute the function.
-	 */
-	mb();
-	atomic_inc(&call_data->started);
-
-	/*
-	 * At this point the info structure may be out of scope unless wait==1.
-	 */
 	irq_enter();
-	(*func)(info);
+	generic_smp_call_function_single_interrupt();
+	generic_smp_call_function_interrupt();
 	irq_exit();
-
-	if (wait) {
-		mb();
-		atomic_inc(&call_data->finished);
-	}
 }
 
 static void stop_this_cpu(void *dummy)
@@ -252,13 +149,108 @@ static void stop_this_cpu(void *dummy)
 	 * Remove this CPU:
 	 */
 	cpu_clear(smp_processor_id(), cpu_online_map);
-	local_irq_enable();	/* May need to service _machine_restart IPI */
-	for (;;);		/* Wait if available. */
+	for (;;) {
+		if (cpu_wait)
+			(*cpu_wait)();		/* Wait if available. */
+	}
 }
 
 void smp_send_stop(void)
 {
-	smp_call_function(stop_this_cpu, NULL, 1, 0);
+	smp_call_function(stop_this_cpu, NULL, 0);
+}
+
+void __init smp_cpus_done(unsigned int max_cpus)
+{
+	mp_ops->cpus_done();
+	synchronise_count_master();
+}
+
+/* called from main before smp_init() */
+void __init smp_prepare_cpus(unsigned int max_cpus)
+{
+	init_new_context(current, &init_mm);
+	current_thread_info()->cpu = 0;
+	mp_ops->prepare_cpus(max_cpus);
+	set_cpu_sibling_map(0);
+#ifndef CONFIG_HOTPLUG_CPU
+	init_cpu_present(&cpu_possible_map);
+#endif
+}
+
+/* preload SMP state for boot cpu */
+void __devinit smp_prepare_boot_cpu(void)
+{
+	set_cpu_possible(0, true);
+	set_cpu_online(0, true);
+	cpu_set(0, cpu_callin_map);
+}
+
+/*
+ * Called once for each "cpu_possible(cpu)".  Needs to spin up the cpu
+ * and keep control until "cpu_online(cpu)" is set.  Note: cpu is
+ * physical, not logical.
+ */
+static struct task_struct *cpu_idle_thread[NR_CPUS];
+
+struct create_idle {
+	struct work_struct work;
+	struct task_struct *idle;
+	struct completion done;
+	int cpu;
+};
+
+static void __cpuinit do_fork_idle(struct work_struct *work)
+{
+	struct create_idle *c_idle =
+		container_of(work, struct create_idle, work);
+
+	c_idle->idle = fork_idle(c_idle->cpu);
+	complete(&c_idle->done);
+}
+
+int __cpuinit __cpu_up(unsigned int cpu)
+{
+	struct task_struct *idle;
+
+	/*
+	 * Processor goes to start_secondary(), sets online flag
+	 * The following code is purely to make sure
+	 * Linux can schedule processes on this slave.
+	 */
+	if (!cpu_idle_thread[cpu]) {
+		/*
+		 * Schedule work item to avoid forking user task
+		 * Ported from arch/x86/kernel/smpboot.c
+		 */
+		struct create_idle c_idle = {
+			.cpu    = cpu,
+			.done   = COMPLETION_INITIALIZER_ONSTACK(c_idle.done),
+		};
+
+		INIT_WORK_ONSTACK(&c_idle.work, do_fork_idle);
+		schedule_work(&c_idle.work);
+		wait_for_completion(&c_idle.done);
+		idle = cpu_idle_thread[cpu] = c_idle.idle;
+
+		if (IS_ERR(idle))
+			panic(KERN_ERR "Fork failed for CPU %d", cpu);
+	} else {
+		idle = cpu_idle_thread[cpu];
+		init_idle(idle, cpu);
+	}
+
+	mp_ops->boot_secondary(cpu, idle);
+
+	/*
+	 * Trust is futile.  We should really have timeouts ...
+	 */
+	while (!cpu_isset(cpu, cpu_callin_map))
+		udelay(100);
+
+	cpu_set(cpu, cpu_online_map);
+
+	return 0;
 }
 
 /* Not really SMP stuff ... */
@@ -274,12 +266,38 @@ static void flush_tlb_all_ipi(void *info)
 
 void flush_tlb_all(void)
 {
-	on_each_cpu(flush_tlb_all_ipi, 0, 1, 1);
+	on_each_cpu(flush_tlb_all_ipi, NULL, 1);
 }
 
 static void flush_tlb_mm_ipi(void *mm)
 {
 	local_flush_tlb_mm((struct mm_struct *)mm);
+}
+
+/*
+ * Special Variant of smp_call_function for use by TLB functions:
+ *
+ *  o No return value
+ *  o collapses to normal function call on UP kernels
+ *  o collapses to normal function call on systems with a single shared
+ *    primary cache.
+ *  o CONFIG_MIPS_MT_SMTC currently implies there is only one physical core.
+ */
+static inline void smp_on_other_tlbs(void (*func) (void *info), void *info)
+{
+#ifndef CONFIG_MIPS_MT_SMTC
+	smp_call_function(func, info, 1);
+#endif
+}
+
+static inline void smp_on_each_tlb(void (*func) (void *info), void *info)
+{
+	preempt_disable();
+
+	smp_on_other_tlbs(func, info);
+	func(info);
+
+	preempt_enable();
 }
 
 /*
@@ -300,12 +318,15 @@ void flush_tlb_mm(struct mm_struct *mm)
 	preempt_disable();
 
 	if ((atomic_read(&mm->mm_users) != 1) || (current->mm != mm)) {
-		smp_call_function(flush_tlb_mm_ipi, (void *)mm, 1, 1);
+		smp_on_other_tlbs(flush_tlb_mm_ipi, mm);
 	} else {
-		int i;
-		for (i = 0; i < num_online_cpus(); i++)
-			if (smp_processor_id() != i)
-				cpu_context(i, mm) = 0;
+		cpumask_t mask = cpu_online_map;
+		unsigned int cpu;
+
+		cpu_clear(smp_processor_id(), mask);
+		for_each_cpu_mask(cpu, mask)
+			if (cpu_context(cpu, mm))
+				cpu_context(cpu, mm) = 0;
 	}
 	local_flush_tlb_mm(mm);
 
@@ -320,7 +341,7 @@ struct flush_tlb_data {
 
 static void flush_tlb_range_ipi(void *info)
 {
-	struct flush_tlb_data *fd = (struct flush_tlb_data *)info;
+	struct flush_tlb_data *fd = info;
 
 	local_flush_tlb_range(fd->vma, fd->addr1, fd->addr2);
 }
@@ -331,17 +352,21 @@ void flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned l
 
 	preempt_disable();
 	if ((atomic_read(&mm->mm_users) != 1) || (current->mm != mm)) {
-		struct flush_tlb_data fd;
+		struct flush_tlb_data fd = {
+			.vma = vma,
+			.addr1 = start,
+			.addr2 = end,
+		};
 
-		fd.vma = vma;
-		fd.addr1 = start;
-		fd.addr2 = end;
-		smp_call_function(flush_tlb_range_ipi, (void *)&fd, 1, 1);
+		smp_on_other_tlbs(flush_tlb_range_ipi, &fd);
 	} else {
-		int i;
-		for (i = 0; i < num_online_cpus(); i++)
-			if (smp_processor_id() != i)
-				cpu_context(i, mm) = 0;
+		cpumask_t mask = cpu_online_map;
+		unsigned int cpu;
+
+		cpu_clear(smp_processor_id(), mask);
+		for_each_cpu_mask(cpu, mask)
+			if (cpu_context(cpu, mm))
+				cpu_context(cpu, mm) = 0;
 	}
 	local_flush_tlb_range(vma, start, end);
 	preempt_enable();
@@ -349,23 +374,24 @@ void flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned l
 
 static void flush_tlb_kernel_range_ipi(void *info)
 {
-	struct flush_tlb_data *fd = (struct flush_tlb_data *)info;
+	struct flush_tlb_data *fd = info;
 
 	local_flush_tlb_kernel_range(fd->addr1, fd->addr2);
 }
 
 void flush_tlb_kernel_range(unsigned long start, unsigned long end)
 {
-	struct flush_tlb_data fd;
+	struct flush_tlb_data fd = {
+		.addr1 = start,
+		.addr2 = end,
+	};
 
-	fd.addr1 = start;
-	fd.addr2 = end;
-	on_each_cpu(flush_tlb_kernel_range_ipi, (void *)&fd, 1, 1);
+	on_each_cpu(flush_tlb_kernel_range_ipi, &fd, 1);
 }
 
 static void flush_tlb_page_ipi(void *info)
 {
-	struct flush_tlb_data *fd = (struct flush_tlb_data *)info;
+	struct flush_tlb_data *fd = info;
 
 	local_flush_tlb_page(fd->vma, fd->addr1);
 }
@@ -374,16 +400,20 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 {
 	preempt_disable();
 	if ((atomic_read(&vma->vm_mm->mm_users) != 1) || (current->mm != vma->vm_mm)) {
-		struct flush_tlb_data fd;
+		struct flush_tlb_data fd = {
+			.vma = vma,
+			.addr1 = page,
+		};
 
-		fd.vma = vma;
-		fd.addr1 = page;
-		smp_call_function(flush_tlb_page_ipi, (void *)&fd, 1, 1);
+		smp_on_other_tlbs(flush_tlb_page_ipi, &fd);
 	} else {
-		int i;
-		for (i = 0; i < num_online_cpus(); i++)
-			if (smp_processor_id() != i)
-				cpu_context(i, vma->vm_mm) = 0;
+		cpumask_t mask = cpu_online_map;
+		unsigned int cpu;
+
+		cpu_clear(smp_processor_id(), mask);
+		for_each_cpu_mask(cpu, mask)
+			if (cpu_context(cpu, vma->vm_mm))
+				cpu_context(cpu, vma->vm_mm) = 0;
 	}
 	local_flush_tlb_page(vma, page);
 	preempt_enable();
@@ -398,11 +428,8 @@ static void flush_tlb_one_ipi(void *info)
 
 void flush_tlb_one(unsigned long vaddr)
 {
-	smp_call_function(flush_tlb_one_ipi, (void *) vaddr, 1, 1);
-	local_flush_tlb_one(vaddr);
+	smp_on_each_tlb(flush_tlb_one_ipi, (void *) vaddr);
 }
 
 EXPORT_SYMBOL(flush_tlb_page);
 EXPORT_SYMBOL(flush_tlb_one);
-EXPORT_SYMBOL(cpu_data);
-EXPORT_SYMBOL(synchronize_irq);

@@ -3,13 +3,14 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 96, 97, 98, 99, 2000, 01, 02 by Ralf Baechle
+ * Copyright (C) 1995-99, 2000- 02, 06 Ralf Baechle <ralf@linux-mips.org>
  * Copyright (C) 2001 MIPS Technologies, Inc.
+ * Copyright (C) 2004 Thiemo Seufer
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <asm/asm.h>
 #include <asm/asmmacro.h>
+#include <asm/irqflags.h>
 #include <asm/mipsregs.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
@@ -17,7 +18,8 @@
 #include <asm/sysmips.h>
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
-#include <asm/offset.h>
+#include <asm/war.h>
+#include <asm/asm-offsets.h>
 
 /* Highest syscall used of any syscall flavour */
 #define MAX_SYSCALL_NO	__NR_O32_Linux + __NR_O32_Linux_syscalls
@@ -26,31 +28,32 @@
 NESTED(handle_sys, PT_SIZE, sp)
 	.set	noat
 	SAVE_SOME
+	TRACE_IRQS_ON_RELOAD
 	STI
 	.set	at
 
 	lw	t1, PT_EPC(sp)		# skip syscall on return
 
-	sltiu	t0, v0, MAX_SYSCALL_NO + 1 # check syscall number
+	subu	v0, v0, __NR_O32_Linux	# check syscall number
+	sltiu	t0, v0, __NR_O32_Linux_syscalls + 1
 	addiu	t1, 4			# skip to next instruction
-	beqz	t0, illegal_syscall
 	sw	t1, PT_EPC(sp)
+	beqz	t0, illegal_syscall
 
-	/* XXX Put both in one cacheline, should save a bit. */
-	sll	t0, v0, 2
-	lw	t2, sys_call_table(t0)	# syscall routine
-	lbu	t3, sys_narg_table(v0)	# number of arguments
-	beqz	t2, illegal_syscall;
+	sll	t0, v0, 3
+	la	t1, sys_call_table
+	addu	t1, t0
+	lw	t2, (t1)		# syscall routine
+	lw	t3, 4(t1)		# >= 0 if we need stack arguments
+	beqz	t2, illegal_syscall
 
-	subu	t0, t3, 5		# 5 or more arguments?
 	sw	a3, PT_R26(sp)		# save a3 for syscall restarting
-	bgez	t0, stackargs
+	bgez	t3, stackargs
 
 stack_done:
-	sw	a3, PT_R26(sp)          # save for syscall restart
-	LONG_L	t0, TI_FLAGS($28)	# syscall tracing enabled?
-	li	t1, _TIF_SYSCALL_TRACE
-	and	t0, t1, t0
+	lw	t0, TI_FLAGS($28)	# syscall tracing enabled?
+	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
+	and	t0, t1
 	bnez	t0, syscall_trace_entry	# -> yes
 
 	jalr	t2			# Do The Real Thing (TM)
@@ -60,49 +63,50 @@ stack_done:
 	sw	t0, PT_R7(sp)		# set error flag
 	beqz	t0, 1f
 
+	lw	t1, PT_R2(sp)		# syscall number
 	negu	v0			# error
-	sw	v0, PT_R0(sp)		# set flag for syscall
-					# restarting
+	sw	t1, PT_R0(sp)		# save it for syscall restarting
 1:	sw	v0, PT_R2(sp)		# result
 
-EXPORT(o32_syscall_exit)
+o32_syscall_exit:
 	local_irq_disable		# make sure need_resched and
 					# signals dont change between
 					# sampling and return
-	LONG_L	a2, TI_FLAGS($28)	# current->work
+	lw	a2, TI_FLAGS($28)	# current->work
 	li	t0, _TIF_ALLWORK_MASK
-	and	t0, a2, t0
-	bnez	a2, o32_syscall_exit_work
+	and	t0, a2
+	bnez	t0, o32_syscall_exit_work
 
-	RESTORE_SOME
-	RESTORE_SP_AND_RET
+	j	restore_partial
 
 o32_syscall_exit_work:
-	SAVE_STATIC
-	j	syscall_exit_work
+	j	syscall_exit_work_partial
 
 /* ------------------------------------------------------------------------ */
 
 syscall_trace_entry:
 	SAVE_STATIC
-	sw	t2, PT_R1(sp)
+	move	s0, t2
+	move	a0, sp
+	li	a1, 0
 	jal	do_syscall_trace
-	lw	t2, PT_R1(sp)
 
+	move	t0, s0
+	RESTORE_STATIC
 	lw	a0, PT_R4(sp)		# Restore argument registers
 	lw	a1, PT_R5(sp)
 	lw	a2, PT_R6(sp)
 	lw	a3, PT_R7(sp)
-	jalr	t2
+	jalr	t0
 
 	li	t0, -EMAXERRNO - 1	# error?
 	sltu	t0, t0, v0
 	sw	t0, PT_R7(sp)		# set error flag
 	beqz	t0, 1f
 
+	lw	t1, PT_R2(sp)		# syscall number
 	negu	v0			# error
-	sw	v0, PT_R0(sp)		# set flag for syscall
-					# restarting
+	sw	t1, PT_R0(sp)		# save it for syscall restarting
 1:	sw	v0, PT_R2(sp)		# result
 
 	j	syscall_exit
@@ -116,44 +120,48 @@ syscall_trace_entry:
 	 */
 stackargs:
 	lw	t0, PT_R29(sp)		# get old user stack pointer
-	subu	t3, 4
-	sll	t1, t3, 2		# stack valid?
 
-	addu	t1, t0			# end address
-	or	t0, t1
-	bltz	t0, bad_stack		# -> sp is bad
-
-	lw	t0, PT_R29(sp)		# get old user stack pointer
-	PTR_LA	t1, 3f			# copy 1 to 2 arguments
-	sll	t3, t3, 4
-	subu	t1, t3
-	jr	t1
-
-	/* Ok, copy the args from the luser stack to the kernel stack */
 	/*
-	 * I know Ralf doesn't like nops but this avoids code
-	 * duplication for R3000 targets (and this is the
-	 * only place where ".set reorder" doesn't help).
-	 * Harald.
+	 * We intentionally keep the kernel stack a little below the top of
+	 * userspace so we don't have to do a slower byte accurate check here.
 	 */
+	lw	t5, TI_ADDR_LIMIT($28)
+	addu	t4, t0, 32
+	and	t5, t4
+	bltz	t5, bad_stack		# -> sp is bad
+
+	/* Ok, copy the args from the luser stack to the kernel stack.
+	 * t3 is the precomputed number of instruction bytes needed to
+	 * load or store arguments 6-8.
+	 */
+
+	la	t1, 5f			# load up to 3 arguments
+	subu	t1, t3
+1:	lw	t5, 16(t0)		# argument #5 from usp
 	.set    push
 	.set    noreorder
 	.set	nomacro
-1:	lw	t1, 20(t0)		# argument #6 from usp
-	nop
-	sw	t1, 20(sp)
-	nop
-2:	lw	t1, 16(t0)		# argument #5 from usp
-	nop
-	sw	t1, 16(sp)
-	nop
-3:	.set	pop
+	jr	t1
+	 addiu	t1, 6f - 5f
 
-	j	stack_done		# go back
+2:	lw	t8, 28(t0)		# argument #8 from usp
+3:	lw	t7, 24(t0)		# argument #7 from usp
+4:	lw	t6, 20(t0)		# argument #6 from usp
+5:	jr	t1
+	 sw	t5, 16(sp)		# argument #5 to ksp
+
+	sw	t8, 28(sp)		# argument #8 to ksp
+	sw	t7, 24(sp)		# argument #7 to ksp
+	sw	t6, 20(sp)		# argument #6 to ksp
+6:	j	stack_done		# go back
+	 nop
+	.set	pop
 
 	.section __ex_table,"a"
 	PTR	1b,bad_stack
 	PTR	2b,bad_stack
+	PTR	3b,bad_stack
+	PTR	4b,bad_stack
 	.previous
 
 	/*
@@ -161,8 +169,7 @@ stackargs:
 	 * We probably should handle this case a bit more drastic.
 	 */
 bad_stack:
-	negu	v0				# error
-	sw	v0, PT_R0(sp)
+	li	v0, EFAULT
 	sw	v0, PT_R2(sp)
 	li	t0, 1				# set error flag
 	sw	t0, PT_R7(sp)
@@ -179,148 +186,39 @@ illegal_syscall:
 	j	o32_syscall_exit
 	END(handle_sys)
 
-	LEAF(mips_atomic_set)
-	andi	v0, a1, 3			# must be word aligned
-	bnez	v0, bad_alignment
-
-	lw	v1, TI_ADDR_LIMIT($28)		# in legal address range?
-	addiu	a0, a1, 4
-	or	a0, a0, a1
-	and	a0, a0, v1
-	bltz	a0, bad_address
-
-#ifdef CONFIG_CPU_HAS_LLSC
-	/* Ok, this is the ll/sc case.  World is sane :-)  */
-1:	ll	v0, (a1)
-	move	a0, a2
-2:	sc	a0, (a1)
-	beqz	a0, 1b
-
-	.section __ex_table,"a"
-	PTR	1b, bad_stack
-	PTR	2b, bad_stack
-	.previous
-#else
-	sw	a1, 16(sp)
-	sw	a2, 20(sp)
-
-	move	a0, sp
-	move	a2, a1
-	li	a1, 1
-	jal	do_page_fault
-
-	lw	a1, 16(sp)
-	lw	a2, 20(sp)
-
-	/*
-	 * At this point the page should be readable and writable unless
-	 * there was no more memory available.
-	 */
-1:	lw	v0, (a1)
-2:	sw	a2, (a1)
-
-	.section __ex_table,"a"
-	PTR	1b, no_mem
-	PTR	2b, no_mem
-	.previous
-#endif
-
-	sw	v0, PT_R2(sp)		# result
-1:
-
-	/* Success, so skip usual error handling garbage.  */
-	LONG_L	a2, TI_FLAGS($28)	# syscall tracing enabled?
-	li	t0, _TIF_SYSCALL_TRACE
-	and	t0, a2, t0
-	bnez	t0, 1f
-
-	b	o32_syscall_exit
-
-1:	SAVE_STATIC
-	jal	do_syscall_trace
-	j	syscall_exit
-
-no_mem:	li	v0, -ENOMEM
-	jr	ra
-
-bad_address:
-	li	v0, -EFAULT
-	jr	ra
-
-bad_alignment:
-	li	v0, -EINVAL
-	jr	ra
-	END(mips_atomic_set)
-
-	LEAF(sys_sysmips)
-	beq	a0, MIPS_ATOMIC_SET, mips_atomic_set
-	j	_sys_sysmips
-	END(sys_sysmips)
-
 	LEAF(sys_syscall)
-	lw	t0, PT_R29(sp)			# user sp
+	subu	t0, a0, __NR_O32_Linux	# check syscall number
+	sltiu	v0, t0, __NR_O32_Linux_syscalls + 1
+	beqz	t0, einval		# do not recurse
+	sll	t1, t0, 3
+	beqz	v0, einval
+	lw	t2, sys_call_table(t1)		# syscall routine
 
-	sltu	v0, a0, __NR_O32_Linux + __NR_O32_Linux_syscalls + 1
-	beqz	v0, enosys
-
-	sll	v0, a0, 2
-	la	v1, sys_syscall
-	lw	t2, sys_call_table(v0)		# function pointer
-	lbu	t4, sys_narg_table(a0)		# number of arguments
-
-	li	v0, -EINVAL
-	beq	t2, v1, out			# do not recurse
-
-	beqz	t2, enosys			# null function pointer?
-
-	andi	v0, t0, 0x3			# unaligned stack pointer?
-	bnez	v0, sigsegv
-
-	addu	v0, t0, 16			# v0 = usp + 16
-	addu	t1, v0, 12			# 3 32-bit arguments
-	lw	v1, TI_ADDR_LIMIT($28)
-	or	v0, v0, t1
-	and	v1, v1, v0
-	bltz	v1, efault
+	/* Some syscalls like execve get their arguments from struct pt_regs
+	   and claim zero arguments in the syscall table. Thus we have to
+	   assume the worst case and shuffle around all potential arguments.
+	   If you want performance, don't use indirect syscalls. */
 
 	move	a0, a1				# shift argument registers
 	move	a1, a2
 	move	a2, a3
-
-1:	lw	a3, 16(t0)
-2:	lw	t3, 20(t0)
-3:	lw	t4, 24(t0)
-
-	.section	__ex_table, "a"
-	.word	1b, efault
-	.word	2b, efault
-	.word	3b, efault
-	.previous
-
-	sw	t3, 16(sp)			# put into new stackframe
-	sw	t4, 20(sp)
-
-	bnez	t4, 1f				# zero arguments?
-	addu	a0, sp, 32			# then pass sp in a0
-1:
-
-	sw	t3, 16(sp)
-	sw	v1, 20(sp)
+	lw	a3, 16(sp)
+	lw	t4, 20(sp)
+	lw	t5, 24(sp)
+	lw	t6, 28(sp)
+	sw	t4, 16(sp)
+	sw	t5, 20(sp)
+	sw	t6, 24(sp)
+	sw	a0, PT_R4(sp)			# .. and push back a0 - a3, some
+	sw	a1, PT_R5(sp)			# syscalls expect them there
+	sw	a2, PT_R6(sp)
+	sw	a3, PT_R7(sp)
+	sw	a3, PT_R26(sp)			# update a3 for syscall restarting
 	jr	t2
 	/* Unreached */
 
-enosys:	li	v0, -ENOSYS
-	b	out
-
-sigsegv:
-	li	a0, _SIGSEGV
-	move	a1, $28
-	jal	force_sig
-	/* Fall through */
-
-efault:	li	v0, -EFAULT
-
-out:	jr	ra
+einval:	li	v0, -ENOSYS
+	jr	ra
 	END(sys_syscall)
 
 	.macro	fifty ptr, nargs, from=1, to=50
@@ -338,12 +236,7 @@ out:	jr	ra
 	.endm
 
 	.macro	syscalltable
-	mille	sys_ni_syscall		0	/*    0 -  999 SVR4 flavour */
-	#include "irix5sys.h"			/* 1000 - 1999 32-bit IRIX */
-	mille	sys_ni_syscall		0	/* 2000 - 2999 BSD43 flavour */
-	mille	sys_ni_syscall		0	/* 3000 - 3999 POSIX flavour */
-
-	sys	sys_syscall		0	/* 4000 */
+	sys	sys_syscall		8	/* 4000 */
 	sys	sys_exit		1
 	sys	sys_fork		0
 	sys	sys_read		3
@@ -385,7 +278,7 @@ out:	jr	ra
 	sys	sys_mkdir		2
 	sys	sys_rmdir		1	/* 4040 */
 	sys	sys_dup			1
-	sys	sys_pipe		0
+	sys	sysm_pipe		0
 	sys	sys_times		1
 	sys	sys_ni_syscall		0
 	sys	sys_brk			1	/* 4045 */
@@ -394,7 +287,7 @@ out:	jr	ra
 	sys	sys_ni_syscall		0	/* was signal(2) */
 	sys	sys_geteuid		0
 	sys	sys_getegid		0	/* 4050 */
-	sys	sys_acct		0
+	sys	sys_acct		1
 	sys	sys_umount		2
 	sys	sys_ni_syscall		0
 	sys	sys_ioctl		3
@@ -432,8 +325,8 @@ out:	jr	ra
 	sys	sys_uselib		1
 	sys	sys_swapon		2
 	sys	sys_reboot		3
-	sys	old_readdir		3
-	sys	old_mmap		6	/* 4090 */
+	sys	sys_old_readdir		3
+	sys	sys_mips_mmap		6	/* 4090 */
 	sys	sys_munmap		2
 	sys	sys_truncate		2
 	sys	sys_ftruncate		2
@@ -474,7 +367,7 @@ out:	jr	ra
 	sys	sys_init_module		5
 	sys	sys_delete_module	1
 	sys	sys_ni_syscall		0	/* 4130	was get_kernel_syms */
-	sys	sys_quotactl		0
+	sys	sys_quotactl		4
 	sys	sys_getpgid		1
 	sys	sys_fchdir		1
 	sys	sys_bdflush		2
@@ -495,7 +388,7 @@ out:	jr	ra
 	sys	sys_sysmips		4
 	sys	sys_ni_syscall		0	/* 4150 */
 	sys	sys_getsid		1
-	sys	sys_fdatasync		0
+	sys	sys_fdatasync		1
 	sys	sys_sysctl		1
 	sys	sys_mlock		2
 	sys	sys_munlock		2	/* 4155 */
@@ -510,7 +403,7 @@ out:	jr	ra
 	sys	sys_sched_get_priority_min 1
 	sys	sys_sched_rr_get_interval 2	/* 4165 */
 	sys	sys_nanosleep,		2
-	sys	sys_mremap,		4
+	sys	sys_mremap,		5
 	sys	sys_accept		3
 	sys	sys_bind		3
 	sys	sys_connect		3	/* 4170 */
@@ -553,7 +446,7 @@ out:	jr	ra
 	sys	sys_sendfile		4
 	sys	sys_ni_syscall		0
 	sys	sys_ni_syscall		0
-	sys	sys_mmap2		6	/* 4210 */
+	sys	sys_mips_mmap2		6	/* 4210 */
 	sys	sys_truncate64		4
 	sys	sys_ftruncate64		4
 	sys	sys_stat64		2
@@ -581,23 +474,34 @@ out:	jr	ra
 	sys	sys_fremovexattr	2	/* 4235 */
 	sys	sys_tkill		2
 	sys	sys_sendfile64		5
-	sys	sys_futex		2
+	sys	sys_futex		6
+#ifdef CONFIG_MIPS_MT_FPAFF
+	/*
+	 * For FPU affinity scheduling on MIPS MT processors, we need to
+	 * intercept sys_sched_xxxaffinity() calls until we get a proper hook
+	 * in kernel/sched.c.  Considered only temporary we only support these
+	 * hooks for the 32-bit kernel - there is no MIPS64 MT processor atm.
+	 */
+	sys	mipsmt_sys_sched_setaffinity	3
+	sys	mipsmt_sys_sched_getaffinity	3
+#else
 	sys	sys_sched_setaffinity	3
 	sys	sys_sched_getaffinity	3	/* 4240 */
+#endif /* CONFIG_MIPS_MT_FPAFF */
 	sys	sys_io_setup		2
 	sys	sys_io_destroy		1
 	sys	sys_io_getevents	5
 	sys	sys_io_submit		3
 	sys	sys_io_cancel		3	/* 4245 */
 	sys	sys_exit_group		1
-	sys	sys_lookup_dcookie	3
+	sys	sys_lookup_dcookie	4
 	sys	sys_epoll_create	1
 	sys	sys_epoll_ctl		4
 	sys	sys_epoll_wait		3	/* 4250 */
 	sys	sys_remap_file_pages	5
 	sys	sys_set_tid_address	1
 	sys	sys_restart_syscall	0
-	sys	sys_fadvise64		6
+	sys	sys_fadvise64_64	7
 	sys	sys_statfs64		3	/* 4255 */
 	sys	sys_fstatfs64		2
 	sys	sys_timer_create	3
@@ -611,22 +515,93 @@ out:	jr	ra
 	sys	sys_clock_nanosleep	4	/* 4265 */
 	sys	sys_tgkill		3
 	sys	sys_utimes		2
-
+	sys	sys_mbind		4
+	sys	sys_ni_syscall		0	/* sys_get_mempolicy */
+	sys	sys_ni_syscall		0	/* 4270 sys_set_mempolicy */
+	sys	sys_mq_open		4
+	sys	sys_mq_unlink		1
+	sys	sys_mq_timedsend	5
+	sys	sys_mq_timedreceive	5
+	sys	sys_mq_notify		2	/* 4275 */
+	sys	sys_mq_getsetattr	3
+	sys	sys_ni_syscall		0	/* sys_vserver */
+	sys	sys_waitid		5
+	sys	sys_ni_syscall		0	/* available, was setaltroot */
+	sys	sys_add_key		5	/* 4280 */
+	sys	sys_request_key		4
+	sys	sys_keyctl		5
+	sys	sys_set_thread_area	1
+	sys	sys_inotify_init	0
+	sys	sys_inotify_add_watch	3	/* 4285 */
+	sys	sys_inotify_rm_watch	2
+	sys	sys_migrate_pages	4
+	sys	sys_openat		4
+	sys	sys_mkdirat		3
+	sys	sys_mknodat		4	/* 4290 */
+	sys	sys_fchownat		5
+	sys	sys_futimesat		3
+	sys	sys_fstatat64		4
+	sys	sys_unlinkat		3
+	sys	sys_renameat		4	/* 4295 */
+	sys	sys_linkat		5
+	sys	sys_symlinkat		3
+	sys	sys_readlinkat		4
+	sys	sys_fchmodat		3
+	sys	sys_faccessat		3	/* 4300 */
+	sys	sys_pselect6		6
+	sys	sys_ppoll		5
+	sys	sys_unshare		1
+	sys	sys_splice		6
+	sys	sys_sync_file_range	7	/* 4305 */
+	sys	sys_tee			4
+	sys	sys_vmsplice		4
+	sys	sys_move_pages		6
+	sys	sys_set_robust_list	2
+	sys	sys_get_robust_list	3	/* 4310 */
+	sys	sys_kexec_load		4
+	sys	sys_getcpu		3
+	sys	sys_epoll_pwait		6
+	sys	sys_ioprio_set		3
+	sys	sys_ioprio_get		2	/* 4315 */
+	sys	sys_utimensat		4
+	sys	sys_signalfd		3
+	sys	sys_ni_syscall		0	/* was timerfd */
+	sys	sys_eventfd		1
+	sys	sys_fallocate		6	/* 4320 */
+	sys	sys_timerfd_create	2
+	sys	sys_timerfd_gettime	2
+	sys	sys_timerfd_settime	4
+	sys	sys_signalfd4		4
+	sys	sys_eventfd2		2	/* 4325 */
+	sys	sys_epoll_create1	1
+	sys	sys_dup3		3
+	sys	sys_pipe2		2
+	sys	sys_inotify_init1	1
+	sys	sys_preadv		6	/* 4330 */
+	sys	sys_pwritev		6
+	sys	sys_rt_tgsigqueueinfo	4
+	sys	sys_perf_event_open	5
+	sys	sys_accept4		4
+	sys	sys_recvmmsg		5	/* 4335 */
+	sys	sys_fanotify_init	2
+	sys	sys_fanotify_mark	6
+	sys	sys_prlimit64		4
+	sys	sys_name_to_handle_at	5
+	sys	sys_open_by_handle_at	3	/* 4340 */
+	sys	sys_clock_adjtime	2
+	sys	sys_syncfs		1
 	.endm
+
+	/* We pre-compute the number of _instruction_ bytes needed to
+	   load or store the arguments 6-8. Negative values are ignored. */
 
 	.macro  sys function, nargs
 	PTR	\function
+	LONG	(\nargs << 2) - (5 << 2)
 	.endm
 
 	.align	3
-sys_call_table:
+	.type	sys_call_table,@object
+EXPORT(sys_call_table)
 	syscalltable
 	.size	sys_call_table, . - sys_call_table
-
-	.macro	sys function, nargs
-	.byte	\nargs
-	.endm
-
-sys_narg_table:
-	syscalltable
-	.size	sys_narg_table, . - sys_narg_table

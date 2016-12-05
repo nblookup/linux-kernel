@@ -4,24 +4,23 @@
   (C) 2001 Andreas Gruenbacher, <a.gruenbacher@computer.org>
 */
 
-#include <linux/xattr_acl.h>
+#include <linux/posix_acl_xattr.h>
 
 #define EXT2_ACL_VERSION	0x0001
-#define EXT2_ACL_MAX_ENTRIES	32
 
 typedef struct {
-	__u16		e_tag;
-	__u16		e_perm;
-	__u32		e_id;
+	__le16		e_tag;
+	__le16		e_perm;
+	__le32		e_id;
 } ext2_acl_entry;
 
 typedef struct {
-	__u16		e_tag;
-	__u16		e_perm;
+	__le16		e_tag;
+	__le16		e_perm;
 } ext2_acl_entry_short;
 
 typedef struct {
-	__u32		a_version;
+	__le32		a_version;
 } ext2_acl_header;
 
 static inline size_t ext2_acl_size(int count)
@@ -54,21 +53,14 @@ static inline int ext2_acl_count(size_t size)
 
 #ifdef CONFIG_EXT2_FS_POSIX_ACL
 
-/* Value for inode->u.ext2_i.i_acl and inode->u.ext2_i.i_default_acl
-   if the ACL has not been cached */
-#define EXT2_ACL_NOT_CACHED ((void *)-1)
-
 /* acl.c */
-extern int ext2_permission (struct inode *, int, struct nameidata *);
+extern int ext2_check_acl (struct inode *, int, unsigned int);
 extern int ext2_acl_chmod (struct inode *);
 extern int ext2_init_acl (struct inode *, struct inode *);
 
-extern int init_ext2_acl(void);
-extern void exit_ext2_acl(void);
-
 #else
 #include <linux/sched.h>
-#define ext2_permission NULL
+#define ext2_check_acl	NULL
 #define ext2_get_acl	NULL
 #define ext2_set_acl	NULL
 
@@ -80,7 +72,6 @@ ext2_acl_chmod (struct inode *inode)
 
 static inline int ext2_init_acl (struct inode *inode, struct inode *dir)
 {
-	inode->i_mode &= ~current->fs->umask;
 	return 0;
 }
 #endif

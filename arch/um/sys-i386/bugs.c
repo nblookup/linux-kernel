@@ -1,157 +1,76 @@
-/* 
- * Copyright (C) 2002 Jeff Dike (jdike@karaya.com)
+/*
+ * Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <string.h>
-#include <sys/signal.h>
+#include <signal.h>
+#include "kern_constants.h"
 #include "kern_util.h"
+#include "longjmp.h"
+#include "task.h"
 #include "user.h"
 #include "sysdep/ptrace.h"
-#include "task.h"
-
-#define MAXTOKEN 64
 
 /* Set during early boot */
-int cpu_has_cmov = 1;
-int cpu_has_xmm = 0;
+static int host_has_cmov = 1;
+static jmp_buf cmov_test_return;
 
-static char token(int fd, char *buf, int len, char stop)
+static void cmov_sigill_test_handler(int sig)
 {
-	int n;
-	char *ptr, *end, c;
-
-	ptr = buf;
-	end = &buf[len];
-	do {
-		n = read(fd, ptr, sizeof(*ptr));
-		c = *ptr++;
-		if(n == 0) return(0);
-		else if(n != sizeof(*ptr)){
-			printk("Reading /proc/cpuinfo failed, "
-			       "errno = %d\n", errno);
-			return(-errno);
-		}
-	} while((c != '\n') && (c != stop) && (ptr < end));
-
-	if(ptr == end){
-		printk("Failed to find '%c' in /proc/cpuinfo\n", stop);
-		return(-1);
-	}
-	*(ptr - 1) = '\0';
-	return(c);
-}
-
-static int check_cpu_feature(char *feature, int *have_it)
-{
-	char buf[MAXTOKEN], c;
-	int fd, len = sizeof(buf)/sizeof(buf[0]), n;
-
-	printk("Checking for host processor %s support...", feature);
-	fd = open("/proc/cpuinfo", O_RDONLY);
-	if(fd < 0){
-		printk("Couldn't open /proc/cpuinfo, errno = %d\n", errno);
-		return(0);
-	}
-
-	*have_it = 0;
-	buf[len - 1] = '\0';
-	while(1){
-		c = token(fd, buf, len - 1, ':');
-		if(c <= 0) goto out;
-		else if(c != ':'){
-			printk("Failed to find ':' in /proc/cpuinfo\n");
-			goto out;
-		}
-
-		if(!strncmp(buf, "flags", strlen("flags"))) break;
-
-		do {
-			n = read(fd, &c, sizeof(c));
-			if(n != sizeof(c)){
-				printk("Failed to find newline in "
-				       "/proc/cpuinfo, n = %d, errno = %d\n",
-				       n, errno);
-				goto out;
-			}
-		} while(c != '\n');
-	}
-
-	c = token(fd, buf, len - 1, ' ');
-	if(c < 0) goto out;
-	else if(c != ' '){
-		printk("Failed to find ':' in /proc/cpuinfo\n");
-		goto out;
-	}
-
-	while(1){
-		c = token(fd, buf, len - 1, ' ');
-		if(c < 0) goto out;
-		else if(c == '\n') break;
-
-		if(!strcmp(buf, feature)){
-			*have_it = 1;
-			goto out;
-		}
-	}
- out:
-	if(*have_it == 0) printk("No\n");
-	else if(*have_it == 1) printk("Yes\n");
-	close(fd);
-	return(1);
+	host_has_cmov = 0;
+	longjmp(cmov_test_return, 1);
 }
 
 void arch_check_bugs(void)
 {
-	int have_it;
+	struct sigaction old, new;
 
-	if(access("/proc/cpuinfo", R_OK)){
-		printk("/proc/cpuinfo not available - skipping CPU capability "
-		       "checks\n");
-		return;
-	}
-	if(check_cpu_feature("cmov", &have_it)) cpu_has_cmov = have_it;
-	if(check_cpu_feature("xmm", &have_it)) cpu_has_xmm = have_it;
+	printk(UM_KERN_INFO "Checking for host processor cmov support...");
+	new.sa_handler = cmov_sigill_test_handler;
+
+	/* Make sure that SIGILL is enabled after the handler longjmps back */
+	new.sa_flags = SA_NODEFER;
+	sigemptyset(&new.sa_mask);
+	sigaction(SIGILL, &new, &old);
+
+	if (setjmp(cmov_test_return) == 0) {
+		unsigned long foo = 0;
+		__asm__ __volatile__("cmovz %0, %1" : "=r" (foo) : "0" (foo));
+		printk(UM_KERN_CONT "Yes\n");
+	} else
+		printk(UM_KERN_CONT "No\n");
+
+	sigaction(SIGILL, &old, &new);
 }
 
-int arch_handle_signal(int sig, union uml_pt_regs *regs)
+void arch_examine_signal(int sig, struct uml_pt_regs *regs)
 {
-	unsigned long ip;
+	unsigned char tmp[2];
 
-	/* This is testing for a cmov (0x0f 0x4x) instruction causing a
+	/*
+	 * This is testing for a cmov (0x0f 0x4x) instruction causing a
 	 * SIGILL in init.
 	 */
-	if((sig != SIGILL) || (TASK_PID(get_current()) != 1)) return(0);
+	if ((sig != SIGILL) || (TASK_PID(get_current()) != 1))
+		return;
 
-	ip = UPT_IP(regs);
-	if((*((char *) ip) != 0x0f) || ((*((char *) (ip + 1)) & 0xf0) != 0x40))
-		return(0);
+	if (copy_from_user_proc(tmp, (void *) UPT_IP(regs), 2)) {
+		printk(UM_KERN_ERR "SIGILL in init, could not read "
+		       "instructions!\n");
+		return;
+	}
 
-	if(cpu_has_cmov == 0)
-		panic("SIGILL caused by cmov, which this processor doesn't "
-		      "implement, boot a filesystem compiled for older "
-		      "processors");
-	else if(cpu_has_cmov == 1)
-		panic("SIGILL caused by cmov, which this processor claims to "
-		      "implement");
-	else if(cpu_has_cmov == -1)
-		panic("SIGILL caused by cmov, couldn't tell if this processor "
-		      "implements it, boot a filesystem compiled for older "
-		      "processors");
-	else panic("Bad value for cpu_has_cmov (%d)", cpu_has_cmov);
-	return(0);
+	if ((tmp[0] != 0x0f) || ((tmp[1] & 0xf0) != 0x40))
+		return;
+
+	if (host_has_cmov == 0)
+		printk(UM_KERN_ERR "SIGILL caused by cmov, which this "
+		       "processor doesn't implement.  Boot a filesystem "
+		       "compiled for older processors");
+	else if (host_has_cmov == 1)
+		printk(UM_KERN_ERR "SIGILL caused by cmov, which this "
+		       "processor claims to implement");
+	else
+		printk(UM_KERN_ERR "Bad value for host_has_cmov (%d)",
+			host_has_cmov);
 }
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

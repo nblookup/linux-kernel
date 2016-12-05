@@ -1,11 +1,9 @@
 /*
- *	Linux INET6 implementation 
+ *	Linux INET6 implementation
  *	Forwarding Information Database
  *
  *	Authors:
- *	Pedro Roque		<roque@di.fc.ul.pt>	
- *
- *	$Id: ip6_fib.c,v 1.25 2001/10/31 21:55:55 davem Exp $
+ *	Pedro Roque		<roque@di.fc.ul.pt>
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -18,8 +16,8 @@
  * 	Yuji SEKIYA @USAGI:	Support default route on router node;
  * 				remove ip6_null_entry from the top of
  * 				routing table.
+ * 	Ville Nuorvala:		Fixed routing subtrees.
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/net.h>
@@ -27,6 +25,8 @@
 #include <linux/netdevice.h>
 #include <linux/in6.h>
 #include <linux/init.h>
+#include <linux/list.h>
+#include <linux/slab.h>
 
 #ifdef 	CONFIG_PROC_FS
 #include <linux/proc_fs.h>
@@ -47,9 +47,7 @@
 #define RT6_TRACE(x...) do { ; } while (0)
 #endif
 
-struct rt6_statistics	rt6_stats;
-
-static kmem_cache_t * fib6_node_kmem;
+static struct kmem_cache * fib6_node_kmem __read_mostly;
 
 enum fib_walk_state_t
 {
@@ -65,42 +63,53 @@ enum fib_walk_state_t
 struct fib6_cleaner_t
 {
 	struct fib6_walker_t w;
+	struct net *net;
 	int (*func)(struct rt6_info *, void *arg);
 	void *arg;
 };
 
-rwlock_t fib6_walker_lock = RW_LOCK_UNLOCKED;
-
+static DEFINE_RWLOCK(fib6_walker_lock);
 
 #ifdef CONFIG_IPV6_SUBTREES
 #define FWS_INIT FWS_S
-#define SUBTREE(fn) ((fn)->subtree)
 #else
 #define FWS_INIT FWS_L
-#define SUBTREE(fn) NULL
 #endif
 
-static void fib6_prune_clones(struct fib6_node *fn, struct rt6_info *rt);
-static struct fib6_node * fib6_repair_tree(struct fib6_node *fn);
+static void fib6_prune_clones(struct net *net, struct fib6_node *fn,
+			      struct rt6_info *rt);
+static struct rt6_info *fib6_find_prefix(struct net *net, struct fib6_node *fn);
+static struct fib6_node *fib6_repair_tree(struct net *net, struct fib6_node *fn);
+static int fib6_walk(struct fib6_walker_t *w);
+static int fib6_walk_continue(struct fib6_walker_t *w);
 
 /*
  *	A routing update causes an increase of the serial number on the
- *	afected subtree. This allows for cached routes to be asynchronously
+ *	affected subtree. This allows for cached routes to be asynchronously
  *	tested when modifications are made to the destination cache as a
  *	result of redirects, path MTU changes, etc.
  */
 
 static __u32 rt_sernum;
 
-static struct timer_list ip6_fib_timer = TIMER_INITIALIZER(fib6_run_gc, 0, 0);
+static void fib6_gc_timer_cb(unsigned long arg);
 
-static struct fib6_walker_t fib6_walker_list = {
-	.prev	= &fib6_walker_list,
-	.next	= &fib6_walker_list, 
-};
+static LIST_HEAD(fib6_walkers);
+#define FOR_WALKERS(w) list_for_each_entry(w, &fib6_walkers, lh)
 
-#define FOR_WALKERS(w) for ((w)=fib6_walker_list.next; (w) != &fib6_walker_list; (w)=(w)->next)
+static inline void fib6_walker_link(struct fib6_walker_t *w)
+{
+	write_lock_bh(&fib6_walker_lock);
+	list_add(&w->lh, &fib6_walkers);
+	write_unlock_bh(&fib6_walker_lock);
+}
 
+static inline void fib6_walker_unlink(struct fib6_walker_t *w)
+{
+	write_lock_bh(&fib6_walker_lock);
+	list_del(&w->lh);
+	write_unlock_bh(&fib6_walker_lock);
+}
 static __inline__ u32 fib6_new_sernum(void)
 {
 	u32 n = ++rt_sernum;
@@ -112,107 +121,38 @@ static __inline__ u32 fib6_new_sernum(void)
 /*
  *	Auxiliary address test functions for the radix tree.
  *
- *	These assume a 32bit processor (although it will work on 
+ *	These assume a 32bit processor (although it will work on
  *	64bit processors)
  */
 
 /*
- *	compare "prefix length" bits of an address
- */
-
-static __inline__ int addr_match(void *token1, void *token2, int prefixlen)
-{
-	__u32 *a1 = token1;
-	__u32 *a2 = token2;
-	int pdw;
-	int pbi;
-
-	pdw = prefixlen >> 5;	  /* num of whole __u32 in prefix */
-	pbi = prefixlen &  0x1f;  /* num of bits in incomplete u32 in prefix */
-
-	if (pdw)
-		if (memcmp(a1, a2, pdw << 2))
-			return 0;
-
-	if (pbi) {
-		__u32 mask;
-
-		mask = htonl((0xffffffff) << (32 - pbi));
-
-		if ((a1[pdw] ^ a2[pdw]) & mask)
-			return 0;
-	}
-
-	return 1;
-}
-
-/*
  *	test bit
  */
+#if defined(__LITTLE_ENDIAN)
+# define BITOP_BE32_SWIZZLE	(0x1F & ~7)
+#else
+# define BITOP_BE32_SWIZZLE	0
+#endif
 
-static __inline__ int addr_bit_set(void *token, int fn_bit)
+static __inline__ __be32 addr_bit_set(void *token, int fn_bit)
 {
-	__u32 *addr = token;
-
-	return htonl(1 << ((~fn_bit)&0x1F)) & addr[fn_bit>>5];
-}
-
-/*
- *	find the first different bit between two addresses
- *	length of address must be a multiple of 32bits
- */
-
-static __inline__ int addr_diff(void *token1, void *token2, int addrlen)
-{
-	__u32 *a1 = token1;
-	__u32 *a2 = token2;
-	int i;
-
-	addrlen >>= 2;
-
-	for (i = 0; i < addrlen; i++) {
-		__u32 xb;
-
-		xb = a1[i] ^ a2[i];
-
-		if (xb) {
-			int j = 31;
-
-			xb = ntohl(xb);
-
-			while ((xb & (1 << j)) == 0)
-				j--;
-
-			return (i * 32 + 31 - j);
-		}
-	}
-
+	__be32 *addr = token;
 	/*
-	 *	we should *never* get to this point since that 
-	 *	would mean the addrs are equal
-	 *
-	 *	However, we do get to it 8) And exacly, when
-	 *	addresses are equal 8)
-	 *
-	 *	ip route add 1111::/128 via ...
-	 *	ip route add 1111::/64 via ...
-	 *	and we are here.
-	 *
-	 *	Ideally, this function should stop comparison
-	 *	at prefix length. It does not, but it is still OK,
-	 *	if returned value is greater than prefix length.
-	 *					--ANK (980803)
+	 * Here,
+	 * 	1 << ((~fn_bit ^ BITOP_BE32_SWIZZLE) & 0x1f)
+	 * is optimized version of
+	 *	htonl(1 << ((~fn_bit)&0x1F))
+	 * See include/asm-generic/bitops/le.h.
 	 */
-
-	return addrlen<<5;
+	return (__force __be32)(1 << ((~fn_bit ^ BITOP_BE32_SWIZZLE) & 0x1f)) &
+	       addr[fn_bit >> 5];
 }
 
 static __inline__ struct fib6_node * node_alloc(void)
 {
 	struct fib6_node *fn;
 
-	if ((fn = kmem_cache_alloc(fib6_node_kmem, SLAB_ATOMIC)) != NULL)
-		memset(fn, 0, sizeof(struct fib6_node));
+	fn = kmem_cache_zalloc(fib6_node_kmem, GFP_ATOMIC);
 
 	return fn;
 }
@@ -225,9 +165,257 @@ static __inline__ void node_free(struct fib6_node * fn)
 static __inline__ void rt6_release(struct rt6_info *rt)
 {
 	if (atomic_dec_and_test(&rt->rt6i_ref))
-		dst_free(&rt->u.dst);
+		dst_free(&rt->dst);
 }
 
+static void fib6_link_table(struct net *net, struct fib6_table *tb)
+{
+	unsigned int h;
+
+	/*
+	 * Initialize table lock at a single place to give lockdep a key,
+	 * tables aren't visible prior to being linked to the list.
+	 */
+	rwlock_init(&tb->tb6_lock);
+
+	h = tb->tb6_id & (FIB6_TABLE_HASHSZ - 1);
+
+	/*
+	 * No protection necessary, this is the only list mutatation
+	 * operation, tables never disappear once they exist.
+	 */
+	hlist_add_head_rcu(&tb->tb6_hlist, &net->ipv6.fib_table_hash[h]);
+}
+
+#ifdef CONFIG_IPV6_MULTIPLE_TABLES
+
+static struct fib6_table *fib6_alloc_table(struct net *net, u32 id)
+{
+	struct fib6_table *table;
+
+	table = kzalloc(sizeof(*table), GFP_ATOMIC);
+	if (table != NULL) {
+		table->tb6_id = id;
+		table->tb6_root.leaf = net->ipv6.ip6_null_entry;
+		table->tb6_root.fn_flags = RTN_ROOT | RTN_TL_ROOT | RTN_RTINFO;
+	}
+
+	return table;
+}
+
+struct fib6_table *fib6_new_table(struct net *net, u32 id)
+{
+	struct fib6_table *tb;
+
+	if (id == 0)
+		id = RT6_TABLE_MAIN;
+	tb = fib6_get_table(net, id);
+	if (tb)
+		return tb;
+
+	tb = fib6_alloc_table(net, id);
+	if (tb != NULL)
+		fib6_link_table(net, tb);
+
+	return tb;
+}
+
+struct fib6_table *fib6_get_table(struct net *net, u32 id)
+{
+	struct fib6_table *tb;
+	struct hlist_head *head;
+	struct hlist_node *node;
+	unsigned int h;
+
+	if (id == 0)
+		id = RT6_TABLE_MAIN;
+	h = id & (FIB6_TABLE_HASHSZ - 1);
+	rcu_read_lock();
+	head = &net->ipv6.fib_table_hash[h];
+	hlist_for_each_entry_rcu(tb, node, head, tb6_hlist) {
+		if (tb->tb6_id == id) {
+			rcu_read_unlock();
+			return tb;
+		}
+	}
+	rcu_read_unlock();
+
+	return NULL;
+}
+
+static void __net_init fib6_tables_init(struct net *net)
+{
+	fib6_link_table(net, net->ipv6.fib6_main_tbl);
+	fib6_link_table(net, net->ipv6.fib6_local_tbl);
+}
+#else
+
+struct fib6_table *fib6_new_table(struct net *net, u32 id)
+{
+	return fib6_get_table(net, id);
+}
+
+struct fib6_table *fib6_get_table(struct net *net, u32 id)
+{
+	  return net->ipv6.fib6_main_tbl;
+}
+
+struct dst_entry *fib6_rule_lookup(struct net *net, struct flowi6 *fl6,
+				   int flags, pol_lookup_t lookup)
+{
+	return (struct dst_entry *) lookup(net, net->ipv6.fib6_main_tbl, fl6, flags);
+}
+
+static void __net_init fib6_tables_init(struct net *net)
+{
+	fib6_link_table(net, net->ipv6.fib6_main_tbl);
+}
+
+#endif
+
+static int fib6_dump_node(struct fib6_walker_t *w)
+{
+	int res;
+	struct rt6_info *rt;
+
+	for (rt = w->leaf; rt; rt = rt->dst.rt6_next) {
+		res = rt6_dump_route(rt, w->args);
+		if (res < 0) {
+			/* Frame is full, suspend walking */
+			w->leaf = rt;
+			return 1;
+		}
+		WARN_ON(res == 0);
+	}
+	w->leaf = NULL;
+	return 0;
+}
+
+static void fib6_dump_end(struct netlink_callback *cb)
+{
+	struct fib6_walker_t *w = (void*)cb->args[2];
+
+	if (w) {
+		if (cb->args[4]) {
+			cb->args[4] = 0;
+			fib6_walker_unlink(w);
+		}
+		cb->args[2] = 0;
+		kfree(w);
+	}
+	cb->done = (void*)cb->args[3];
+	cb->args[1] = 3;
+}
+
+static int fib6_dump_done(struct netlink_callback *cb)
+{
+	fib6_dump_end(cb);
+	return cb->done ? cb->done(cb) : 0;
+}
+
+static int fib6_dump_table(struct fib6_table *table, struct sk_buff *skb,
+			   struct netlink_callback *cb)
+{
+	struct fib6_walker_t *w;
+	int res;
+
+	w = (void *)cb->args[2];
+	w->root = &table->tb6_root;
+
+	if (cb->args[4] == 0) {
+		w->count = 0;
+		w->skip = 0;
+
+		read_lock_bh(&table->tb6_lock);
+		res = fib6_walk(w);
+		read_unlock_bh(&table->tb6_lock);
+		if (res > 0) {
+			cb->args[4] = 1;
+			cb->args[5] = w->root->fn_sernum;
+		}
+	} else {
+		if (cb->args[5] != w->root->fn_sernum) {
+			/* Begin at the root if the tree changed */
+			cb->args[5] = w->root->fn_sernum;
+			w->state = FWS_INIT;
+			w->node = w->root;
+			w->skip = w->count;
+		} else
+			w->skip = 0;
+
+		read_lock_bh(&table->tb6_lock);
+		res = fib6_walk_continue(w);
+		read_unlock_bh(&table->tb6_lock);
+		if (res <= 0) {
+			fib6_walker_unlink(w);
+			cb->args[4] = 0;
+		}
+	}
+
+	return res;
+}
+
+static int inet6_dump_fib(struct sk_buff *skb, struct netlink_callback *cb)
+{
+	struct net *net = sock_net(skb->sk);
+	unsigned int h, s_h;
+	unsigned int e = 0, s_e;
+	struct rt6_rtnl_dump_arg arg;
+	struct fib6_walker_t *w;
+	struct fib6_table *tb;
+	struct hlist_node *node;
+	struct hlist_head *head;
+	int res = 0;
+
+	s_h = cb->args[0];
+	s_e = cb->args[1];
+
+	w = (void *)cb->args[2];
+	if (w == NULL) {
+		/* New dump:
+		 *
+		 * 1. hook callback destructor.
+		 */
+		cb->args[3] = (long)cb->done;
+		cb->done = fib6_dump_done;
+
+		/*
+		 * 2. allocate and initialize walker.
+		 */
+		w = kzalloc(sizeof(*w), GFP_ATOMIC);
+		if (w == NULL)
+			return -ENOMEM;
+		w->func = fib6_dump_node;
+		cb->args[2] = (long)w;
+	}
+
+	arg.skb = skb;
+	arg.cb = cb;
+	arg.net = net;
+	w->args = &arg;
+
+	for (h = s_h; h < FIB6_TABLE_HASHSZ; h++, s_e = 0) {
+		e = 0;
+		head = &net->ipv6.fib_table_hash[h];
+		hlist_for_each_entry(tb, node, head, tb6_hlist) {
+			if (e < s_e)
+				goto next;
+			res = fib6_dump_table(tb, skb, cb);
+			if (res != 0)
+				goto out;
+next:
+			e++;
+		}
+	}
+out:
+	cb->args[1] = e;
+	cb->args[0] = h;
+
+	res = res < 0 ? res : skb->len;
+	if (res <= 0)
+		fib6_dump_end(cb);
+	return res;
+}
 
 /*
  *	Routing Table
@@ -245,7 +433,7 @@ static struct fib6_node * fib6_add_1(struct fib6_node *root, void *addr,
 	struct fib6_node *pn = NULL;
 	struct rt6key *key;
 	int	bit;
-       	int	dir = 0;
+	__be32	dir = 0;
 	__u32	sernum = fib6_new_sernum();
 
 	RT6_TRACE("fib6_add_1\n");
@@ -261,29 +449,29 @@ static struct fib6_node * fib6_add_1(struct fib6_node *root, void *addr,
 		 *	Prefix match
 		 */
 		if (plen < fn->fn_bit ||
-		    !addr_match(&key->addr, addr, fn->fn_bit))
+		    !ipv6_prefix_equal(&key->addr, addr, fn->fn_bit))
 			goto insert_above;
-		
+
 		/*
 		 *	Exact match ?
 		 */
-			 
+
 		if (plen == fn->fn_bit) {
 			/* clean up an intermediate node */
 			if ((fn->fn_flags & RTN_RTINFO) == 0) {
 				rt6_release(fn->leaf);
 				fn->leaf = NULL;
 			}
-			
+
 			fn->fn_sernum = sernum;
-				
+
 			return fn;
 		}
 
 		/*
 		 *	We have more bits to go
 		 */
-			 
+
 		/* Try to walk down on tree. */
 		fn->fn_sernum = sernum;
 		dir = addr_bit_set(addr, fn->fn_bit);
@@ -301,7 +489,7 @@ static struct fib6_node * fib6_add_1(struct fib6_node *root, void *addr,
 	if (ln == NULL)
 		return NULL;
 	ln->fn_bit = plen;
-			
+
 	ln->parent = pn;
 	ln->fn_sernum = sernum;
 
@@ -315,7 +503,7 @@ static struct fib6_node * fib6_add_1(struct fib6_node *root, void *addr,
 
 insert_above:
 	/*
-	 * split since we don't have a common prefix anymore or 
+	 * split since we don't have a common prefix anymore or
 	 * we have a less significant route.
 	 * we've to insert an intermediate node on the list
 	 * this new node will point to the one we need to create
@@ -326,21 +514,21 @@ insert_above:
 
 	/* find 1st bit in difference between the 2 addrs.
 
-	   See comment in addr_diff: bit may be an invalid value,
+	   See comment in __ipv6_addr_diff: bit may be an invalid value,
 	   but if it is >= plen, the value is ignored in any case.
 	 */
-	
-	bit = addr_diff(addr, &key->addr, addrlen);
 
-	/* 
-	 *		(intermediate)[in]	
+	bit = __ipv6_addr_diff(addr, &key->addr, addrlen);
+
+	/*
+	 *		(intermediate)[in]
 	 *	          /	   \
 	 *	(new leaf node)[ln] (old node)[fn]
 	 */
 	if (plen > bit) {
 		in = node_alloc();
 		ln = node_alloc();
-		
+
 		if (in == NULL || ln == NULL) {
 			if (in)
 				node_free(in);
@@ -349,8 +537,8 @@ insert_above:
 			return NULL;
 		}
 
-		/* 
-		 * new intermediate node. 
+		/*
+		 * new intermediate node.
 		 * RTN_RTINFO will
 		 * be off since that an address that chooses one of
 		 * the branches would not match less specific routes
@@ -387,7 +575,7 @@ insert_above:
 		}
 	} else { /* plen <= bit */
 
-		/* 
+		/*
 		 *		(new leaf node)[ln]
 		 *	          /	   \
 		 *	     (old node)[fn] NULL
@@ -403,7 +591,7 @@ insert_above:
 		ln->parent = pn;
 
 		ln->fn_sernum = sernum;
-		
+
 		if (dir)
 			pn->right = ln;
 		else
@@ -424,22 +612,14 @@ insert_above:
  */
 
 static int fib6_add_rt2node(struct fib6_node *fn, struct rt6_info *rt,
-    struct nlmsghdr *nlh)
+			    struct nl_info *info)
 {
 	struct rt6_info *iter = NULL;
 	struct rt6_info **ins;
 
 	ins = &fn->leaf;
 
-	if (fn->fn_flags&RTN_TL_ROOT &&
-	    fn->leaf == &ip6_null_entry &&
-	    !(rt->rt6i_flags & (RTF_DEFAULT | RTF_ADDRCONF | RTF_ALLONLINK)) ){
-		fn->leaf = rt;
-		rt->u.next = NULL;
-		goto out;
-	}
-
-	for (iter = fn->leaf; iter; iter=iter->u.next) {
+	for (iter = fn->leaf; iter; iter=iter->dst.rt6_next) {
 		/*
 		 *	Search for duplicates
 		 */
@@ -449,9 +629,10 @@ static int fib6_add_rt2node(struct fib6_node *fn, struct rt6_info *rt,
 			 *	Same priority level
 			 */
 
-			if ((iter->rt6i_dev == rt->rt6i_dev) &&
-			    (ipv6_addr_cmp(&iter->rt6i_gateway,
-					   &rt->rt6i_gateway) == 0)) {
+			if (iter->rt6i_dev == rt->rt6i_dev &&
+			    iter->rt6i_idev == rt->rt6i_idev &&
+			    ipv6_addr_equal(&iter->rt6i_gateway,
+					    &rt->rt6i_gateway)) {
 				if (!(iter->rt6i_flags&RTF_EXPIRES))
 					return -EEXIST;
 				iter->rt6i_expires = rt->rt6i_expires;
@@ -466,40 +647,45 @@ static int fib6_add_rt2node(struct fib6_node *fn, struct rt6_info *rt,
 		if (iter->rt6i_metric > rt->rt6i_metric)
 			break;
 
-		ins = &iter->u.next;
+		ins = &iter->dst.rt6_next;
 	}
+
+	/* Reset round-robin state, if necessary */
+	if (ins == &fn->leaf)
+		fn->rr_ptr = NULL;
 
 	/*
 	 *	insert node
 	 */
 
-out:
-	rt->u.next = iter;
+	rt->dst.rt6_next = iter;
 	*ins = rt;
 	rt->rt6i_node = fn;
 	atomic_inc(&rt->rt6i_ref);
-	inet6_rt_notify(RTM_NEWROUTE, rt, nlh);
-	rt6_stats.fib_rt_entries++;
+	inet6_rt_notify(RTM_NEWROUTE, rt, info);
+	info->nl_net->ipv6.rt6_stats->fib_rt_entries++;
 
 	if ((fn->fn_flags & RTN_RTINFO) == 0) {
-		rt6_stats.fib_route_nodes++;
+		info->nl_net->ipv6.rt6_stats->fib_route_nodes++;
 		fn->fn_flags |= RTN_RTINFO;
 	}
 
 	return 0;
 }
 
-static __inline__ void fib6_start_gc(struct rt6_info *rt)
+static __inline__ void fib6_start_gc(struct net *net, struct rt6_info *rt)
 {
-	if (ip6_fib_timer.expires == 0 &&
+	if (!timer_pending(&net->ipv6.ip6_fib_timer) &&
 	    (rt->rt6i_flags & (RTF_EXPIRES|RTF_CACHE)))
-		mod_timer(&ip6_fib_timer, jiffies + ip6_rt_gc_interval);
+		mod_timer(&net->ipv6.ip6_fib_timer,
+			  jiffies + net->ipv6.sysctl.ip6_rt_gc_interval);
 }
 
-void fib6_force_start_gc(void)
+void fib6_force_start_gc(struct net *net)
 {
-	if (ip6_fib_timer.expires == 0)
-		mod_timer(&ip6_fib_timer, jiffies + ip6_rt_gc_interval);
+	if (!timer_pending(&net->ipv6.ip6_fib_timer))
+		mod_timer(&net->ipv6.ip6_fib_timer,
+			  jiffies + net->ipv6.sysctl.ip6_rt_gc_interval);
 }
 
 /*
@@ -508,16 +694,18 @@ void fib6_force_start_gc(void)
  *	with source addr info in sub-trees
  */
 
-int fib6_add(struct fib6_node *root, struct rt6_info *rt, struct nlmsghdr *nlh, void *_rtattr)
+int fib6_add(struct fib6_node *root, struct rt6_info *rt, struct nl_info *info)
 {
-	struct fib6_node *fn;
+	struct fib6_node *fn, *pn = NULL;
 	int err = -ENOMEM;
 
 	fn = fib6_add_1(root, &rt->rt6i_dst.addr, sizeof(struct in6_addr),
-			rt->rt6i_dst.plen, (u8*) &rt->rt6i_dst - (u8*) rt);
+			rt->rt6i_dst.plen, offsetof(struct rt6_info, rt6i_dst));
 
 	if (fn == NULL)
 		goto out;
+
+	pn = fn;
 
 #ifdef CONFIG_IPV6_SUBTREES
 	if (rt->rt6i_src.plen) {
@@ -541,8 +729,8 @@ int fib6_add(struct fib6_node *root, struct rt6_info *rt, struct nlmsghdr *nlh, 
 			if (sfn == NULL)
 				goto st_failure;
 
-			sfn->leaf = &ip6_null_entry;
-			atomic_inc(&ip6_null_entry.rt6i_ref);
+			sfn->leaf = info->nl_net->ipv6.ip6_null_entry;
+			atomic_inc(&info->nl_net->ipv6.ip6_null_entry->rt6i_ref);
 			sfn->fn_flags = RTN_ROOT;
 			sfn->fn_sernum = fib6_new_sernum();
 
@@ -550,7 +738,7 @@ int fib6_add(struct fib6_node *root, struct rt6_info *rt, struct nlmsghdr *nlh, 
 
 			sn = fib6_add_1(sfn, &rt->rt6i_src.addr,
 					sizeof(struct in6_addr), rt->rt6i_src.plen,
-					(u8*) &rt->rt6i_src - (u8*) rt);
+					offsetof(struct rt6_info, rt6i_src));
 
 			if (sn == NULL) {
 				/* If it is failed, discard just allocated
@@ -564,34 +752,55 @@ int fib6_add(struct fib6_node *root, struct rt6_info *rt, struct nlmsghdr *nlh, 
 			/* Now link new subtree to main tree */
 			sfn->parent = fn;
 			fn->subtree = sfn;
-			if (fn->leaf == NULL) {
-				fn->leaf = rt;
-				atomic_inc(&rt->rt6i_ref);
-			}
 		} else {
 			sn = fib6_add_1(fn->subtree, &rt->rt6i_src.addr,
 					sizeof(struct in6_addr), rt->rt6i_src.plen,
-					(u8*) &rt->rt6i_src - (u8*) rt);
+					offsetof(struct rt6_info, rt6i_src));
 
 			if (sn == NULL)
 				goto st_failure;
 		}
 
+		if (fn->leaf == NULL) {
+			fn->leaf = rt;
+			atomic_inc(&rt->rt6i_ref);
+		}
 		fn = sn;
 	}
 #endif
 
-	err = fib6_add_rt2node(fn, rt, nlh);
+	err = fib6_add_rt2node(fn, rt, info);
 
 	if (err == 0) {
-		fib6_start_gc(rt);
+		fib6_start_gc(info->nl_net, rt);
 		if (!(rt->rt6i_flags&RTF_CACHE))
-			fib6_prune_clones(fn, rt);
+			fib6_prune_clones(info->nl_net, pn, rt);
 	}
 
 out:
-	if (err)
-		dst_free(&rt->u.dst);
+	if (err) {
+#ifdef CONFIG_IPV6_SUBTREES
+		/*
+		 * If fib6_add_1 has cleared the old leaf pointer in the
+		 * super-tree leaf node we have to find a new one for it.
+		 */
+		if (pn != fn && pn->leaf == rt) {
+			pn->leaf = NULL;
+			atomic_dec(&rt->rt6i_ref);
+		}
+		if (pn != fn && !pn->leaf && !(pn->fn_flags & RTN_RTINFO)) {
+			pn->leaf = fib6_find_prefix(info->nl_net, pn);
+#if RT6_DEBUG >= 2
+			if (!pn->leaf) {
+				WARN_ON(pn->leaf == NULL);
+				pn->leaf = info->nl_net->ipv6.ip6_null_entry;
+			}
+#endif
+			atomic_inc(&pn->leaf->rt6i_ref);
+		}
+#endif
+		dst_free(&rt->dst);
+	}
 	return err;
 
 #ifdef CONFIG_IPV6_SUBTREES
@@ -600,8 +809,8 @@ out:
 	 */
 st_failure:
 	if (fn && !(fn->fn_flags & (RTN_RTINFO|RTN_ROOT)))
-		fib6_repair_tree(fn);
-	dst_free(&rt->u.dst);
+		fib6_repair_tree(info->nl_net, fn);
+	dst_free(&rt->dst);
 	return err;
 #endif
 }
@@ -620,7 +829,10 @@ static struct fib6_node * fib6_lookup_1(struct fib6_node *root,
 					struct lookup_args *args)
 {
 	struct fib6_node *fn;
-	int dir;
+	__be32 dir;
+
+	if (unlikely(args->offset == 0))
+		return NULL;
 
 	/*
 	 *	Descend on a tree
@@ -643,32 +855,25 @@ static struct fib6_node * fib6_lookup_1(struct fib6_node *root,
 		break;
 	}
 
-	while ((fn->fn_flags & RTN_ROOT) == 0) {
-#ifdef CONFIG_IPV6_SUBTREES
-		if (fn->subtree) {
-			struct fib6_node *st;
-			struct lookup_args *narg;
-
-			narg = args + 1;
-
-			if (narg->addr) {
-				st = fib6_lookup_1(fn->subtree, narg);
-
-				if (st && !(st->fn_flags & RTN_ROOT))
-					return st;
-			}
-		}
-#endif
-
-		if (fn->fn_flags & RTN_RTINFO) {
+	while(fn) {
+		if (FIB6_SUBTREE(fn) || fn->fn_flags & RTN_RTINFO) {
 			struct rt6key *key;
 
 			key = (struct rt6key *) ((u8 *) fn->leaf +
 						 args->offset);
 
-			if (addr_match(&key->addr, args->addr, key->plen))
-				return fn;
+			if (ipv6_prefix_equal(&key->addr, args->addr, key->plen)) {
+#ifdef CONFIG_IPV6_SUBTREES
+				if (fn->subtree)
+					fn = fib6_lookup_1(fn->subtree, args + 1);
+#endif
+				if (!fn || fn->fn_flags & RTN_RTINFO)
+					return fn;
+			}
 		}
+
+		if (fn->fn_flags & RTN_ROOT)
+			break;
 
 		fn = fn->parent;
 	}
@@ -679,19 +884,24 @@ static struct fib6_node * fib6_lookup_1(struct fib6_node *root,
 struct fib6_node * fib6_lookup(struct fib6_node *root, struct in6_addr *daddr,
 			       struct in6_addr *saddr)
 {
-	struct lookup_args args[2];
-	struct rt6_info *rt = NULL;
 	struct fib6_node *fn;
-
-	args[0].offset = (u8*) &rt->rt6i_dst - (u8*) rt;
-	args[0].addr = daddr;
-
+	struct lookup_args args[] = {
+		{
+			.offset = offsetof(struct rt6_info, rt6i_dst),
+			.addr = daddr,
+		},
 #ifdef CONFIG_IPV6_SUBTREES
-	args[1].offset = (u8*) &rt->rt6i_src - (u8*) rt;
-	args[1].addr = saddr;
+		{
+			.offset = offsetof(struct rt6_info, rt6i_src),
+			.addr = saddr,
+		},
 #endif
+		{
+			.offset = 0,	/* sentinel */
+		}
+	};
 
-	fn = fib6_lookup_1(root, args);
+	fn = fib6_lookup_1(root, daddr ? args : args + 1);
 
 	if (fn == NULL || fn->fn_flags & RTN_TL_ROOT)
 		fn = root;
@@ -718,7 +928,7 @@ static struct fib6_node * fib6_locate_1(struct fib6_node *root,
 		 *	Prefix match
 		 */
 		if (plen < fn->fn_bit ||
-		    !addr_match(&key->addr, addr, fn->fn_bit))
+		    !ipv6_prefix_equal(&key->addr, addr, fn->fn_bit))
 			return NULL;
 
 		if (plen == fn->fn_bit)
@@ -739,20 +949,17 @@ struct fib6_node * fib6_locate(struct fib6_node *root,
 			       struct in6_addr *daddr, int dst_len,
 			       struct in6_addr *saddr, int src_len)
 {
-	struct rt6_info *rt = NULL;
 	struct fib6_node *fn;
 
 	fn = fib6_locate_1(root, daddr, dst_len,
-			   (u8*) &rt->rt6i_dst - (u8*) rt);
+			   offsetof(struct rt6_info, rt6i_dst));
 
 #ifdef CONFIG_IPV6_SUBTREES
 	if (src_len) {
-		BUG_TRAP(saddr!=NULL);
-		if (fn == NULL)
-			fn = fn->subtree;
-		if (fn)
-			fn = fib6_locate_1(fn, saddr, src_len,
-					   (u8*) &rt->rt6i_src - (u8*) rt);
+		WARN_ON(saddr == NULL);
+		if (fn && fn->subtree)
+			fn = fib6_locate_1(fn->subtree, saddr, src_len,
+					   offsetof(struct rt6_info, rt6i_src));
 	}
 #endif
 
@@ -768,10 +975,10 @@ struct fib6_node * fib6_locate(struct fib6_node *root,
  *
  */
 
-static struct rt6_info * fib6_find_prefix(struct fib6_node *fn)
+static struct rt6_info *fib6_find_prefix(struct net *net, struct fib6_node *fn)
 {
 	if (fn->fn_flags&RTN_ROOT)
-		return &ip6_null_entry;
+		return net->ipv6.ip6_null_entry;
 
 	while(fn) {
 		if(fn->left)
@@ -780,7 +987,7 @@ static struct rt6_info * fib6_find_prefix(struct fib6_node *fn)
 		if(fn->right)
 			return fn->right->leaf;
 
-		fn = SUBTREE(fn);
+		fn = FIB6_SUBTREE(fn);
 	}
 	return NULL;
 }
@@ -790,7 +997,8 @@ static struct rt6_info * fib6_find_prefix(struct fib6_node *fn)
  *	is the node we want to try and remove.
  */
 
-static struct fib6_node * fib6_repair_tree(struct fib6_node *fn)
+static struct fib6_node *fib6_repair_tree(struct net *net,
+					   struct fib6_node *fn)
 {
 	int children;
 	int nstate;
@@ -802,26 +1010,26 @@ static struct fib6_node * fib6_repair_tree(struct fib6_node *fn)
 		RT6_TRACE("fixing tree: plen=%d iter=%d\n", fn->fn_bit, iter);
 		iter++;
 
-		BUG_TRAP(!(fn->fn_flags&RTN_RTINFO));
-		BUG_TRAP(!(fn->fn_flags&RTN_TL_ROOT));
-		BUG_TRAP(fn->leaf==NULL);
+		WARN_ON(fn->fn_flags & RTN_RTINFO);
+		WARN_ON(fn->fn_flags & RTN_TL_ROOT);
+		WARN_ON(fn->leaf != NULL);
 
 		children = 0;
 		child = NULL;
 		if (fn->right) child = fn->right, children |= 1;
 		if (fn->left) child = fn->left, children |= 2;
 
-		if (children == 3 || SUBTREE(fn) 
+		if (children == 3 || FIB6_SUBTREE(fn)
 #ifdef CONFIG_IPV6_SUBTREES
 		    /* Subtree root (i.e. fn) may have one child */
 		    || (children && fn->fn_flags&RTN_ROOT)
 #endif
 		    ) {
-			fn->leaf = fib6_find_prefix(fn);
+			fn->leaf = fib6_find_prefix(net, fn);
 #if RT6_DEBUG >= 2
 			if (fn->leaf==NULL) {
-				BUG_TRAP(fn->leaf);
-				fn->leaf = &ip6_null_entry;
+				WARN_ON(!fn->leaf);
+				fn->leaf = net->ipv6.ip6_null_entry;
 			}
 #endif
 			atomic_inc(&fn->leaf->rt6i_ref);
@@ -830,17 +1038,18 @@ static struct fib6_node * fib6_repair_tree(struct fib6_node *fn)
 
 		pn = fn->parent;
 #ifdef CONFIG_IPV6_SUBTREES
-		if (SUBTREE(pn) == fn) {
-			BUG_TRAP(fn->fn_flags&RTN_ROOT);
-			SUBTREE(pn) = NULL;
+		if (FIB6_SUBTREE(pn) == fn) {
+			WARN_ON(!(fn->fn_flags & RTN_ROOT));
+			FIB6_SUBTREE(pn) = NULL;
 			nstate = FWS_L;
 		} else {
-			BUG_TRAP(!(fn->fn_flags&RTN_ROOT));
+			WARN_ON(fn->fn_flags & RTN_ROOT);
 #endif
 			if (pn->right == fn) pn->right = child;
 			else if (pn->left == fn) pn->left = child;
 #if RT6_DEBUG >= 2
-			else BUG_TRAP(0);
+			else
+				WARN_ON(1);
 #endif
 			if (child)
 				child->parent = pn;
@@ -880,7 +1089,7 @@ static struct fib6_node * fib6_repair_tree(struct fib6_node *fn)
 		read_unlock(&fib6_walker_lock);
 
 		node_free(fn);
-		if (pn->fn_flags&RTN_RTINFO || SUBTREE(pn))
+		if (pn->fn_flags&RTN_RTINFO || FIB6_SUBTREE(pn))
 			return pn;
 
 		rt6_release(pn->leaf);
@@ -890,41 +1099,43 @@ static struct fib6_node * fib6_repair_tree(struct fib6_node *fn)
 }
 
 static void fib6_del_route(struct fib6_node *fn, struct rt6_info **rtp,
-    struct nlmsghdr *nlh, void *_rtattr)
+			   struct nl_info *info)
 {
 	struct fib6_walker_t *w;
 	struct rt6_info *rt = *rtp;
+	struct net *net = info->nl_net;
 
 	RT6_TRACE("fib6_del_route\n");
 
 	/* Unlink it */
-	*rtp = rt->u.next;
+	*rtp = rt->dst.rt6_next;
 	rt->rt6i_node = NULL;
-	rt6_stats.fib_rt_entries--;
-	rt6_stats.fib_discarded_routes++;
+	net->ipv6.rt6_stats->fib_rt_entries--;
+	net->ipv6.rt6_stats->fib_discarded_routes++;
+
+	/* Reset round-robin state, if necessary */
+	if (fn->rr_ptr == rt)
+		fn->rr_ptr = NULL;
 
 	/* Adjust walkers */
 	read_lock(&fib6_walker_lock);
 	FOR_WALKERS(w) {
 		if (w->state == FWS_C && w->leaf == rt) {
 			RT6_TRACE("walker %p adjusted by delroute\n", w);
-			w->leaf = rt->u.next;
+			w->leaf = rt->dst.rt6_next;
 			if (w->leaf == NULL)
 				w->state = FWS_U;
 		}
 	}
 	read_unlock(&fib6_walker_lock);
 
-	rt->u.next = NULL;
-
-	if (fn->leaf == NULL && fn->fn_flags&RTN_TL_ROOT)
-		fn->leaf = &ip6_null_entry;
+	rt->dst.rt6_next = NULL;
 
 	/* If it was last route, expunge its radix tree node */
 	if (fn->leaf == NULL) {
 		fn->fn_flags &= ~RTN_RTINFO;
-		rt6_stats.fib_route_nodes--;
-		fn = fib6_repair_tree(fn);
+		net->ipv6.rt6_stats->fib_route_nodes--;
+		fn = fib6_repair_tree(net, fn);
 	}
 
 	if (atomic_read(&rt->rt6i_ref) != 1) {
@@ -936,46 +1147,57 @@ static void fib6_del_route(struct fib6_node *fn, struct rt6_info **rtp,
 		 */
 		while (fn) {
 			if (!(fn->fn_flags&RTN_RTINFO) && fn->leaf == rt) {
-				fn->leaf = fib6_find_prefix(fn);
+				fn->leaf = fib6_find_prefix(net, fn);
 				atomic_inc(&fn->leaf->rt6i_ref);
 				rt6_release(rt);
 			}
 			fn = fn->parent;
 		}
-		/* No more references are possiible at this point. */
-		if (atomic_read(&rt->rt6i_ref) != 1) BUG();
+		/* No more references are possible at this point. */
+		BUG_ON(atomic_read(&rt->rt6i_ref) != 1);
 	}
 
-	inet6_rt_notify(RTM_DELROUTE, rt, nlh);
+	inet6_rt_notify(RTM_DELROUTE, rt, info);
 	rt6_release(rt);
 }
 
-int fib6_del(struct rt6_info *rt, struct nlmsghdr *nlh, void *_rtattr)
+int fib6_del(struct rt6_info *rt, struct nl_info *info)
 {
+	struct net *net = info->nl_net;
 	struct fib6_node *fn = rt->rt6i_node;
 	struct rt6_info **rtp;
 
 #if RT6_DEBUG >= 2
-	if (rt->u.dst.obsolete>0) {
-		BUG_TRAP(fn==NULL);
+	if (rt->dst.obsolete>0) {
+		WARN_ON(fn != NULL);
 		return -ENOENT;
 	}
 #endif
-	if (fn == NULL || rt == &ip6_null_entry)
+	if (fn == NULL || rt == net->ipv6.ip6_null_entry)
 		return -ENOENT;
 
-	BUG_TRAP(fn->fn_flags&RTN_RTINFO);
+	WARN_ON(!(fn->fn_flags & RTN_RTINFO));
 
-	if (!(rt->rt6i_flags&RTF_CACHE))
-		fib6_prune_clones(fn, rt);
+	if (!(rt->rt6i_flags&RTF_CACHE)) {
+		struct fib6_node *pn = fn;
+#ifdef CONFIG_IPV6_SUBTREES
+		/* clones of this route might be in another subtree */
+		if (rt->rt6i_src.plen) {
+			while (!(pn->fn_flags&RTN_ROOT))
+				pn = pn->parent;
+			pn = pn->parent;
+		}
+#endif
+		fib6_prune_clones(info->nl_net, pn, rt);
+	}
 
 	/*
 	 *	Walk the leaf entries looking for ourself
 	 */
 
-	for (rtp = &fn->leaf; *rtp; rtp = &(*rtp)->u.next) {
+	for (rtp = &fn->leaf; *rtp; rtp = &(*rtp)->dst.rt6_next) {
 		if (*rtp == rt) {
-			fib6_del_route(fn, rtp, nlh, _rtattr);
+			fib6_del_route(fn, rtp, info);
 			return 0;
 		}
 	}
@@ -989,7 +1211,7 @@ int fib6_del(struct rt6_info *rt, struct nlmsghdr *nlh, void *_rtattr)
  *	However, it is internally reenterable wrt itself and fib6_add/fib6_del.
  *	It means, that we can modify tree during walking
  *	and use this function for garbage collection, clone pruning,
- *	cleaning tree when a device goes down etc. etc.	
+ *	cleaning tree when a device goes down etc. etc.
  *
  *	It guarantees that every node will be traversed,
  *	and that it will be traversed only once.
@@ -1006,7 +1228,7 @@ int fib6_del(struct rt6_info *rt, struct nlmsghdr *nlh, void *_rtattr)
  *	<0  -> walk is terminated by an error.
  */
 
-int fib6_walk_continue(struct fib6_walker_t *w)
+static int fib6_walk_continue(struct fib6_walker_t *w)
 {
 	struct fib6_node *fn, *pn;
 
@@ -1023,12 +1245,12 @@ int fib6_walk_continue(struct fib6_walker_t *w)
 		switch (w->state) {
 #ifdef CONFIG_IPV6_SUBTREES
 		case FWS_S:
-			if (SUBTREE(fn)) {
-				w->node = SUBTREE(fn);
+			if (FIB6_SUBTREE(fn)) {
+				w->node = FIB6_SUBTREE(fn);
 				continue;
 			}
 			w->state = FWS_L;
-#endif	
+#endif
 		case FWS_L:
 			if (fn->left) {
 				w->node = fn->left;
@@ -1046,9 +1268,18 @@ int fib6_walk_continue(struct fib6_walker_t *w)
 			w->leaf = fn->leaf;
 		case FWS_C:
 			if (w->leaf && fn->fn_flags&RTN_RTINFO) {
-				int err = w->func(w);
+				int err;
+
+				if (w->count < w->skip) {
+					w->count++;
+					continue;
+				}
+
+				err = w->func(w);
 				if (err)
 					return err;
+
+				w->count++;
 				continue;
 			}
 			w->state = FWS_U;
@@ -1058,8 +1289,8 @@ int fib6_walk_continue(struct fib6_walker_t *w)
 			pn = fn->parent;
 			w->node = pn;
 #ifdef CONFIG_IPV6_SUBTREES
-			if (SUBTREE(pn) == fn) {
-				BUG_TRAP(fn->fn_flags&RTN_ROOT);
+			if (FIB6_SUBTREE(pn) == fn) {
+				WARN_ON(!(fn->fn_flags & RTN_ROOT));
 				w->state = FWS_L;
 				continue;
 			}
@@ -1074,13 +1305,13 @@ int fib6_walk_continue(struct fib6_walker_t *w)
 				continue;
 			}
 #if RT6_DEBUG >= 2
-			BUG_TRAP(0);
+			WARN_ON(1);
 #endif
 		}
 	}
 }
 
-int fib6_walk(struct fib6_walker_t *w)
+static int fib6_walk(struct fib6_walker_t *w)
 {
 	int res;
 
@@ -1098,13 +1329,16 @@ static int fib6_clean_node(struct fib6_walker_t *w)
 {
 	int res;
 	struct rt6_info *rt;
-	struct fib6_cleaner_t *c = (struct fib6_cleaner_t*)w;
+	struct fib6_cleaner_t *c = container_of(w, struct fib6_cleaner_t, w);
+	struct nl_info info = {
+		.nl_net = c->net,
+	};
 
-	for (rt = w->leaf; rt; rt = rt->u.next) {
+	for (rt = w->leaf; rt; rt = rt->dst.rt6_next) {
 		res = c->func(rt, c->arg);
 		if (res < 0) {
 			w->leaf = rt;
-			res = fib6_del(rt, NULL, NULL);
+			res = fib6_del(rt, &info);
 			if (res) {
 #if RT6_DEBUG >= 2
 				printk(KERN_DEBUG "fib6_clean_node: del failed: rt=%p@%p err=%d\n", rt, rt->rt6i_node, res);
@@ -1113,7 +1347,7 @@ static int fib6_clean_node(struct fib6_walker_t *w)
 			}
 			return 0;
 		}
-		BUG_TRAP(res==0);
+		WARN_ON(res != 0);
 	}
 	w->leaf = rt;
 	return 0;
@@ -1121,7 +1355,7 @@ static int fib6_clean_node(struct fib6_walker_t *w)
 
 /*
  *	Convenient frontend to tree walker.
- *	
+ *
  *	func is called on each route.
  *		It may return -1 -> delete this route.
  *		              0  -> continue walking
@@ -1130,19 +1364,43 @@ static int fib6_clean_node(struct fib6_walker_t *w)
  *	ignoring pure split nodes) will be scanned.
  */
 
-void fib6_clean_tree(struct fib6_node *root,
-		     int (*func)(struct rt6_info *, void *arg),
-		     int prune, void *arg)
+static void fib6_clean_tree(struct net *net, struct fib6_node *root,
+			    int (*func)(struct rt6_info *, void *arg),
+			    int prune, void *arg)
 {
 	struct fib6_cleaner_t c;
 
 	c.w.root = root;
 	c.w.func = fib6_clean_node;
 	c.w.prune = prune;
+	c.w.count = 0;
+	c.w.skip = 0;
 	c.func = func;
 	c.arg = arg;
+	c.net = net;
 
 	fib6_walk(&c.w);
+}
+
+void fib6_clean_all(struct net *net, int (*func)(struct rt6_info *, void *arg),
+		    int prune, void *arg)
+{
+	struct fib6_table *table;
+	struct hlist_node *node;
+	struct hlist_head *head;
+	unsigned int h;
+
+	rcu_read_lock();
+	for (h = 0; h < FIB6_TABLE_HASHSZ; h++) {
+		head = &net->ipv6.fib_table_hash[h];
+		hlist_for_each_entry_rcu(table, node, head, tb6_hlist) {
+			write_lock_bh(&table->tb6_lock);
+			fib6_clean_tree(net, &table->tb6_root,
+					func, prune, arg);
+			write_unlock_bh(&table->tb6_lock);
+		}
+	}
+	rcu_read_unlock();
 }
 
 static int fib6_prune_clone(struct rt6_info *rt, void *arg)
@@ -1155,9 +1413,10 @@ static int fib6_prune_clone(struct rt6_info *rt, void *arg)
 	return 0;
 }
 
-static void fib6_prune_clones(struct fib6_node *fn, struct rt6_info *rt)
+static void fib6_prune_clones(struct net *net, struct fib6_node *fn,
+			      struct rt6_info *rt)
 {
-	fib6_clean_tree(fn, fib6_prune_clone, 1, rt);
+	fib6_clean_tree(net, fn, fib6_prune_clone, 1, rt);
 }
 
 /*
@@ -1189,9 +1448,14 @@ static int fib6_age(struct rt6_info *rt, void *arg)
 		}
 		gc_args.more++;
 	} else if (rt->rt6i_flags & RTF_CACHE) {
-		if (atomic_read(&rt->u.dst.__refcnt) == 0 &&
-		    time_after_eq(now, rt->u.dst.lastuse + gc_args.timeout)) {
+		if (atomic_read(&rt->dst.__refcnt) == 0 &&
+		    time_after_eq(now, rt->dst.lastuse + gc_args.timeout)) {
 			RT6_TRACE("aging clone %p\n", rt);
+			return -1;
+		} else if ((rt->rt6i_flags & RTF_GATEWAY) &&
+			   (!(rt->rt6i_nexthop->flags & NTF_ROUTER))) {
+			RT6_TRACE("purging route %p via non-router but gateway\n",
+				  rt);
 			return -1;
 		}
 		gc_args.more++;
@@ -1200,53 +1464,141 @@ static int fib6_age(struct rt6_info *rt, void *arg)
 	return 0;
 }
 
-static spinlock_t fib6_gc_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(fib6_gc_lock);
 
-void fib6_run_gc(unsigned long dummy)
+void fib6_run_gc(unsigned long expires, struct net *net)
 {
-	if (dummy != ~0UL) {
+	if (expires != ~0UL) {
 		spin_lock_bh(&fib6_gc_lock);
-		gc_args.timeout = (int)dummy;
+		gc_args.timeout = expires ? (int)expires :
+			net->ipv6.sysctl.ip6_rt_gc_interval;
 	} else {
-		local_bh_disable();
-		if (!spin_trylock(&fib6_gc_lock)) {
-			mod_timer(&ip6_fib_timer, jiffies + HZ);
-			local_bh_enable();
+		if (!spin_trylock_bh(&fib6_gc_lock)) {
+			mod_timer(&net->ipv6.ip6_fib_timer, jiffies + HZ);
 			return;
 		}
-		gc_args.timeout = ip6_rt_gc_interval;
+		gc_args.timeout = net->ipv6.sysctl.ip6_rt_gc_interval;
 	}
-	gc_args.more = 0;
 
+	gc_args.more = icmp6_dst_gc();
 
-	write_lock_bh(&rt6_lock);
-	ndisc_dst_gc(&gc_args.more);
-	fib6_clean_tree(&ip6_routing_table, fib6_age, 0, NULL);
-	write_unlock_bh(&rt6_lock);
+	fib6_clean_all(net, fib6_age, 0, NULL);
 
 	if (gc_args.more)
-		mod_timer(&ip6_fib_timer, jiffies + ip6_rt_gc_interval);
-	else {
-		del_timer(&ip6_fib_timer);
-		ip6_fib_timer.expires = 0;
-	}
+		mod_timer(&net->ipv6.ip6_fib_timer,
+			  round_jiffies(jiffies
+					+ net->ipv6.sysctl.ip6_rt_gc_interval));
+	else
+		del_timer(&net->ipv6.ip6_fib_timer);
 	spin_unlock_bh(&fib6_gc_lock);
 }
 
-void __init fib6_init(void)
+static void fib6_gc_timer_cb(unsigned long arg)
 {
+	fib6_run_gc(0, (struct net *)arg);
+}
+
+static int __net_init fib6_net_init(struct net *net)
+{
+	size_t size = sizeof(struct hlist_head) * FIB6_TABLE_HASHSZ;
+
+	setup_timer(&net->ipv6.ip6_fib_timer, fib6_gc_timer_cb, (unsigned long)net);
+
+	net->ipv6.rt6_stats = kzalloc(sizeof(*net->ipv6.rt6_stats), GFP_KERNEL);
+	if (!net->ipv6.rt6_stats)
+		goto out_timer;
+
+	/* Avoid false sharing : Use at least a full cache line */
+	size = max_t(size_t, size, L1_CACHE_BYTES);
+
+	net->ipv6.fib_table_hash = kzalloc(size, GFP_KERNEL);
+	if (!net->ipv6.fib_table_hash)
+		goto out_rt6_stats;
+
+	net->ipv6.fib6_main_tbl = kzalloc(sizeof(*net->ipv6.fib6_main_tbl),
+					  GFP_KERNEL);
+	if (!net->ipv6.fib6_main_tbl)
+		goto out_fib_table_hash;
+
+	net->ipv6.fib6_main_tbl->tb6_id = RT6_TABLE_MAIN;
+	net->ipv6.fib6_main_tbl->tb6_root.leaf = net->ipv6.ip6_null_entry;
+	net->ipv6.fib6_main_tbl->tb6_root.fn_flags =
+		RTN_ROOT | RTN_TL_ROOT | RTN_RTINFO;
+
+#ifdef CONFIG_IPV6_MULTIPLE_TABLES
+	net->ipv6.fib6_local_tbl = kzalloc(sizeof(*net->ipv6.fib6_local_tbl),
+					   GFP_KERNEL);
+	if (!net->ipv6.fib6_local_tbl)
+		goto out_fib6_main_tbl;
+	net->ipv6.fib6_local_tbl->tb6_id = RT6_TABLE_LOCAL;
+	net->ipv6.fib6_local_tbl->tb6_root.leaf = net->ipv6.ip6_null_entry;
+	net->ipv6.fib6_local_tbl->tb6_root.fn_flags =
+		RTN_ROOT | RTN_TL_ROOT | RTN_RTINFO;
+#endif
+	fib6_tables_init(net);
+
+	return 0;
+
+#ifdef CONFIG_IPV6_MULTIPLE_TABLES
+out_fib6_main_tbl:
+	kfree(net->ipv6.fib6_main_tbl);
+#endif
+out_fib_table_hash:
+	kfree(net->ipv6.fib_table_hash);
+out_rt6_stats:
+	kfree(net->ipv6.rt6_stats);
+out_timer:
+	return -ENOMEM;
+ }
+
+static void fib6_net_exit(struct net *net)
+{
+	rt6_ifdown(net, NULL);
+	del_timer_sync(&net->ipv6.ip6_fib_timer);
+
+#ifdef CONFIG_IPV6_MULTIPLE_TABLES
+	kfree(net->ipv6.fib6_local_tbl);
+#endif
+	kfree(net->ipv6.fib6_main_tbl);
+	kfree(net->ipv6.fib_table_hash);
+	kfree(net->ipv6.rt6_stats);
+}
+
+static struct pernet_operations fib6_net_ops = {
+	.init = fib6_net_init,
+	.exit = fib6_net_exit,
+};
+
+int __init fib6_init(void)
+{
+	int ret = -ENOMEM;
+
 	fib6_node_kmem = kmem_cache_create("fib6_nodes",
 					   sizeof(struct fib6_node),
 					   0, SLAB_HWCACHE_ALIGN,
-					   NULL, NULL);
+					   NULL);
+	if (!fib6_node_kmem)
+		goto out;
+
+	ret = register_pernet_subsys(&fib6_net_ops);
+	if (ret)
+		goto out_kmem_cache_create;
+
+	ret = __rtnl_register(PF_INET6, RTM_GETROUTE, NULL, inet6_dump_fib);
+	if (ret)
+		goto out_unregister_subsys;
+out:
+	return ret;
+
+out_unregister_subsys:
+	unregister_pernet_subsys(&fib6_net_ops);
+out_kmem_cache_create:
+	kmem_cache_destroy(fib6_node_kmem);
+	goto out;
 }
 
-#ifdef MODULE
 void fib6_gc_cleanup(void)
 {
-	del_timer(&ip6_fib_timer);
+	unregister_pernet_subsys(&fib6_net_ops);
 	kmem_cache_destroy(fib6_node_kmem);
 }
-#endif
-
-

@@ -18,7 +18,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -29,7 +29,6 @@
 
 #include <asm/param.h>  /* for HZ */
 
-#include <linux/config.h>
 #include <linux/types.h>
 
 #include <net/irda/irda.h>
@@ -49,7 +48,7 @@
 #define DEV_ADDR_ANY  0xffffffff
 
 #define LMP_HEADER          2    /* Dest LSAP + Source LSAP */
-#define LMP_CONTROL_HEADER  4
+#define LMP_CONTROL_HEADER  4    /* LMP_HEADER + opcode + parameter */
 #define LMP_PID_HEADER      1    /* Used by Ultra */
 #define LMP_MAX_HEADER      (LMP_CONTROL_HEADER+LAP_MAX_HEADER)
 
@@ -112,7 +111,7 @@ struct lsap_cb {
 
 	struct timer_list watchdog_timer;
 
-	IRLMP_STATE     lsap_state;  /* Connection state */
+	LSAP_STATE      lsap_state;  /* Connection state */
 	notify_t        notify;      /* Indication/Confirm entry points */
 	struct qos_info qos;         /* QoS for this connection */
 
@@ -175,7 +174,8 @@ struct irlmp_cb {
 	discovery_t discovery_cmd; /* Discovery command to use by IrLAP */
 	discovery_t discovery_rsp; /* Discovery response to use by IrLAP */
 
-	int free_lsap_sel;
+	/* Last lsap picked automatically by irlmp_find_free_slsap() */
+	int	last_lsap_sel;
 
 	struct timer_list discovery_timer;
 
@@ -237,22 +237,26 @@ int  irlmp_udata_request(struct lsap_cb *, struct sk_buff *);
 void irlmp_udata_indication(struct lsap_cb *, struct sk_buff *);
 
 #ifdef CONFIG_IRDA_ULTRA
-int  irlmp_connless_data_request(struct lsap_cb *, struct sk_buff *);
+int  irlmp_connless_data_request(struct lsap_cb *, struct sk_buff *, __u8);
 void irlmp_connless_data_indication(struct lsap_cb *, struct sk_buff *);
 #endif /* CONFIG_IRDA_ULTRA */
 
-void irlmp_status_request(void);
 void irlmp_status_indication(struct lap_cb *, LINK_STATUS link, LOCK_STATUS lock);
 void irlmp_flow_indication(struct lap_cb *self, LOCAL_FLOW flow);
 
-int  irlmp_slsap_inuse(__u8 slsap);
-__u8 irlmp_find_free_slsap(void);
 LM_REASON irlmp_convert_lap_reason(LAP_REASON);
 
-__u32 irlmp_get_saddr(struct lsap_cb *self);
-__u32 irlmp_get_daddr(struct lsap_cb *self);
+static inline __u32 irlmp_get_saddr(const struct lsap_cb *self)
+{
+	return (self && self->lap) ? self->lap->saddr : 0;
+}
 
-extern char *lmp_reasons[];
+static inline __u32 irlmp_get_daddr(const struct lsap_cb *self)
+{
+	return (self && self->lap) ? self->lap->daddr : 0;
+}
+
+extern const char *irlmp_reasons[];
 extern int sysctl_discovery_timeout;
 extern int sysctl_discovery_slots;
 extern int sysctl_discovery;
@@ -270,7 +274,7 @@ static inline int irlmp_lap_tx_queue_full(struct lsap_cb *self)
 	if (self->lap->irlap == NULL)
 		return 0;
 
-	return(IRLAP_GET_TX_QUEUE_LEN(self->lap->irlap) >= LAP_HIGH_THRESHOLD);
+	return IRLAP_GET_TX_QUEUE_LEN(self->lap->irlap) >= LAP_HIGH_THRESHOLD;
 }
 
 /* After doing a irlmp_dup(), this get one of the two socket back into

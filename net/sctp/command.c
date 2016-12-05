@@ -1,18 +1,18 @@
-/* SCTP kernel reference Implementation Copyright (C) 1999-2001
+/* SCTP kernel implementation Copyright (C) 1999-2001
  * Cisco, Motorola, and IBM
  * Copyright 2001 La Monte H.P. Yarroll
  *
- * This file is part of the SCTP kernel reference Implementation
+ * This file is part of the SCTP kernel implementation
  *
  * These functions manipulate sctp command sequences.
  *
- * The SCTP reference implementation is free software;
+ * This SCTP implementation is free software;
  * you can redistribute it and/or modify it under the terms of
  * the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
  *
- * The SCTP reference implementation is distributed in the hope that it
+ * This SCTP implementation is distributed in the hope that it
  * will be useful, but WITHOUT ANY WARRANTY; without even the implied
  *                 ************************
  * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -42,17 +42,6 @@
 #include <net/sctp/sctp.h>
 #include <net/sctp/sm.h>
 
-/* Create a new sctp_command_sequence.  */
-sctp_cmd_seq_t *sctp_new_cmd_seq(int gfp)
-{
-	sctp_cmd_seq_t *retval = t_new(sctp_cmd_seq_t, gfp);
-
-	if (retval)
-		sctp_init_cmd_seq(retval);
-
-	return retval;
-}
-
 /* Initialize a block of memory as a command sequence. */
 int sctp_init_cmd_seq(sctp_cmd_seq_t *seq)
 {
@@ -63,25 +52,12 @@ int sctp_init_cmd_seq(sctp_cmd_seq_t *seq)
 /* Add a command to a sctp_cmd_seq_t.
  * Return 0 if the command sequence is full.
  */
-int sctp_add_cmd(sctp_cmd_seq_t *seq, sctp_verb_t verb, sctp_arg_t obj)
+void sctp_add_cmd_sf(sctp_cmd_seq_t *seq, sctp_verb_t verb, sctp_arg_t obj)
 {
-	if (seq->next_free_slot >= SCTP_MAX_NUM_COMMANDS)
-		goto fail;
+	BUG_ON(seq->next_free_slot >= SCTP_MAX_NUM_COMMANDS);
 
 	seq->cmds[seq->next_free_slot].verb = verb;
 	seq->cmds[seq->next_free_slot++].obj = obj;
-
-	return 1;
-
-fail:
-	return 0;
-}
-
-/* Rewind an sctp_cmd_seq_t to iterate from the start.  */
-int sctp_rewind_sequence(sctp_cmd_seq_t *seq)
-{
-	seq->next_cmd = 0;
-	return 1;		/* We always succeed. */
 }
 
 /* Return the next command structure in a sctp_cmd_seq.
@@ -97,8 +73,3 @@ sctp_cmd_t *sctp_next_cmd(sctp_cmd_seq_t *seq)
 	return retval;
 }
 
-/* Dispose of a command sequence.  */
-void sctp_free_cmd_seq(sctp_cmd_seq_t *seq)
-{
-	kfree(seq);
-}

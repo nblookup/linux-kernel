@@ -9,10 +9,10 @@
  * fragmentation.
  */
 
-#include <linux/smp_lock.h>
+#include <linux/string.h>
+#include <linux/bitmap.h>
 
 #include <asm/bitext.h>
-#include <asm/bitops.h>
 
 /**
  * bit_map_string_get - find and set a bit string in bit map.
@@ -29,10 +29,17 @@ int bit_map_string_get(struct bit_map *t, int len, int align)
 	int offset, count;	/* siamese twins */
 	int off_new;
 	int align1;
-	int i;
+	int i, color;
 
-	if (align == 0)
-		align = 1;
+	if (t->num_colors) {
+		/* align is overloaded to be the page color */
+		color = align;
+		align = t->num_colors;
+	} else {
+		color = 0;
+		if (align == 0)
+			align = 1;
+	}
 	align1 = align - 1;
 	if ((align & align1) != 0)
 		BUG();
@@ -40,13 +47,17 @@ int bit_map_string_get(struct bit_map *t, int len, int align)
 		BUG();
 	if (len <= 0 || len > t->size)
 		BUG();
+	color &= align1;
 
 	spin_lock(&t->lock);
-	offset = t->last_off & ~align1;
+	if (len < t->last_size)
+		offset = t->first_free;
+	else
+		offset = t->last_off & ~align1;
 	count = 0;
 	for (;;) {
 		off_new = find_next_zero_bit(t->map, t->size, offset);
-		off_new = (off_new + align1) & ~align1;
+		off_new = ((off_new + align1) & ~align1) + color;
 		count += off_new - offset;
 		offset = off_new;
 		if (offset >= t->size)
@@ -60,8 +71,8 @@ int bit_map_string_get(struct bit_map *t, int len, int align)
 		}
 
 		if (offset + len > t->size) {
-			offset = 0;
 			count += t->size - offset;
+			offset = 0;
 			continue;
 		}
 
@@ -69,11 +80,15 @@ int bit_map_string_get(struct bit_map *t, int len, int align)
 		while (test_bit(offset + i, t->map) == 0) {
 			i++;
 			if (i == len) {
-				for (i = 0; i < len; i++)
-					__set_bit(offset + i, t->map);
+				bitmap_set(t->map, offset, len);
+				if (offset == t->first_free)
+					t->first_free = find_next_zero_bit
+							(t->map, t->size,
+							 t->first_free + len);
 				if ((t->last_off = offset + len) >= t->size)
 					t->last_off = 0;
 				t->used += len;
+				t->last_size = len;
 				spin_unlock(&t->lock);
 				return offset;
 			}
@@ -96,6 +111,8 @@ void bit_map_clear(struct bit_map *t, int offset, int len)
 			BUG();
 		__clear_bit(offset + i, t->map);
 	}
+	if (offset < t->first_free)
+		t->first_free = offset;
 	t->used -= len;
 	spin_unlock(&t->lock);
 }

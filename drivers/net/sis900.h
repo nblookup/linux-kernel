@@ -1,4 +1,4 @@
-/* sis900.h Definitions for SiS ethernet controllers including 7014/7016 and 900 
+/* sis900.h Definitions for SiS ethernet controllers including 7014/7016 and 900
  * Copyright 1999 Silicon Integrated System Corporation
  * References:
  *   SiS 7016 Fast Ethernet PCI Bus 10/100 Mbps LAN Controller with OnNow Support,
@@ -49,7 +49,7 @@ enum sis900_command_register_bits {
 
 enum sis900_configuration_register_bits {
 	DESCRFMT = 0x00000100 /* 7016 specific */, REQALG = 0x00000080,
-	SB    = 0x00000040, POW = 0x00000020, EXD = 0x00000010, 
+	SB    = 0x00000040, POW = 0x00000020, EXD = 0x00000010,
 	PESEL = 0x00000008, LPM = 0x00000004, BEM = 0x00000001,
 	/* 635 & 900B Specific */
 	RND_CNT = 0x00000400, FAIR_BACKOFF = 0x00000200,
@@ -57,7 +57,7 @@ enum sis900_configuration_register_bits {
 };
 
 enum sis900_eeprom_access_reigster_bits {
-	MDC  = 0x00000040, MDDIR = 0x00000020, MDIO = 0x00000010, /* 7016 specific */ 
+	MDC  = 0x00000040, MDDIR = 0x00000020, MDIO = 0x00000010, /* 7016 specific */
 	EECS = 0x00000008, EECLK = 0x00000004, EEDO = 0x00000002,
 	EEDI = 0x00000001
 };
@@ -77,7 +77,7 @@ enum sis900_interrupt_enable_reigster_bits {
 	IE = 0x00000001
 };
 
-/* maximum dma burst fro transmission and receive*/
+/* maximum dma burst for transmission and receive */
 #define MAX_DMA_RANGE	7	/* actually 0 means MAXIMUM !! */
 #define TxMXDMA_shift   	20
 #define RxMXDMA_shift    20
@@ -86,7 +86,7 @@ enum sis900_tx_rx_dma{
 	DMA_BURST_512 = 0,	DMA_BURST_64 = 5
 };
 
-/* transmit FIFO threshholds */
+/* transmit FIFO thresholds */
 #define TX_FILL_THRESH   16	/* 1/4 FIFO size */
 #define TxFILLT_shift   	8
 #define TxDRNT_shift    	0
@@ -129,9 +129,9 @@ enum sis900_eeprom_address {
 
 /* The EEPROM commands include the alway-set leading bit. Refer to NM93Cxx datasheet */
 enum sis900_eeprom_command {
-	EEread     = 0x0180, EEwrite    = 0x0140, EEerase = 0x01C0, 
+	EEread     = 0x0180, EEwrite    = 0x0140, EEerase = 0x01C0,
 	EEwriteEnable = 0x0130, EEwriteDisable = 0x0100,
-	EEeraseAll = 0x0120, EEwriteAll = 0x0110, 
+	EEeraseAll = 0x0120, EEwriteAll = 0x0110,
 	EEaddrMask = 0x013F, EEcmdShift = 16
 };
 
@@ -140,7 +140,51 @@ enum sis96x_eeprom_command {
 	EEREQ = 0x00000400, EEDONE = 0x00000200, EEGNT = 0x00000100
 };
 
-/* Manamgement Data I/O (mdio) frame */
+/* PCI Registers */
+enum sis900_pci_registers {
+	CFGPMC 	 = 0x40,
+	CFGPMCSR = 0x44
+};
+
+/* Power management capabilities bits */
+enum sis900_cfgpmc_register_bits {
+	PMVER	= 0x00070000,
+	DSI	= 0x00100000,
+	PMESP	= 0xf8000000
+};
+
+enum sis900_pmesp_bits {
+	PME_D0 = 0x1,
+	PME_D1 = 0x2,
+	PME_D2 = 0x4,
+	PME_D3H = 0x8,
+	PME_D3C = 0x10
+};
+
+/* Power management control/status bits */
+enum sis900_cfgpmcsr_register_bits {
+	PMESTS = 0x00004000,
+	PME_EN = 0x00000100, // Power management enable
+	PWR_STA = 0x00000003 // Current power state
+};
+
+/* Wake-on-LAN support. */
+enum sis900_power_management_control_register_bits {
+	LINKLOSS  = 0x00000001,
+	LINKON    = 0x00000002,
+	MAGICPKT  = 0x00000400,
+	ALGORITHM = 0x00000800,
+	FRM1EN    = 0x00100000,
+	FRM2EN    = 0x00200000,
+	FRM3EN    = 0x00400000,
+	FRM1ACS   = 0x01000000,
+	FRM2ACS   = 0x02000000,
+	FRM3ACS   = 0x04000000,
+	WAKEALL   = 0x40000000,
+	GATECLK   = 0x80000000
+};
+
+/* Management Data I/O (mdio) frame */
 #define MIIread         0x6000
 #define MIIwrite        0x5002
 #define MIIpmdShift     7
@@ -194,7 +238,7 @@ enum amd_mii_registers {
 
 /* MII Control register bit definitions. */
 enum mii_control_register_bits {
-	MII_CNTL_FDX     = 0x0100, MII_CNTL_RST_AUTO = 0x0200, 
+	MII_CNTL_FDX     = 0x0100, MII_CNTL_RST_AUTO = 0x0200,
 	MII_CNTL_ISOLATE = 0x0400, MII_CNTL_PWRDWN   = 0x0800,
 	MII_CNTL_AUTO    = 0x1000, MII_CNTL_SPEED    = 0x2000,
 	MII_CNTL_LPBK    = 0x4000, MII_CNTL_RESET    = 0x8000
@@ -202,8 +246,8 @@ enum mii_control_register_bits {
 
 /* MII Status register bit  */
 enum mii_status_register_bits {
-	MII_STAT_EXT    = 0x0001, MII_STAT_JAB        = 0x0002, 
-	MII_STAT_LINK   = 0x0004, MII_STAT_CAN_AUTO   = 0x0008, 
+	MII_STAT_EXT    = 0x0001, MII_STAT_JAB        = 0x0002,
+	MII_STAT_LINK   = 0x0004, MII_STAT_CAN_AUTO   = 0x0008,
 	MII_STAT_FAULT  = 0x0010, MII_STAT_AUTO_DONE  = 0x0020,
 	MII_STAT_CAN_T  = 0x0800, MII_STAT_CAN_T_FDX  = 0x1000,
 	MII_STAT_CAN_TX = 0x2000, MII_STAT_CAN_TX_FDX = 0x4000,
@@ -266,8 +310,14 @@ enum sis630_revision_id {
 #define CRC_SIZE                4
 #define MAC_HEADER_SIZE         14
 
-#define TX_BUF_SIZE     1536
-#define RX_BUF_SIZE     1536
+#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
+#define MAX_FRAME_SIZE  (1518 + 4)
+#else
+#define MAX_FRAME_SIZE  1518
+#endif /* CONFIG_VLAN_802_1Q */
+
+#define TX_BUF_SIZE     (MAX_FRAME_SIZE+18)
+#define RX_BUF_SIZE     (MAX_FRAME_SIZE+18)
 
 #define NUM_TX_DESC     16      	/* Number of Tx descriptor registers. */
 #define NUM_RX_DESC     16       	/* Number of Rx descriptor registers. */

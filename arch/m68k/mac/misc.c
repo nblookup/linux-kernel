@@ -1,15 +1,13 @@
 /*
- * Miscellaneous Mac68K-specific stuff 
+ * Miscellaneous Mac68K-specific stuff
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-#include <linux/slab.h>
 #include <linux/time.h>
 #include <linux/rtc.h>
 #include <linux/mm.h>
@@ -36,73 +34,165 @@
 
 #define RTC_OFFSET 2082844800
 
-extern struct mac_booter_data mac_bi_data;
 static void (*rom_reset)(void);
 
-/*
- * Return the current time as the number of seconds since January 1, 1904.
- */
-
-static long adb_read_time(void)
+#ifdef CONFIG_ADB_CUDA
+static long cuda_read_time(void)
 {
-	volatile struct adb_request req;
+	struct adb_request req;
 	long time;
 
-	adb_request((struct adb_request *) &req, NULL,
-			ADBREQ_RAW|ADBREQ_SYNC,
-			2, CUDA_PACKET, CUDA_GET_TIME);
+	if (cuda_request(&req, NULL, 2, CUDA_PACKET, CUDA_GET_TIME) < 0)
+		return 0;
+	while (!req.complete)
+		cuda_poll();
 
 	time = (req.reply[3] << 24) | (req.reply[4] << 16)
 		| (req.reply[5] << 8) | req.reply[6];
 	return time - RTC_OFFSET;
 }
 
-/*
- * Set the current system time
- */
-
-static void adb_write_time(long data)
+static void cuda_write_time(long data)
 {
-	volatile struct adb_request req;
-
+	struct adb_request req;
 	data += RTC_OFFSET;
-	
-	adb_request((struct adb_request *) &req, NULL,
-			ADBREQ_RAW|ADBREQ_SYNC,
-			6, CUDA_PACKET, CUDA_SET_TIME,
+	if (cuda_request(&req, NULL, 6, CUDA_PACKET, CUDA_SET_TIME,
+			(data >> 24) & 0xFF, (data >> 16) & 0xFF,
+			(data >> 8) & 0xFF, data & 0xFF) < 0)
+		return;
+	while (!req.complete)
+		cuda_poll();
+}
+
+static __u8 cuda_read_pram(int offset)
+{
+	struct adb_request req;
+	if (cuda_request(&req, NULL, 4, CUDA_PACKET, CUDA_GET_PRAM,
+			(offset >> 8) & 0xFF, offset & 0xFF) < 0)
+		return 0;
+	while (!req.complete)
+		cuda_poll();
+	return req.reply[3];
+}
+
+static void cuda_write_pram(int offset, __u8 data)
+{
+	struct adb_request req;
+	if (cuda_request(&req, NULL, 5, CUDA_PACKET, CUDA_SET_PRAM,
+			(offset >> 8) & 0xFF, offset & 0xFF, data) < 0)
+		return;
+	while (!req.complete)
+		cuda_poll();
+}
+#else
+#define cuda_read_time() 0
+#define cuda_write_time(n)
+#define cuda_read_pram NULL
+#define cuda_write_pram NULL
+#endif
+
+#ifdef CONFIG_ADB_PMU68K
+static long pmu_read_time(void)
+{
+	struct adb_request req;
+	long time;
+
+	if (pmu_request(&req, NULL, 1, PMU_READ_RTC) < 0)
+		return 0;
+	while (!req.complete)
+		pmu_poll();
+
+	time = (req.reply[1] << 24) | (req.reply[2] << 16)
+		| (req.reply[3] << 8) | req.reply[4];
+	return time - RTC_OFFSET;
+}
+
+static void pmu_write_time(long data)
+{
+	struct adb_request req;
+	data += RTC_OFFSET;
+	if (pmu_request(&req, NULL, 5, PMU_SET_RTC,
+			(data >> 24) & 0xFF, (data >> 16) & 0xFF,
+			(data >> 8) & 0xFF, data & 0xFF) < 0)
+		return;
+	while (!req.complete)
+		pmu_poll();
+}
+
+static __u8 pmu_read_pram(int offset)
+{
+	struct adb_request req;
+	if (pmu_request(&req, NULL, 3, PMU_READ_NVRAM,
+			(offset >> 8) & 0xFF, offset & 0xFF) < 0)
+		return 0;
+	while (!req.complete)
+		pmu_poll();
+	return req.reply[3];
+}
+
+static void pmu_write_pram(int offset, __u8 data)
+{
+	struct adb_request req;
+	if (pmu_request(&req, NULL, 4, PMU_WRITE_NVRAM,
+			(offset >> 8) & 0xFF, offset & 0xFF, data) < 0)
+		return;
+	while (!req.complete)
+		pmu_poll();
+}
+#else
+#define pmu_read_time() 0
+#define pmu_write_time(n)
+#define pmu_read_pram NULL
+#define pmu_write_pram NULL
+#endif
+
+#if 0 /* def CONFIG_ADB_MACIISI */
+extern int maciisi_request(struct adb_request *req,
+			void (*done)(struct adb_request *), int nbytes, ...);
+
+static long maciisi_read_time(void)
+{
+	struct adb_request req;
+	long time;
+
+	if (maciisi_request(&req, NULL, 2, CUDA_PACKET, CUDA_GET_TIME))
+		return 0;
+
+	time = (req.reply[3] << 24) | (req.reply[4] << 16)
+		| (req.reply[5] << 8) | req.reply[6];
+	return time - RTC_OFFSET;
+}
+
+static void maciisi_write_time(long data)
+{
+	struct adb_request req;
+	data += RTC_OFFSET;
+	maciisi_request(&req, NULL, 6, CUDA_PACKET, CUDA_SET_TIME,
 			(data >> 24) & 0xFF, (data >> 16) & 0xFF,
 			(data >> 8) & 0xFF, data & 0xFF);
 }
 
-/*
- * Get a byte from the NVRAM
- */
-
-static __u8 adb_read_pram(int offset)
+static __u8 maciisi_read_pram(int offset)
 {
-	volatile struct adb_request req;
-
-	adb_request((struct adb_request *) &req, NULL,
-			ADBREQ_RAW|ADBREQ_SYNC,
-			4, CUDA_PACKET, CUDA_GET_PRAM,
-			(offset >> 8) & 0xFF, offset & 0xFF);
+	struct adb_request req;
+	if (maciisi_request(&req, NULL, 4, CUDA_PACKET, CUDA_GET_PRAM,
+			(offset >> 8) & 0xFF, offset & 0xFF))
+		return 0;
 	return req.reply[3];
 }
 
-/*
- * Write a byte to the NVRAM
- */
-
-static void adb_write_pram(int offset, __u8 data)
+static void maciisi_write_pram(int offset, __u8 data)
 {
-	volatile struct adb_request req;
-
-	adb_request((struct adb_request *) &req, NULL,
-			ADBREQ_RAW|ADBREQ_SYNC,
-			5, CUDA_PACKET, CUDA_SET_PRAM,
-			(offset >> 8) & 0xFF, offset & 0xFF,
-			data);
+	struct adb_request req;
+	maciisi_request(&req, NULL, 5, CUDA_PACKET, CUDA_SET_PRAM,
+			(offset >> 8) & 0xFF, offset & 0xFF, data);
 }
+#else
+#define maciisi_read_time() 0
+#define maciisi_write_time(n)
+#define maciisi_read_pram NULL
+#define maciisi_write_pram NULL
+#endif
 
 /*
  * VIA PRAM/RTC access routines
@@ -303,42 +393,55 @@ static void oss_shutdown(void)
 
 static void cuda_restart(void)
 {
-	adb_request(NULL, NULL, ADBREQ_RAW|ADBREQ_SYNC,
-			2, CUDA_PACKET, CUDA_RESET_SYSTEM);
+	struct adb_request req;
+	if (cuda_request(&req, NULL, 2, CUDA_PACKET, CUDA_RESET_SYSTEM) < 0)
+		return;
+	while (!req.complete)
+		cuda_poll();
 }
 
 static void cuda_shutdown(void)
 {
-	adb_request(NULL, NULL, ADBREQ_RAW|ADBREQ_SYNC,
-			2, CUDA_PACKET, CUDA_POWERDOWN);
+	struct adb_request req;
+	if (cuda_request(&req, NULL, 2, CUDA_PACKET, CUDA_POWERDOWN) < 0)
+		return;
+	while (!req.complete)
+		cuda_poll();
 }
 
 #endif /* CONFIG_ADB_CUDA */
 
-#ifdef CONFIG_ADB_PMU
+#ifdef CONFIG_ADB_PMU68K
 
 void pmu_restart(void)
 {
-	adb_request(NULL, NULL, ADBREQ_RAW|ADBREQ_SYNC,
-			3, PMU_PACKET, PMU_SET_INTR_MASK,
-			PMU_INT_ADB|PMU_INT_TICK);
-	
-	adb_request(NULL, NULL, ADBREQ_RAW|ADBREQ_SYNC,
-			2, PMU_PACKET, PMU_RESET);
+	struct adb_request req;
+	if (pmu_request(&req, NULL,
+			2, PMU_SET_INTR_MASK, PMU_INT_ADB|PMU_INT_TICK) < 0)
+		return;
+	while (!req.complete)
+		pmu_poll();
+	if (pmu_request(&req, NULL, 1, PMU_RESET) < 0)
+		return;
+	while (!req.complete)
+		pmu_poll();
 }
 
 void pmu_shutdown(void)
 {
-	adb_request(NULL, NULL, ADBREQ_RAW|ADBREQ_SYNC,
-			3, PMU_PACKET, PMU_SET_INTR_MASK,
-			PMU_INT_ADB|PMU_INT_TICK);
-
-	adb_request(NULL, NULL, ADBREQ_RAW|ADBREQ_SYNC,
-			6, PMU_PACKET, PMU_SHUTDOWN,
-			'M', 'A', 'T', 'T');
+	struct adb_request req;
+	if (pmu_request(&req, NULL,
+			2, PMU_SET_INTR_MASK, PMU_INT_ADB|PMU_INT_TICK) < 0)
+		return;
+	while (!req.complete)
+		pmu_poll();
+	if (pmu_request(&req, NULL, 5, PMU_SHUTDOWN, 'M', 'A', 'T', 'T') < 0)
+		return;
+	while (!req.complete)
+		pmu_poll();
 }
 
-#endif /* CONFIG_ADB_PMU */
+#endif
 
 /*
  *-------------------------------------------------------------------
@@ -349,17 +452,22 @@ void pmu_shutdown(void)
 
 void mac_pram_read(int offset, __u8 *buffer, int len)
 {
-	__u8 (*func)(int) = NULL;
+	__u8 (*func)(int);
 	int i;
 
-	if (macintosh_config->adb_type == MAC_ADB_IISI ||
-	    macintosh_config->adb_type == MAC_ADB_PB1 ||
-	    macintosh_config->adb_type == MAC_ADB_PB2 ||
-	    macintosh_config->adb_type == MAC_ADB_CUDA) {
-		func = adb_read_pram;
-	} else {
+	switch(macintosh_config->adb_type) {
+	case MAC_ADB_IISI:
+		func = maciisi_read_pram; break;
+	case MAC_ADB_PB1:
+	case MAC_ADB_PB2:
+		func = pmu_read_pram; break;
+	case MAC_ADB_CUDA:
+		func = cuda_read_pram; break;
+	default:
 		func = via_read_pram;
 	}
+	if (!func)
+		return;
 	for (i = 0 ; i < len ; i++) {
 		buffer[i] = (*func)(offset++);
 	}
@@ -367,17 +475,22 @@ void mac_pram_read(int offset, __u8 *buffer, int len)
 
 void mac_pram_write(int offset, __u8 *buffer, int len)
 {
-	void (*func)(int, __u8) = NULL;
+	void (*func)(int, __u8);
 	int i;
 
-	if (macintosh_config->adb_type == MAC_ADB_IISI ||
-	    macintosh_config->adb_type == MAC_ADB_PB1 ||
-	    macintosh_config->adb_type == MAC_ADB_PB2 ||
-	    macintosh_config->adb_type == MAC_ADB_CUDA) {
-		func = adb_write_pram;
-	} else {
+	switch(macintosh_config->adb_type) {
+	case MAC_ADB_IISI:
+		func = maciisi_write_pram; break;
+	case MAC_ADB_PB1:
+	case MAC_ADB_PB2:
+		func = pmu_write_pram; break;
+	case MAC_ADB_CUDA:
+		func = cuda_write_pram; break;
+	default:
 		func = via_write_pram;
 	}
+	if (!func)
+		return;
 	for (i = 0 ; i < len ; i++) {
 		(*func)(offset++, buffer[i]);
 	}
@@ -398,7 +511,7 @@ void mac_poweroff(void)
 	} else if (macintosh_config->adb_type == MAC_ADB_CUDA) {
 		cuda_shutdown();
 #endif
-#ifdef CONFIG_ADB_PMU
+#ifdef CONFIG_ADB_PMU68K
 	} else if (macintosh_config->adb_type == MAC_ADB_PB1
 		|| macintosh_config->adb_type == MAC_ADB_PB2) {
 		pmu_shutdown();
@@ -438,7 +551,7 @@ void mac_reset(void)
 	} else if (macintosh_config->adb_type == MAC_ADB_CUDA) {
 		cuda_restart();
 #endif
-#ifdef CONFIG_ADB_PMU
+#ifdef CONFIG_ADB_PMU68K
 	} else if (macintosh_config->adb_type == MAC_ADB_PB1
 		|| macintosh_config->adb_type == MAC_ADB_PB2) {
 		pmu_restart();
@@ -456,18 +569,19 @@ void mac_reset(void)
 		/* make a 1-to-1 mapping, using the transparent tran. reg. */
 		unsigned long virt = (unsigned long) mac_reset;
 		unsigned long phys = virt_to_phys(mac_reset);
+		unsigned long addr = (phys&0xFF000000)|0x8777;
 		unsigned long offset = phys-virt;
 		local_irq_disable(); /* lets not screw this up, ok? */
 		__asm__ __volatile__(".chip 68030\n\t"
 				     "pmove %0,%/tt0\n\t"
 				     ".chip 68k"
-				     : : "m" ((phys&0xFF000000)|0x8777));
+				     : : "m" (addr));
 		/* Now jump to physical address so we can disable MMU */
 		__asm__ __volatile__(
                     ".chip 68030\n\t"
 		    "lea %/pc@(1f),%/a0\n\t"
 		    "addl %0,%/a0\n\t"/* fixup target address and stack ptr */
-		    "addl %0,%/sp\n\t" 
+		    "addl %0,%/sp\n\t"
 		    "pflusha\n\t"
 		    "jmp %/a0@\n\t" /* jump into physical memory */
 		    "0:.long 0\n\t" /* a constant zero. */
@@ -484,7 +598,7 @@ void mac_reset(void)
 		    "movec %/a0, %/cacr\n\t" /* flush i&d caches */
 		    "movew #0x2700,%/sr\n\t" /* set up status register */
 		    "movel %1@(0x0),%/a0\n\t"/* load interrupt stack pointer */
-		    "movec %/a0, %/isp\n\t" 
+		    "movec %/a0, %/isp\n\t"
 		    "movel %1@(0x4),%/a0\n\t" /* load reset vector */
 		    "reset\n\t" /* reset external devices */
 		    "jmp %/a0@\n\t" /* jump to the reset vector */
@@ -569,7 +683,7 @@ static void unmktime(unsigned long time, long offset,
 	return;
 }
 
-/* 
+/*
  * Read/write the hardware clock.
  */
 
@@ -578,16 +692,22 @@ int mac_hwclk(int op, struct rtc_time *t)
 	unsigned long now;
 
 	if (!op) { /* read */
-		if (macintosh_config->adb_type == MAC_ADB_II) {
+		switch (macintosh_config->adb_type) {
+		case MAC_ADB_II:
+		case MAC_ADB_IOP:
 			now = via_read_time();
-		} else if ((macintosh_config->adb_type == MAC_ADB_IISI) ||
-			   (macintosh_config->adb_type == MAC_ADB_PB1) ||
-			   (macintosh_config->adb_type == MAC_ADB_PB2) ||
-			   (macintosh_config->adb_type == MAC_ADB_CUDA)) {
-			now = adb_read_time();
-		} else if (macintosh_config->adb_type == MAC_ADB_IOP) {
-			now = via_read_time();
-		} else {
+			break;
+		case MAC_ADB_IISI:
+			now = maciisi_read_time();
+			break;
+		case MAC_ADB_PB1:
+		case MAC_ADB_PB2:
+			now = pmu_read_time();
+			break;
+		case MAC_ADB_CUDA:
+			now = cuda_read_time();
+			break;
+		default:
 			now = 0;
 		}
 
@@ -595,27 +715,36 @@ int mac_hwclk(int op, struct rtc_time *t)
 		unmktime(now, 0,
 			 &t->tm_year, &t->tm_mon, &t->tm_mday,
 			 &t->tm_hour, &t->tm_min, &t->tm_sec);
+#if 0
 		printk("mac_hwclk: read %04d-%02d-%-2d %02d:%02d:%02d\n",
-			t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+			t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+			t->tm_hour, t->tm_min, t->tm_sec);
+#endif
 	} else { /* write */
+#if 0
 		printk("mac_hwclk: tried to write %04d-%02d-%-2d %02d:%02d:%02d\n",
-			t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+			t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+			t->tm_hour, t->tm_min, t->tm_sec);
+#endif
 
-#if 0	/* it trashes my rtc */
 		now = mktime(t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
 			     t->tm_hour, t->tm_min, t->tm_sec);
 
-		if (macintosh_config->adb_type == MAC_ADB_II) {
+		switch (macintosh_config->adb_type) {
+		case MAC_ADB_II:
+		case MAC_ADB_IOP:
 			via_write_time(now);
-		} else if ((macintosh_config->adb_type == MAC_ADB_IISI) ||
-			   (macintosh_config->adb_type == MAC_ADB_PB1) ||
-			   (macintosh_config->adb_type == MAC_ADB_PB2) ||
-			   (macintosh_config->adb_type == MAC_ADB_CUDA)) {
-			adb_write_time(now);
-		} else if (macintosh_config->adb_type == MAC_ADB_IOP) {
-			via_write_time(now);
+			break;
+		case MAC_ADB_CUDA:
+			cuda_write_time(now);
+			break;
+		case MAC_ADB_PB1:
+		case MAC_ADB_PB2:
+			pmu_write_time(now);
+			break;
+		case MAC_ADB_IISI:
+			maciisi_write_time(now);
 		}
-#endif
 	}
 	return 0;
 }

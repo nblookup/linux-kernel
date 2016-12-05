@@ -1,4 +1,4 @@
-/* linux/drivers/i2c/scx200_i2c.c 
+/* linux/drivers/i2c/busses/scx200_i2c.c
 
    Copyright (c) 2001,2002 Christer Weinigel <wingel@nano-system.com>
 
@@ -21,14 +21,13 @@
    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.		     
 */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 #include <linux/scx200_gpio.h>
 
@@ -38,13 +37,13 @@ MODULE_AUTHOR("Christer Weinigel <wingel@nano-system.com>");
 MODULE_DESCRIPTION("NatSemi SCx200 I2C Driver");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(scl, "i");
-MODULE_PARM_DESC(scl, "GPIO line for SCL");
-MODULE_PARM(sda, "i");
-MODULE_PARM_DESC(sda, "GPIO line for SDA");
-
 static int scl = CONFIG_SCx200_I2C_SCL;
 static int sda = CONFIG_SCx200_I2C_SDA;
+
+module_param(scl, int, 0);
+MODULE_PARM_DESC(scl, "GPIO line for SCL");
+module_param(sda, int, 0);
+MODULE_PARM_DESC(sda, "GPIO line for SDA");
 
 static void scx200_i2c_setscl(void *data, int state)
 {
@@ -72,31 +71,31 @@ static int scx200_i2c_getsda(void *data)
  */
 
 static struct i2c_algo_bit_data scx200_i2c_data = {
-	NULL,
-	scx200_i2c_setsda,
-	scx200_i2c_setscl,
-	scx200_i2c_getsda,
-	scx200_i2c_getscl,
-	10, 10, 100,		/* waits, timeout */
+	.setsda		= scx200_i2c_setsda,
+	.setscl		= scx200_i2c_setscl,
+	.getsda		= scx200_i2c_getsda,
+	.getscl		= scx200_i2c_getscl,
+	.udelay		= 10,
+	.timeout	= HZ,
 };
 
 static struct i2c_adapter scx200_i2c_ops = {
 	.owner		   = THIS_MODULE,
+	.class             = I2C_CLASS_HWMON | I2C_CLASS_SPD,
 	.algo_data	   = &scx200_i2c_data,
 	.name	= "NatSemi SCx200 I2C",
 };
 
-int scx200_i2c_init(void)
+static int scx200_i2c_init(void)
 {
-	printk(KERN_DEBUG NAME ": NatSemi SCx200 I2C Driver\n");
+	pr_debug(NAME ": NatSemi SCx200 I2C Driver\n");
 
 	if (!scx200_gpio_present()) {
 		printk(KERN_ERR NAME ": no SCx200 gpio pins available\n");
 		return -ENODEV;
 	}
 
-	printk(KERN_DEBUG NAME ": SCL=GPIO%02u, SDA=GPIO%02u\n", 
-	       scl, sda);
+	pr_debug(NAME ": SCL=GPIO%02u, SDA=GPIO%02u\n", scl, sda);
 
 	if (scl == -1 || sda == -1 || scl == sda) {
 		printk(KERN_ERR NAME ": scl and sda must be specified\n");
@@ -116,9 +115,9 @@ int scx200_i2c_init(void)
 	return 0;
 }
 
-void scx200_i2c_cleanup(void)
+static void scx200_i2c_cleanup(void)
 {
-	i2c_bit_del_bus(&scx200_i2c_ops);
+	i2c_del_adapter(&scx200_i2c_ops);
 }
 
 module_init(scx200_i2c_init);

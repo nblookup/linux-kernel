@@ -7,7 +7,7 @@
  * under the terms of version 2 of the GNU General Public License
  * as published by the Free Software Foundation.
  *
- * For information see http://hq.pm.waw.pl/hdlc/
+ * For information see <http://www.kernel.org/pub/linux/utils/net/hdlc/>
  *
  * Sources of information:
  *    Hitachi HD64570 SCA User's Manual
@@ -16,6 +16,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/capability.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/string.h>
@@ -54,9 +55,9 @@ static char *hw;		/* pointer to hw=xxx command line string */
 
 
 typedef struct card_s {
-	hdlc_device hdlc;	/* HDLC device struct - must be first */
+	struct net_device *dev;
 	spinlock_t lock;	/* TX lock */
-	u8 *win0base;		/* ISA window base address */
+	u8 __iomem *win0base;	/* ISA window base address */
 	u32 phy_winbase;	/* ISA physical base address */
 	sync_serial_settings settings;
 	int rxpart;		/* partial frame received, next frame invalid*/
@@ -88,7 +89,7 @@ static card_t **new_card = &first_card;
 /* EDA address register must be set in EDAL, EDAH order - 8 bit ISA bus */
 #define sca_outw(value, reg, card) do { \
 	writeb(value & 0xFF, (card)->win0base + C101_SCA + (reg)); \
-	writeb((value >> 8 ) & 0xFF, (card)->win0base + C101_SCA + (reg+1));\
+	writeb((value >> 8 ) & 0xFF, (card)->win0base + C101_SCA + (reg + 1));\
 } while(0)
 
 #define port_to_card(port)	   (port)
@@ -113,31 +114,37 @@ static inline void openwin(card_t *card, u8 page)
 }
 
 
-#define close_windows(card) {} /* no hardware support */
+#include "hd64570.c"
 
 
-#include "hd6457x.c"
+static inline void set_carrier(port_t *port)
+{
+	if (!(sca_in(MSCI1_OFFSET + ST3, port) & ST3_DCD))
+		netif_carrier_on(port_to_dev(port));
+	else
+		netif_carrier_off(port_to_dev(port));
+}
 
 
 static void sca_msci_intr(port_t *port)
 {
-	card_t* card = port_to_card(port);
-	u8 stat = sca_in(MSCI1_OFFSET + ST1, card); /* read MSCI ST1 status */
+	u8 stat = sca_in(MSCI0_OFFSET + ST1, port); /* read MSCI ST1 status */
 
-	/* Reset MSCI TX underrun status bit */
-	sca_out(stat & ST1_UDRN, MSCI0_OFFSET + ST1, card);
+	/* Reset MSCI TX underrun and CDCD (ignored) status bit */
+	sca_out(stat & (ST1_UDRN | ST1_CDCD), MSCI0_OFFSET + ST1, port);
 
 	if (stat & ST1_UDRN) {
-		port->hdlc.stats.tx_errors++; /* TX Underrun error detected */
-		port->hdlc.stats.tx_fifo_errors++;
+		/* TX Underrun error detected */
+		port_to_dev(port)->stats.tx_errors++;
+		port_to_dev(port)->stats.tx_fifo_errors++;
 	}
 
+	stat = sca_in(MSCI1_OFFSET + ST1, port); /* read MSCI1 ST1 status */
 	/* Reset MSCI CDCD status bit - uses ch#2 DCD input */
-	sca_out(stat & ST1_CDCD, MSCI1_OFFSET + ST1, card);
+	sca_out(stat & ST1_CDCD, MSCI1_OFFSET + ST1, port);
 
 	if (stat & ST1_CDCD)
-		hdlc_set_carrier(!(sca_in(MSCI1_OFFSET + ST3, card) & ST3_DCD),
-				 &port->hdlc);
+		set_carrier(port);
 }
 
 
@@ -177,23 +184,21 @@ static void c101_set_iface(port_t *port)
 
 static int c101_open(struct net_device *dev)
 {
-	hdlc_device *hdlc = dev_to_hdlc(dev);
-	port_t *port = hdlc_to_port(hdlc);
+	port_t *port = dev_to_port(dev);
 	int result;
 
-	result = hdlc_open(hdlc);
+	result = hdlc_open(dev);
 	if (result)
 		return result;
 
 	writeb(1, port->win0base + C101_DTR);
 	sca_out(0, MSCI1_OFFSET + CTL, port); /* RTS uses ch#2 output */
-	sca_open(hdlc);
+	sca_open(dev);
 	/* DCD is connected to port 2 !@#$%^& - disable MSCI0 CDCD interrupt */
 	sca_out(IE1_UDRN, MSCI0_OFFSET + IE1, port);
 	sca_out(IE0_TXINT, MSCI0_OFFSET + IE0, port);
 
-	hdlc_set_carrier(!(sca_in(MSCI1_OFFSET + ST3, port) & ST3_DCD), hdlc);
-	printk(KERN_DEBUG "0x%X\n", sca_in(MSCI1_OFFSET + ST3, port));
+	set_carrier(port);
 
 	/* enable MSCI1 CDCD interrupt */
 	sca_out(IE1_CDCD, MSCI1_OFFSET + IE1, port);
@@ -206,13 +211,12 @@ static int c101_open(struct net_device *dev)
 
 static int c101_close(struct net_device *dev)
 {
-	hdlc_device *hdlc = dev_to_hdlc(dev);
-	port_t *port = hdlc_to_port(hdlc);
+	port_t *port = dev_to_port(dev);
 
-	sca_close(hdlc);
+	sca_close(dev);
 	writeb(0, port->win0base + C101_DTR);
 	sca_out(CTL_NORTS, MSCI1_OFFSET + CTL, port);
-	hdlc_close(hdlc);
+	hdlc_close(dev);
 	return 0;
 }
 
@@ -220,13 +224,13 @@ static int c101_close(struct net_device *dev)
 static int c101_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	const size_t size = sizeof(sync_serial_settings);
-	sync_serial_settings new_line, *line = ifr->ifr_settings.ifs_ifsu.sync;
-	hdlc_device *hdlc = dev_to_hdlc(dev);
-	port_t *port = hdlc_to_port(hdlc);
+	sync_serial_settings new_line;
+	sync_serial_settings __user *line = ifr->ifr_settings.ifs_ifsu.sync;
+	port_t *port = dev_to_port(dev);
 
 #ifdef DEBUG_RINGS
 	if (cmd == SIOCDEVPRIVATE) {
-		sca_dump_rings(hdlc);
+		sca_dump_rings(dev);
 		printk(KERN_DEBUG "MSCI1: ST: %02x %02x %02x %02x\n",
 		       sca_in(MSCI1_OFFSET + ST0, port),
 		       sca_in(MSCI1_OFFSET + ST1, port),
@@ -260,7 +264,7 @@ static int c101_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		    new_line.clock_type != CLOCK_TXFROMRX &&
 		    new_line.clock_type != CLOCK_INT &&
 		    new_line.clock_type != CLOCK_TXINT)
-		return -EINVAL;	/* No such clock setting */
+			return -EINVAL;	/* No such clock setting */
 
 		if (new_line.loopback != 0 && new_line.loopback != 1)
 			return -EINVAL;
@@ -288,14 +292,23 @@ static void c101_destroy_card(card_t *card)
 		release_mem_region(card->phy_winbase, C101_MAPPED_RAM_SIZE);
 	}
 
+	free_netdev(card->dev);
+
 	kfree(card);
 }
 
-
+static const struct net_device_ops c101_ops = {
+	.ndo_open       = c101_open,
+	.ndo_stop       = c101_close,
+	.ndo_change_mtu = hdlc_change_mtu,
+	.ndo_start_xmit = hdlc_start_xmit,
+	.ndo_do_ioctl   = c101_ioctl,
+};
 
 static int __init c101_run(unsigned long irq, unsigned long winbase)
 {
 	struct net_device *dev;
+	hdlc_device *hdlc;
 	card_t *card;
 	int result;
 
@@ -309,31 +322,37 @@ static int __init c101_run(unsigned long irq, unsigned long winbase)
 		return -ENODEV;
 	}
 
-	card = kmalloc(sizeof(card_t), GFP_KERNEL);
+	card = kzalloc(sizeof(card_t), GFP_KERNEL);
 	if (card == NULL) {
 		printk(KERN_ERR "c101: unable to allocate memory\n");
 		return -ENOBUFS;
 	}
-	memset(card, 0, sizeof(card_t));
+
+	card->dev = alloc_hdlcdev(card);
+	if (!card->dev) {
+		printk(KERN_ERR "c101: unable to allocate memory\n");
+		kfree(card);
+		return -ENOBUFS;
+	}
 
 	if (request_irq(irq, sca_intr, 0, devname, card)) {
 		printk(KERN_ERR "c101: could not allocate IRQ\n");
 		c101_destroy_card(card);
-		return(-EBUSY);
+		return -EBUSY;
 	}
 	card->irq = irq;
 
 	if (!request_mem_region(winbase, C101_MAPPED_RAM_SIZE, devname)) {
 		printk(KERN_ERR "c101: could not request RAM window\n");
 		c101_destroy_card(card);
-		return(-EBUSY);
+		return -EBUSY;
 	}
 	card->phy_winbase = winbase;
 	card->win0base = ioremap(winbase, C101_MAPPED_RAM_SIZE);
 	if (!card->win0base) {
 		printk(KERN_ERR "c101: could not map I/O address\n");
 		c101_destroy_card(card);
-		return -EBUSY;
+		return -EFAULT;
 	}
 
 	card->tx_ring_buffers = TX_RING_BUFFERS;
@@ -347,35 +366,32 @@ static int __init c101_run(unsigned long irq, unsigned long winbase)
 
 	sca_init(card, 0);
 
-	dev = hdlc_to_dev(&card->hdlc);
+	dev = port_to_dev(card);
+	hdlc = dev_to_hdlc(dev);
 
 	spin_lock_init(&card->lock);
-	SET_MODULE_OWNER(dev);
 	dev->irq = irq;
 	dev->mem_start = winbase;
 	dev->mem_end = winbase + C101_MAPPED_RAM_SIZE - 1;
 	dev->tx_queue_len = 50;
-	dev->do_ioctl = c101_ioctl;
-	dev->open = c101_open;
-	dev->stop = c101_close;
-	card->hdlc.attach = sca_attach;
-	card->hdlc.xmit = sca_xmit;
+	dev->netdev_ops = &c101_ops;
+	hdlc->attach = sca_attach;
+	hdlc->xmit = sca_xmit;
 	card->settings.clock_type = CLOCK_EXT;
 
-	result = register_hdlc_device(&card->hdlc);
+	result = register_hdlc_device(dev);
 	if (result) {
 		printk(KERN_WARNING "c101: unable to register hdlc device\n");
 		c101_destroy_card(card);
 		return result;
 	}
 
-	sca_init_sync_port(card); /* Set up C101 memory */
-	hdlc_set_carrier(!(sca_in(MSCI1_OFFSET + ST3, card) & ST3_DCD),
-			 &card->hdlc);
+	sca_init_port(card); /* Set up C101 memory */
+	set_carrier(card);
 
 	printk(KERN_INFO "%s: Moxa C101 on IRQ%u,"
 	       " using %u TX + %u RX packets rings\n",
-	       hdlc_to_name(&card->hdlc), card->irq,
+	       dev->name, card->irq,
 	       card->tx_ring_buffers, card->rx_ring_buffers);
 
 	*new_card = card;
@@ -391,7 +407,7 @@ static int __init c101_init(void)
 #ifdef MODULE
 		printk(KERN_INFO "c101: no card initialized\n");
 #endif
-		return -ENOSYS;	/* no parameters specified, abort */
+		return -EINVAL;	/* no parameters specified, abort */
 	}
 
 	printk(KERN_INFO "%s\n", version);
@@ -409,11 +425,11 @@ static int __init c101_init(void)
 			c101_run(irq, ram);
 
 		if (*hw == '\x0')
-			return first_card ? 0 : -ENOSYS;
+			return first_card ? 0 : -EINVAL;
 	}while(*hw++ == ':');
 
 	printk(KERN_ERR "c101: invalid hardware parameters\n");
-	return first_card ? 0 : -ENOSYS;
+	return first_card ? 0 : -EINVAL;
 }
 
 
@@ -424,7 +440,7 @@ static void __exit c101_cleanup(void)
 	while (card) {
 		card_t *ptr = card;
 		card = card->next_card;
-		unregister_hdlc_device(&ptr->hdlc);
+		unregister_hdlc_device(port_to_dev(ptr));
 		c101_destroy_card(ptr);
 	}
 }
@@ -436,4 +452,5 @@ module_exit(c101_cleanup);
 MODULE_AUTHOR("Krzysztof Halasa <khc@pm.waw.pl>");
 MODULE_DESCRIPTION("Moxa C101 serial port driver");
 MODULE_LICENSE("GPL v2");
-module_param(hw, charp, 0444);	/* hw=irq,ram:irq,... */
+module_param(hw, charp, 0444);
+MODULE_PARM_DESC(hw, "irq,ram:irq,...");

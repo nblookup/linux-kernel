@@ -15,18 +15,19 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * Copyright (C) IBM Corporation, 2001
+ * Copyright IBM Corporation, 2001
  *
- * Author: Dipankar Sarma <dipankar@in.ibm.com>
- * 
- * Based on the original work by Paul McKenney <paul.mckenney@us.ibm.com>
+ * Authors: Dipankar Sarma <dipankar@in.ibm.com>
+ *	    Manfred Spraul <manfred@colorfullife.com>
+ *
+ * Based on the original work by Paul McKenney <paulmck@us.ibm.com>
  * and inputs from Rusty Russell, Andrea Arcangeli and Andi Kleen.
  * Papers:
  * http://www.rdrop.com/users/paulmck/paper/rclockpdcsproof.pdf
  * http://lse.sourceforge.net/locking/rclock_OLS.2001.05.01c.sc.pdf (OLS2001)
  *
  * For detailed explanation of Read-Copy Update mechanism see -
- * 		http://lse.sourceforge.net/locking/rcupdate.html
+ *		http://lse.sourceforge.net/locking/rcupdate.html
  *
  */
 #include <linux/types.h>
@@ -37,231 +38,241 @@
 #include <linux/interrupt.h>
 #include <linux/sched.h>
 #include <asm/atomic.h>
-#include <asm/bitops.h>
-#include <linux/module.h>
-#include <linux/completion.h>
+#include <linux/bitops.h>
 #include <linux/percpu.h>
 #include <linux/notifier.h>
-#include <linux/rcupdate.h>
 #include <linux/cpu.h>
+#include <linux/mutex.h>
+#include <linux/module.h>
+#include <linux/hardirq.h>
 
-/* Definition for rcupdate control block. */
-struct rcu_ctrlblk rcu_ctrlblk = 
-	{ .mutex = SPIN_LOCK_UNLOCKED, .curbatch = 1, 
-	  .maxbatch = 1, .rcu_cpu_mask = CPU_MASK_NONE };
-DEFINE_PER_CPU(struct rcu_data, rcu_data) = { 0L };
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+static struct lock_class_key rcu_lock_key;
+struct lockdep_map rcu_lock_map =
+	STATIC_LOCKDEP_MAP_INIT("rcu_read_lock", &rcu_lock_key);
+EXPORT_SYMBOL_GPL(rcu_lock_map);
 
-/* Fake initialization required by compiler */
-static DEFINE_PER_CPU(struct tasklet_struct, rcu_tasklet) = {NULL};
-#define RCU_tasklet(cpu) (per_cpu(rcu_tasklet, cpu))
+static struct lock_class_key rcu_bh_lock_key;
+struct lockdep_map rcu_bh_lock_map =
+	STATIC_LOCKDEP_MAP_INIT("rcu_read_lock_bh", &rcu_bh_lock_key);
+EXPORT_SYMBOL_GPL(rcu_bh_lock_map);
+
+static struct lock_class_key rcu_sched_lock_key;
+struct lockdep_map rcu_sched_lock_map =
+	STATIC_LOCKDEP_MAP_INIT("rcu_read_lock_sched", &rcu_sched_lock_key);
+EXPORT_SYMBOL_GPL(rcu_sched_lock_map);
+#endif
+
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+
+int debug_lockdep_rcu_enabled(void)
+{
+	return rcu_scheduler_active && debug_locks &&
+	       current->lockdep_recursion == 0;
+}
+EXPORT_SYMBOL_GPL(debug_lockdep_rcu_enabled);
 
 /**
- * call_rcu - Queue an RCU update request.
- * @head: structure to be used for queueing the RCU updates.
- * @func: actual update function to be invoked after the grace period
- * @arg: argument to be passed to the update function
+ * rcu_read_lock_bh_held() - might we be in RCU-bh read-side critical section?
  *
- * The update function will be invoked as soon as all CPUs have performed 
- * a context switch or been seen in the idle loop or in a user process. 
- * The read-side of critical section that use call_rcu() for updation must 
- * be protected by rcu_read_lock()/rcu_read_unlock().
+ * Check for bottom half being disabled, which covers both the
+ * CONFIG_PROVE_RCU and not cases.  Note that if someone uses
+ * rcu_read_lock_bh(), but then later enables BH, lockdep (if enabled)
+ * will show the situation.  This is useful for debug checks in functions
+ * that require that they be called within an RCU read-side critical
+ * section.
+ *
+ * Check debug_lockdep_rcu_enabled() to prevent false positives during boot.
  */
-void call_rcu(struct rcu_head *head, void (*func)(void *arg), void *arg)
+int rcu_read_lock_bh_held(void)
 {
-	int cpu;
-	unsigned long flags;
+	if (!debug_lockdep_rcu_enabled())
+		return 1;
+	return in_softirq() || irqs_disabled();
+}
+EXPORT_SYMBOL_GPL(rcu_read_lock_bh_held);
 
-	head->func = func;
-	head->arg = arg;
-	local_irq_save(flags);
-	cpu = smp_processor_id();
-	list_add_tail(&head->list, &RCU_nxtlist(cpu));
-	local_irq_restore(flags);
+#endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
+
+/*
+ * Awaken the corresponding synchronize_rcu() instance now that a
+ * grace period has elapsed.
+ */
+void wakeme_after_rcu(struct rcu_head  *head)
+{
+	struct rcu_synchronize *rcu;
+
+	rcu = container_of(head, struct rcu_synchronize, head);
+	complete(&rcu->completion);
+}
+
+#ifdef CONFIG_PROVE_RCU
+/*
+ * wrapper function to avoid #include problems.
+ */
+int rcu_my_thread_group_empty(void)
+{
+	return thread_group_empty(current);
+}
+EXPORT_SYMBOL_GPL(rcu_my_thread_group_empty);
+#endif /* #ifdef CONFIG_PROVE_RCU */
+
+#ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD
+static inline void debug_init_rcu_head(struct rcu_head *head)
+{
+	debug_object_init(head, &rcuhead_debug_descr);
+}
+
+static inline void debug_rcu_head_free(struct rcu_head *head)
+{
+	debug_object_free(head, &rcuhead_debug_descr);
 }
 
 /*
- * Invoke the completed RCU callbacks. They are expected to be in
- * a per-cpu list.
+ * fixup_init is called when:
+ * - an active object is initialized
  */
-static void rcu_do_batch(struct list_head *list)
+static int rcuhead_fixup_init(void *addr, enum debug_obj_state state)
 {
-	struct list_head *entry;
-	struct rcu_head *head;
+	struct rcu_head *head = addr;
 
-	while (!list_empty(list)) {
-		entry = list->next;
-		list_del(entry);
-		head = list_entry(entry, struct rcu_head, list);
-		head->func(head->arg);
-	}
-}
-
-/*
- * Register a new batch of callbacks, and start it up if there is currently no
- * active batch and the batch to be registered has not already occurred.
- * Caller must hold the rcu_ctrlblk lock.
- */
-static void rcu_start_batch(long newbatch)
-{
-	if (rcu_batch_before(rcu_ctrlblk.maxbatch, newbatch)) {
-		rcu_ctrlblk.maxbatch = newbatch;
-	}
-	if (rcu_batch_before(rcu_ctrlblk.maxbatch, rcu_ctrlblk.curbatch) ||
-	    !cpus_empty(rcu_ctrlblk.rcu_cpu_mask)) {
-		return;
-	}
-	rcu_ctrlblk.rcu_cpu_mask = cpu_online_map;
-}
-
-/*
- * Check if the cpu has gone through a quiescent state (say context
- * switch). If so and if it already hasn't done so in this RCU
- * quiescent cycle, then indicate that it has done so.
- */
-static void rcu_check_quiescent_state(void)
-{
-	int cpu = smp_processor_id();
-
-	if (!cpu_isset(cpu, rcu_ctrlblk.rcu_cpu_mask))
-		return;
-
-	/* 
-	 * Races with local timer interrupt - in the worst case
-	 * we may miss one quiescent state of that CPU. That is
-	 * tolerable. So no need to disable interrupts.
-	 */
-	if (RCU_last_qsctr(cpu) == RCU_QSCTR_INVALID) {
-		RCU_last_qsctr(cpu) = RCU_qsctr(cpu);
-		return;
-	}
-	if (RCU_qsctr(cpu) == RCU_last_qsctr(cpu))
-		return;
-
-	spin_lock(&rcu_ctrlblk.mutex);
-	if (!cpu_isset(cpu, rcu_ctrlblk.rcu_cpu_mask))
-		goto out_unlock;
-
-	cpu_clear(cpu, rcu_ctrlblk.rcu_cpu_mask);
-	RCU_last_qsctr(cpu) = RCU_QSCTR_INVALID;
-	if (!cpus_empty(rcu_ctrlblk.rcu_cpu_mask))
-		goto out_unlock;
-
-	rcu_ctrlblk.curbatch++;
-	rcu_start_batch(rcu_ctrlblk.maxbatch);
-
-out_unlock:
-	spin_unlock(&rcu_ctrlblk.mutex);
-}
-
-
-/*
- * This does the RCU processing work from tasklet context. 
- */
-static void rcu_process_callbacks(unsigned long unused)
-{
-	int cpu = smp_processor_id();
-	LIST_HEAD(list);
-
-	if (!list_empty(&RCU_curlist(cpu)) &&
-	    rcu_batch_after(rcu_ctrlblk.curbatch, RCU_batch(cpu))) {
-		list_splice(&RCU_curlist(cpu), &list);
-		INIT_LIST_HEAD(&RCU_curlist(cpu));
-	}
-
-	local_irq_disable();
-	if (!list_empty(&RCU_nxtlist(cpu)) && list_empty(&RCU_curlist(cpu))) {
-		list_splice(&RCU_nxtlist(cpu), &RCU_curlist(cpu));
-		INIT_LIST_HEAD(&RCU_nxtlist(cpu));
-		local_irq_enable();
-
+	switch (state) {
+	case ODEBUG_STATE_ACTIVE:
 		/*
-		 * start the next batch of callbacks
+		 * Ensure that queued callbacks are all executed.
+		 * If we detect that we are nested in a RCU read-side critical
+		 * section, we should simply fail, otherwise we would deadlock.
 		 */
-		spin_lock(&rcu_ctrlblk.mutex);
-		RCU_batch(cpu) = rcu_ctrlblk.curbatch + 1;
-		rcu_start_batch(RCU_batch(cpu));
-		spin_unlock(&rcu_ctrlblk.mutex);
-	} else {
-		local_irq_enable();
-	}
-	rcu_check_quiescent_state();
-	if (!list_empty(&list))
-		rcu_do_batch(&list);
-}
-
-void rcu_check_callbacks(int cpu, int user)
-{
-	if (user || 
-	    (idle_cpu(cpu) && !in_softirq() && 
-				hardirq_count() <= (1 << HARDIRQ_SHIFT)))
-		RCU_qsctr(cpu)++;
-	tasklet_schedule(&RCU_tasklet(cpu));
-}
-
-static void __devinit rcu_online_cpu(int cpu)
-{
-	memset(&per_cpu(rcu_data, cpu), 0, sizeof(struct rcu_data));
-	tasklet_init(&RCU_tasklet(cpu), rcu_process_callbacks, 0UL);
-	INIT_LIST_HEAD(&RCU_nxtlist(cpu));
-	INIT_LIST_HEAD(&RCU_curlist(cpu));
-}
-
-static int __devinit rcu_cpu_notify(struct notifier_block *self, 
-				unsigned long action, void *hcpu)
-{
-	long cpu = (long)hcpu;
-	switch (action) {
-	case CPU_UP_PREPARE:
-		rcu_online_cpu(cpu);
-		break;
-	/* Space reserved for CPU_OFFLINE :) */
+		if (rcu_preempt_depth() != 0 || preempt_count() != 0 ||
+		    irqs_disabled()) {
+			WARN_ON(1);
+			return 0;
+		}
+		rcu_barrier();
+		rcu_barrier_sched();
+		rcu_barrier_bh();
+		debug_object_init(head, &rcuhead_debug_descr);
+		return 1;
 	default:
-		break;
+		return 0;
 	}
-	return NOTIFY_OK;
 }
-
-static struct notifier_block __devinitdata rcu_nb = {
-	.notifier_call	= rcu_cpu_notify,
-};
 
 /*
- * Initializes rcu mechanism.  Assumed to be called early.
- * That is before local timer(SMP) or jiffie timer (uniproc) is setup.
- * Note that rcu_qsctr and friends are implicitly
- * initialized due to the choice of ``0'' for RCU_CTR_INVALID.
+ * fixup_activate is called when:
+ * - an active object is activated
+ * - an unknown object is activated (might be a statically initialized object)
+ * Activation is performed internally by call_rcu().
  */
-void __init rcu_init(void)
+static int rcuhead_fixup_activate(void *addr, enum debug_obj_state state)
 {
-	rcu_cpu_notify(&rcu_nb, CPU_UP_PREPARE,
-			(void *)(long)smp_processor_id());
-	/* Register notifier for non-boot CPUs */
-	register_cpu_notifier(&rcu_nb);
+	struct rcu_head *head = addr;
+
+	switch (state) {
+
+	case ODEBUG_STATE_NOTAVAILABLE:
+		/*
+		 * This is not really a fixup. We just make sure that it is
+		 * tracked in the object tracker.
+		 */
+		debug_object_init(head, &rcuhead_debug_descr);
+		debug_object_activate(head, &rcuhead_debug_descr);
+		return 0;
+
+	case ODEBUG_STATE_ACTIVE:
+		/*
+		 * Ensure that queued callbacks are all executed.
+		 * If we detect that we are nested in a RCU read-side critical
+		 * section, we should simply fail, otherwise we would deadlock.
+		 */
+		if (rcu_preempt_depth() != 0 || preempt_count() != 0 ||
+		    irqs_disabled()) {
+			WARN_ON(1);
+			return 0;
+		}
+		rcu_barrier();
+		rcu_barrier_sched();
+		rcu_barrier_bh();
+		debug_object_activate(head, &rcuhead_debug_descr);
+		return 1;
+	default:
+		return 0;
+	}
 }
 
-
-/* Because of FASTCALL declaration of complete, we use this wrapper */
-static void wakeme_after_rcu(void *completion)
+/*
+ * fixup_free is called when:
+ * - an active object is freed
+ */
+static int rcuhead_fixup_free(void *addr, enum debug_obj_state state)
 {
-	complete(completion);
+	struct rcu_head *head = addr;
+
+	switch (state) {
+	case ODEBUG_STATE_ACTIVE:
+		/*
+		 * Ensure that queued callbacks are all executed.
+		 * If we detect that we are nested in a RCU read-side critical
+		 * section, we should simply fail, otherwise we would deadlock.
+		 * Note that the machinery to reliably determine whether
+		 * or not we are in an RCU read-side critical section
+		 * exists only in the preemptible RCU implementations
+		 * (TINY_PREEMPT_RCU and TREE_PREEMPT_RCU), which is why
+		 * DEBUG_OBJECTS_RCU_HEAD is disallowed if !PREEMPT.
+		 */
+		if (rcu_preempt_depth() != 0 || preempt_count() != 0 ||
+		    irqs_disabled()) {
+			WARN_ON(1);
+			return 0;
+		}
+		rcu_barrier();
+		rcu_barrier_sched();
+		rcu_barrier_bh();
+		debug_object_free(head, &rcuhead_debug_descr);
+		return 1;
+	default:
+		return 0;
+	}
 }
 
 /**
- * synchronize-kernel - wait until all the CPUs have gone
- * through a "quiescent" state. It may sleep.
+ * init_rcu_head_on_stack() - initialize on-stack rcu_head for debugobjects
+ * @head: pointer to rcu_head structure to be initialized
+ *
+ * This function informs debugobjects of a new rcu_head structure that
+ * has been allocated as an auto variable on the stack.  This function
+ * is not required for rcu_head structures that are statically defined or
+ * that are dynamically allocated on the heap.  This function has no
+ * effect for !CONFIG_DEBUG_OBJECTS_RCU_HEAD kernel builds.
  */
-void synchronize_kernel(void)
+void init_rcu_head_on_stack(struct rcu_head *head)
 {
-	struct rcu_head rcu;
-	DECLARE_COMPLETION(completion);
-
-	/* Will wake me after RCU finished */
-	call_rcu(&rcu, wakeme_after_rcu, &completion);
-
-	/* Wait for it */
-	wait_for_completion(&completion);
+	debug_object_init_on_stack(head, &rcuhead_debug_descr);
 }
+EXPORT_SYMBOL_GPL(init_rcu_head_on_stack);
 
+/**
+ * destroy_rcu_head_on_stack() - destroy on-stack rcu_head for debugobjects
+ * @head: pointer to rcu_head structure to be initialized
+ *
+ * This function informs debugobjects that an on-stack rcu_head structure
+ * is about to go out of scope.  As with init_rcu_head_on_stack(), this
+ * function is not required for rcu_head structures that are statically
+ * defined or that are dynamically allocated on the heap.  Also as with
+ * init_rcu_head_on_stack(), this function has no effect for
+ * !CONFIG_DEBUG_OBJECTS_RCU_HEAD kernel builds.
+ */
+void destroy_rcu_head_on_stack(struct rcu_head *head)
+{
+	debug_object_free(head, &rcuhead_debug_descr);
+}
+EXPORT_SYMBOL_GPL(destroy_rcu_head_on_stack);
 
-EXPORT_SYMBOL(call_rcu);
-EXPORT_SYMBOL(synchronize_kernel);
+struct debug_obj_descr rcuhead_debug_descr = {
+	.name = "rcu_head",
+	.fixup_init = rcuhead_fixup_init,
+	.fixup_activate = rcuhead_fixup_activate,
+	.fixup_free = rcuhead_fixup_free,
+};
+EXPORT_SYMBOL_GPL(rcuhead_debug_descr);
+#endif /* #ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD */

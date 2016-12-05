@@ -30,7 +30,7 @@
  * $Log: NCR5380.c,v $
 
  * Revision 1.10 1998/9/2	Alan Cox
- *				(alan@redhat.com)
+ *				(alan@lxorguk.ukuu.org.uk)
  * Fixed up the timer lockups reported so far. Things still suck. Looking 
  * forward to 2.3 and per device request queues. Then it'll be possible to
  * SMP thread this beast and improve life no end.
@@ -86,6 +86,15 @@
  * 5.  Test linked command handling code after Eric is ready with 
  *      the high level code.
  */
+#include <scsi/scsi_dbg.h>
+#include <scsi/scsi_transport_spi.h>
+
+#ifndef NDEBUG
+#define NDEBUG 0
+#endif
+#ifndef NDEBUG_ABORT
+#define NDEBUG_ABORT 0
+#endif
 
 #if (NDEBUG & NDEBUG_LISTS)
 #define LIST(x,y) {printk("LINE:%d   Adding %p to %p\n", __LINE__, (void*)(x), (void*)(y)); if ((x)==(y)) udelay(5); }
@@ -113,31 +122,17 @@
 
 /*
  * Design
- * Issues :
  *
- * The other Linux SCSI drivers were written when Linux was Intel PC-only,
- * and specifically for each board rather than each chip.  This makes their
- * adaptation to platforms like the Mac (Some of which use NCR5380's)
- * more difficult than it has to be.
- *
- * Also, many of the SCSI drivers were written before the command queuing
- * routines were implemented, meaning their implementations of queued 
- * commands were hacked on rather than designed in from the start.
- *
- * When I designed the Linux SCSI drivers I figured that 
- * while having two different SCSI boards in a system might be useful
- * for debugging things, two of the same type wouldn't be used.
- * Well, I was wrong and a number of users have mailed me about running
- * multiple high-performance SCSI boards in a server.
- *
- * Finally, when I get questions from users, I have no idea what 
- * revision of my driver they are running.
- *
- * This driver attempts to address these problems :
  * This is a generic 5380 driver.  To use it on a different platform, 
  * one simply writes appropriate system specific macros (ie, data
  * transfer - some PC's will use the I/O bus, 68K's must use 
  * memory mapped) and drops this file in their 'C' wrapper.
+ *
+ * (Note from hch:  unfortunately it was not enough for the different
+ * m68k folks and instead of improving this driver they copied it
+ * and hacked it up for their needs.  As a consequence they lost
+ * most updates to this driver.  Maybe someone will fix all these
+ * drivers to use a common core one day..)
  *
  * As far as command queueing, two queues are maintained for 
  * each 5380 in the system - commands that haven't been issued yet,
@@ -148,17 +143,6 @@
  * allowing multiple commands to propagate all the way to a SCSI-II device 
  * while a command is already executing.
  *
- * To solve the multiple-boards-in-the-same-system problem, 
- * there is a separate instance structure for each instance
- * of a 5380 in the system.  So, multiple NCR5380 drivers will
- * be able to coexist with appropriate changes to the high level
- * SCSI code.  
- *
- * A NCR5380_PUBLIC_REVISION macro is provided, with the release
- * number (updated for each public release) printed by the 
- * NCR5380_print_options command, which should be called from the 
- * wrapper detect function, so that I know what release of the driver
- * users are using.
  *
  * Issues specific to the NCR5380 : 
  *
@@ -183,11 +167,10 @@
  * Architecture :
  *
  * At the heart of the design is a coroutine, NCR5380_main,
- * which is started when not running by the interrupt handler,
- * timer, and queue command function.  It attempts to establish
- * I_T_L or I_T_L_Q nexuses by removing the commands from the 
- * issue queue and calling NCR5380_select() if a nexus 
- * is not established. 
+ * which is started from a workqueue for each NCR5380 host in the
+ * system.  It attempts to establish I_T_L or I_T_L_Q nexuses by
+ * removing the commands from the issue queue and calling
+ * NCR5380_select() if a nexus is not established. 
  *
  * Once a nexus is established, the NCR5380_information_transfer()
  * phase goes through the various phases as instructed by the target.
@@ -289,33 +272,14 @@
  * NCR5380_pwrite(instance, src, count)
  * NCR5380_pread(instance, dst, count);
  *
- * If nothing specific to this implementation needs doing (ie, with external
- * hardware), you must also define 
- *  
- * NCR5380_queue_command
- * NCR5380_reset
- * NCR5380_abort
- * NCR5380_proc_info
- *
- * to be the global entry points into the specific driver, ie 
- * #define NCR5380_queue_command t128_queue_command.
- *
- * If this is not done, the routines will be defined as static functions
- * with the NCR5380* names and the user must provide a globally
- * accessible wrapper function.
- *
  * The generic driver is initialized by calling NCR5380_init(instance),
  * after setting the appropriate host specific fields and ID.  If the 
  * driver wishes to autoprobe for an IRQ line, the NCR5380_probe_irq(instance,
- * possible) function may be used.  Before the specific driver initialization
- * code finishes, NCR5380_print_options should be called.
+ * possible) function may be used.
  */
 
 static int do_abort(struct Scsi_Host *host);
 static void do_reset(struct Scsi_Host *host);
-static struct NCR5380_hostdata *first_host = NULL;
-static struct NCR5380_hostdata *last_host = NULL;
-static struct timer_list usleep_timer;
 
 /*
  *	initialize_SCp		-	init the scsi pointer field
@@ -331,17 +295,16 @@ static __inline__ void initialize_SCp(Scsi_Cmnd * cmd)
 	 * various queues are valid.
 	 */
 
-	if (cmd->use_sg) {
-		cmd->SCp.buffer = (struct scatterlist *) cmd->buffer;
-		cmd->SCp.buffers_residual = cmd->use_sg - 1;
-		cmd->SCp.ptr = page_address(cmd->SCp.buffer->page)+
-			       cmd->SCp.buffer->offset;
+	if (scsi_bufflen(cmd)) {
+		cmd->SCp.buffer = scsi_sglist(cmd);
+		cmd->SCp.buffers_residual = scsi_sg_count(cmd) - 1;
+		cmd->SCp.ptr = sg_virt(cmd->SCp.buffer);
 		cmd->SCp.this_residual = cmd->SCp.buffer->length;
 	} else {
 		cmd->SCp.buffer = NULL;
 		cmd->SCp.buffers_residual = 0;
-		cmd->SCp.ptr = (char *) cmd->request_buffer;
-		cmd->SCp.this_residual = cmd->request_bufflen;
+		cmd->SCp.ptr = NULL;
+		cmd->SCp.this_residual = 0;
 	}
 }
 
@@ -383,7 +346,7 @@ static int NCR5380_poll_politely(struct Scsi_Host *instance, int reg, int bit, i
 		if((r & bit) == val)
 			return 0;
 		if(!in_interrupt())
-			yield();
+			cond_resched();
 		else
 			cpu_relax();
 	}
@@ -393,7 +356,7 @@ static int NCR5380_poll_politely(struct Scsi_Host *instance, int reg, int bit, i
 static struct {
 	unsigned char value;
 	const char *name;
-} phases[] = {
+} phases[] __maybe_unused = {
 	{PHASE_DATAOUT, "DATAOUT"}, 
 	{PHASE_DATAIN, "DATAIN"}, 
 	{PHASE_CMDOUT, "CMDOUT"}, 
@@ -403,7 +366,7 @@ static struct {
 	{PHASE_UNKNOWN, "UNKNOWN"}
 };
 
-#ifdef NDEBUG
+#if NDEBUG
 static struct {
 	unsigned char mask;
 	const char *name;
@@ -533,13 +496,10 @@ static void NCR5380_print_phase(struct Scsi_Host *instance)
 #define USLEEP_WAITLONG USLEEP_SLEEP
 #endif
 
-static struct Scsi_Host *expires_first = NULL;
-static spinlock_t timer_lock;	/* Guards expires list */
-
 /* 
  * Function : int should_disconnect (unsigned char cmd)
  *
- * Purpose : decide weather a command would normally disconnect or 
+ * Purpose : decide whether a command would normally disconnect or 
  *      not, since if it won't disconnect we should go to sleep.
  *
  * Input : cmd - opcode of SCSI command
@@ -578,90 +538,10 @@ static int should_disconnect(unsigned char cmd)
 	}
 }
 
-/*
- * Assumes instance->time_expires has been set in higher level code.
- * We should move to a timer per host
- *
- * Locks: Takes the timer queue lock
- */
-
-static int NCR5380_set_timer(struct Scsi_Host *instance)
+static void NCR5380_set_timer(struct NCR5380_hostdata *hostdata, unsigned long timeout)
 {
-	struct Scsi_Host *tmp, **prev;
-	unsigned long flags;
-
-	if (((struct NCR5380_hostdata *) (instance->hostdata))->next_timer) {
-		return -1;
-	}
-	
-	spin_lock_irqsave(&timer_lock, flags);
-	for (prev = &expires_first, tmp = expires_first; tmp; prev = &(((struct NCR5380_hostdata *) tmp->hostdata)->next_timer), tmp = ((struct NCR5380_hostdata *) tmp->hostdata)->next_timer)
-		if (((struct NCR5380_hostdata *) instance->hostdata)->time_expires < ((struct NCR5380_hostdata *) tmp->hostdata)->time_expires)
-			break;
-
-	((struct NCR5380_hostdata *) instance->hostdata)->next_timer = tmp;
-	*prev = instance;
-
-	mod_timer(&usleep_timer, ((struct NCR5380_hostdata *) expires_first->hostdata)->time_expires);
-	
-	spin_unlock_irqrestore(&timer_lock, flags);
-	return 0;
-}
-
-/**
- *	NCR5380_timer_fn	-	handle polled timeouts
- *	@unused: unused
- *
- *	Walk the list of controllers, find which controllers have exceeded
- *	their expiry timeout and then schedule the processing co-routine to
- *	do the real work.
- *
- *	Doing something about unwanted reentrancy here might be useful 
- *
- *	Locks: disables irqs, takes and frees the timer lock
- */
- 
-static void NCR5380_timer_fn(unsigned long unused)
-{
-	struct Scsi_Host *instance;
-	struct NCR5380_hostdata *hostdata;
-	unsigned long flags;
-
-	spin_lock_irqsave(&timer_lock, flags);
-	for (; expires_first && time_before_eq(((struct NCR5380_hostdata *) expires_first->hostdata)->time_expires, jiffies);) 
-	{
-		hostdata = (struct NCR5380_hostdata *) expires_first->hostdata;
-		schedule_work(&hostdata->coroutine);
-		instance = hostdata->next_timer;
-		hostdata->next_timer = NULL;
-		hostdata->time_expires = 0;
-		expires_first = instance;
-	}
-
-	del_timer(&usleep_timer);
-	if (expires_first) {
-		usleep_timer.expires = ((struct NCR5380_hostdata *) expires_first->hostdata)->time_expires;
-		add_timer(&usleep_timer);
-	}
-	spin_unlock_irqrestore(&timer_lock, flags);
-}
-
-/**
- *	NCR5380_all_init	-	global setup
- *
- *	Set up the global values and timers needed by the NCR5380 driver
- */
- 
-static inline void NCR5380_all_init(void)
-{
-	static int done = 0;
-	if (!done) {
-		dprintk(NDEBUG_INIT, ("scsi : NCR5380_all_init()\n"));
-		done = 1;
-		init_timer(&usleep_timer);
-		spin_lock_init(&timer_lock);
-		usleep_timer.function = NCR5380_timer_fn;
-	}
+	hostdata->time_expires = jiffies + timeout;
+	schedule_delayed_work(&hostdata->coroutine, timeout);
 }
 
 
@@ -677,8 +557,7 @@ static int probe_irq __initdata = 0;
  *	used by the IRQ probe code.
  */
  
-static irqreturn_t __init probe_intr(int irq, void *dev_id,
-					struct pt_regs *regs)
+static irqreturn_t __init probe_intr(int irq, void *dev_id)
 {
 	probe_irq = irq;
 	return IRQ_HANDLED;
@@ -695,7 +574,8 @@ static irqreturn_t __init probe_intr(int irq, void *dev_id,
  *	Locks: none, irqs must be enabled on entry
  */
 
-static int __init NCR5380_probe_irq(struct Scsi_Host *instance, int possible)
+static int __init __maybe_unused NCR5380_probe_irq(struct Scsi_Host *instance,
+						int possible)
 {
 	NCR5380_local_declare();
 	struct NCR5380_hostdata *hostdata = (struct NCR5380_hostdata *) instance->hostdata;
@@ -704,7 +584,7 @@ static int __init NCR5380_probe_irq(struct Scsi_Host *instance, int possible)
 	NCR5380_setup(instance);
 
 	for (trying_irqs = i = 0, mask = 1; i < 16; ++i, mask <<= 1)
-		if ((mask & possible) && (request_irq(i, &probe_intr, SA_INTERRUPT, "NCR-probe", NULL) == 0))
+		if ((mask & possible) && (request_irq(i, &probe_intr, IRQF_DISABLED, "NCR-probe", NULL) == 0))
 			trying_irqs |= mask;
 
 	timeout = jiffies + (250 * HZ / 1000);
@@ -726,10 +606,7 @@ static int __init NCR5380_probe_irq(struct Scsi_Host *instance, int possible)
 	NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_DATA | ICR_ASSERT_SEL);
 
 	while (probe_irq == SCSI_IRQ_NONE && time_before(jiffies, timeout))
-	{
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(1);
-	}
+		schedule_timeout_uninterruptible(1);
 	
 	NCR5380_write(SELECT_ENABLE_REG, 0);
 	NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE);
@@ -752,7 +629,8 @@ static int __init NCR5380_probe_irq(struct Scsi_Host *instance, int possible)
  *	Locks: none
  */
 
-static void __init NCR5380_print_options(struct Scsi_Host *instance)
+static void __init __maybe_unused
+NCR5380_print_options(struct Scsi_Host *instance)
 {
 	printk(" generic options"
 #ifdef AUTOPROBE_IRQ
@@ -788,22 +666,6 @@ static void __init NCR5380_print_options(struct Scsi_Host *instance)
 }
 
 /**
- *	NCR5380_coroutine_running	-	coroutine status
- *	@instance: controller to check
- *
- *	Return true if the co-routine for this controller is running
- *	or scheduled to run
- *
- *	FIXME: this test function belongs in the workqueue code!
- */
- 
-static int NCR5380_coroutine_running(struct Scsi_Host *instance)
-{
-	struct NCR5380_hostdata *hostdata = (struct NCR5380_hostdata *)instance->hostdata;
-	return test_bit(0, &hostdata->coroutine.pending);
-}
-
-/**
  *	NCR5380_print_status 	-	dump controller info
  *	@instance: controller to dump
  *
@@ -815,18 +677,8 @@ static int NCR5380_coroutine_running(struct Scsi_Host *instance)
 
 static void NCR5380_print_status(struct Scsi_Host *instance)
 {
-	static char pr_bfr[512];
-	char *start;
-	int len;
-
-	printk("NCR5380 : coroutine is%s running.\n",  NCR5380_coroutine_running(instance)? "" : "n't");
-
 	NCR5380_dprint(NDEBUG_ANY, instance);
 	NCR5380_dprint_phase(NDEBUG_ANY, instance);
-
-	len = NCR5380_proc_info(instance, pr_bfr, &start, 0, sizeof(pr_bfr), 0);
-	pr_bfr[len] = 0;
-	printk("\n%s\n", pr_bfr);
 }
 
 /******************************************/
@@ -852,8 +704,8 @@ char *lprint_command(unsigned char *cmd, char *pos, char *buffer, int len);
 static
 char *lprint_opcode(int opcode, char *pos, char *buffer, int length);
 
-static
-int NCR5380_proc_info(struct Scsi_Host *instance, char *buffer, char **start, off_t offset, int length, int inout)
+static int __maybe_unused NCR5380_proc_info(struct Scsi_Host *instance,
+	char *buffer, char **start, off_t offset, int length, int inout)
 {
 	char *pos = buffer;
 	struct NCR5380_hostdata *hostdata;
@@ -900,7 +752,6 @@ int NCR5380_proc_info(struct Scsi_Host *instance, char *buffer, char **start, of
 	SPRINTF("Highwater I/O busy_spin_counts -- write: %d  read: %d\n", pas_wmaxi, pas_maxi);
 #endif
 	spin_lock_irq(instance->host_lock);
-	SPRINTF("NCR5380 : coroutine is%s running.\n", NCR5380_coroutine_running(instance) ? "" : "n't");
 	if (!hostdata->connected)
 		SPRINTF("scsi%d: no currently connected command\n", instance->host_no);
 	else
@@ -912,7 +763,6 @@ int NCR5380_proc_info(struct Scsi_Host *instance, char *buffer, char **start, of
 	SPRINTF("scsi%d: disconnected_queue\n", instance->host_no);
 	for (ptr = (Scsi_Cmnd *) hostdata->disconnected_queue; ptr; ptr = (Scsi_Cmnd *) ptr->host_scribble)
 		pos = lprint_Scsi_Cmnd(ptr, pos, buffer, length);
-
 	spin_unlock_irq(instance->host_lock);
 	
 	*start = buffer;
@@ -964,7 +814,7 @@ static char *lprint_opcode(int opcode, char *pos, char *buffer, int length)
  *	Locks: interrupts must be enabled when we are called 
  */
 
-static int __init NCR5380_init(struct Scsi_Host *instance, int flags)
+static int __devinit NCR5380_init(struct Scsi_Host *instance, int flags)
 {
 	NCR5380_local_declare();
 	int i, pass;
@@ -984,7 +834,6 @@ static int __init NCR5380_init(struct Scsi_Host *instance, int flags)
 #endif
 
 	NCR5380_setup(instance);
-	NCR5380_all_init();
 
 	hostdata->aborted = 0;
 	hostdata->id_mask = 1 << instance->this_id;
@@ -1001,7 +850,7 @@ static int __init NCR5380_init(struct Scsi_Host *instance, int flags)
 	hostdata->issue_queue = NULL;
 	hostdata->disconnected_queue = NULL;
 	
-	INIT_WORK(&hostdata->coroutine, NCR5380_main, hostdata);
+	INIT_DELAYED_WORK(&hostdata->coroutine, NCR5380_main);
 	
 #ifdef NCR5380_STATS
 	for (i = 0; i < 8; ++i) {
@@ -1021,18 +870,8 @@ static int __init NCR5380_init(struct Scsi_Host *instance, int flags)
 	else
 		hostdata->flags = FLAG_CHECK_LAST_BYTE_SENT | flags;
 
-	hostdata->next = NULL;
-	
-	if (!first_host)
-		first_host = hostdata;
-	else
-		last_host->next = hostdata;
-
-	last_host = hostdata;
-	
 	hostdata->host = instance;
 	hostdata->time_expires = 0;
-	hostdata->next_timer = NULL;
 
 #ifndef AUTOSENSE
 	if ((instance->cmd_per_lun > 1) || instance->can_queue > 1)
@@ -1089,6 +928,18 @@ static int __init NCR5380_init(struct Scsi_Host *instance, int flags)
 }
 
 /**
+ *	NCR5380_exit	-	remove an NCR5380
+ *	@instance: adapter to remove
+ */
+
+static void NCR5380_exit(struct Scsi_Host *instance)
+{
+	struct NCR5380_hostdata *hostdata = (struct NCR5380_hostdata *) instance->hostdata;
+
+	cancel_delayed_work_sync(&hostdata->coroutine);
+}
+
+/**
  *	NCR5380_queue_command 		-	queue a command
  *	@cmd: SCSI command
  *	@done: completion handler
@@ -1100,7 +951,7 @@ static int __init NCR5380_init(struct Scsi_Host *instance, int flags)
  *	Locks: host lock taken by caller
  */
 
-static int NCR5380_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *)) 
+static int NCR5380_queue_command_lck(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 {
 	struct Scsi_Host *instance = cmd->device->host;
 	struct NCR5380_hostdata *hostdata = (struct NCR5380_hostdata *) instance->hostdata;
@@ -1123,14 +974,14 @@ static int NCR5380_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 		case WRITE_6:
 		case WRITE_10:
 			hostdata->time_write[cmd->device->id] -= (jiffies - hostdata->timebase);
-			hostdata->bytes_write[cmd->device->id] += cmd->request_bufflen;
+			hostdata->bytes_write[cmd->device->id] += scsi_bufflen(cmd);
 			hostdata->pendingw++;
 			break;
 		case READ:
 		case READ_6:
 		case READ_10:
 			hostdata->time_read[cmd->device->id] -= (jiffies - hostdata->timebase);
-			hostdata->bytes_read[cmd->device->id] += cmd->request_bufflen;
+			hostdata->bytes_read[cmd->device->id] += scsi_bufflen(cmd);
 			hostdata->pendingr++;
 			break;
 	}
@@ -1165,9 +1016,11 @@ static int NCR5380_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 
 	/* Run the coroutine if it isn't already running. */
 	/* Kick off command processing */
-	schedule_work(&hostdata->coroutine);
+	schedule_delayed_work(&hostdata->coroutine, 0);
 	return 0;
 }
+
+static DEF_SCSI_QCMD(NCR5380_queue_command)
 
 /**
  *	NCR5380_main	-	NCR state machines
@@ -1181,31 +1034,15 @@ static int NCR5380_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
  *	host lock and called routines may take the isa dma lock.
  */
 
-static void NCR5380_main(void *p)
+static void NCR5380_main(struct work_struct *work)
 {
-	struct NCR5380_hostdata *hostdata = p;
+	struct NCR5380_hostdata *hostdata =
+		container_of(work, struct NCR5380_hostdata, coroutine.work);
+	struct Scsi_Host *instance = hostdata->host;
 	Scsi_Cmnd *tmp, *prev;
-	struct Scsi_Host *instance;
 	int done;
-	unsigned long flags = 0;
 	
-	/*
-	 * We run (with interrupts disabled) until we're sure that none of 
-	 * the host adapters have anything that can be done, at which point 
-	 * we can exit
-	 *
-	 * Interrupts are enabled before doing various other internal 
-	 * instructions, after we've decided that we need to run through
-	 * the loop again.
-	 *
-	 * this should prevent any race conditions.
-	 */
-
-	instance = hostdata->host;
-
-	if(instance->irq != SCSI_IRQ_NONE)
-		spin_lock_irqsave(instance->host_lock, flags);
-
+	spin_lock_irq(instance->host_lock);
 	do {
 		/* Lock held here */
 		done = 1;
@@ -1248,7 +1085,7 @@ static void NCR5380_main(void *p)
 					 * and see if we can do an information transfer,
 					 * with failures we will restart.
 					 */
-					hostdata->selecting = 0;	
+					hostdata->selecting = NULL;
 					/* RvC: have to preset this to indicate a new command is being performed */
 
 					if (!NCR5380_select(instance, tmp,
@@ -1286,8 +1123,7 @@ static void NCR5380_main(void *p)
 				LIST(tmp, hostdata->issue_queue);
 				tmp->host_scribble = (unsigned char *) hostdata->issue_queue;
 				hostdata->issue_queue = tmp;
-				hostdata->time_expires = jiffies + USLEEP_WAITLONG;
-				NCR5380_set_timer(instance);
+				NCR5380_set_timer(hostdata, USLEEP_WAITLONG);
 			}
 		}	/* if hostdata->selecting */
 		if (hostdata->connected
@@ -1304,8 +1140,7 @@ static void NCR5380_main(void *p)
 			break;
 	} while (!done);
 	
-	if(instance->irq != SCSI_IRQ_NONE)
-		spin_unlock_irqrestore(instance->host_lock, flags);
+	spin_unlock_irq(instance->host_lock);
 }
 
 #ifndef DONT_USE_INTR
@@ -1314,7 +1149,6 @@ static void NCR5380_main(void *p)
  * 	NCR5380_intr	-	generic NCR5380 irq handler
  *	@irq: interrupt number
  *	@dev_id: device info
- *	@regs: registers (unused)
  *
  *	Handle interrupts, reestablishing I_T_L or I_T_L_Q nexuses
  *      from the disconnected queue, and restarting NCR5380_main() 
@@ -1323,84 +1157,76 @@ static void NCR5380_main(void *p)
  *	Locks: takes the needed instance locks
  */
 
-static irqreturn_t NCR5380_intr(int irq, void *dev_id, struct pt_regs *regs) 
+static irqreturn_t NCR5380_intr(int dummy, void *dev_id)
 {
 	NCR5380_local_declare();
-	struct Scsi_Host *instance;
+	struct Scsi_Host *instance = dev_id;
+	struct NCR5380_hostdata *hostdata = (struct NCR5380_hostdata *) instance->hostdata;
 	int done;
 	unsigned char basr;
-	struct NCR5380_hostdata *hostdata;
-	int handled = 0;
+	unsigned long flags;
 
-	dprintk(NDEBUG_INTR, ("scsi : NCR5380 irq %d triggered\n", irq));
+	dprintk(NDEBUG_INTR, ("scsi : NCR5380 irq %d triggered\n",
+		instance->irq));
 
 	do {
 		done = 1;
-		/* The instance list is constant while the driver is
-		   loaded */
-		for (hostdata = first_host; hostdata != NULL; hostdata = hostdata->next)
-		{
-			instance = hostdata->host;
-			if (instance->irq == irq) {
-				handled = 1;
-				spin_lock_irq(instance->host_lock);
-				/* Look for pending interrupts */
-				NCR5380_setup(instance);
-				basr = NCR5380_read(BUS_AND_STATUS_REG);
-				/* XXX dispatch to appropriate routine if found and done=0 */
-				if (basr & BASR_IRQ) {
-					NCR5380_dprint(NDEBUG_INTR, instance);
-					if ((NCR5380_read(STATUS_REG) & (SR_SEL | SR_IO)) == (SR_SEL | SR_IO)) {
-						done = 0;
-						dprintk(NDEBUG_INTR, ("scsi%d : SEL interrupt\n", instance->host_no));
-						NCR5380_reselect(instance);
-						(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
-					} else if (basr & BASR_PARITY_ERROR) {
-						dprintk(NDEBUG_INTR, ("scsi%d : PARITY interrupt\n", instance->host_no));
-						(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
-					} else if ((NCR5380_read(STATUS_REG) & SR_RST) == SR_RST) {
-						dprintk(NDEBUG_INTR, ("scsi%d : RESET interrupt\n", instance->host_no));
-						(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
-					} else {
+		spin_lock_irqsave(instance->host_lock, flags);
+		/* Look for pending interrupts */
+		NCR5380_setup(instance);
+		basr = NCR5380_read(BUS_AND_STATUS_REG);
+		/* XXX dispatch to appropriate routine if found and done=0 */
+		if (basr & BASR_IRQ) {
+			NCR5380_dprint(NDEBUG_INTR, instance);
+			if ((NCR5380_read(STATUS_REG) & (SR_SEL | SR_IO)) == (SR_SEL | SR_IO)) {
+				done = 0;
+				dprintk(NDEBUG_INTR, ("scsi%d : SEL interrupt\n", instance->host_no));
+				NCR5380_reselect(instance);
+				(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
+			} else if (basr & BASR_PARITY_ERROR) {
+				dprintk(NDEBUG_INTR, ("scsi%d : PARITY interrupt\n", instance->host_no));
+				(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
+			} else if ((NCR5380_read(STATUS_REG) & SR_RST) == SR_RST) {
+				dprintk(NDEBUG_INTR, ("scsi%d : RESET interrupt\n", instance->host_no));
+				(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
+			} else {
 #if defined(REAL_DMA)
-						/*
-						 * We should only get PHASE MISMATCH and EOP interrupts
-						 * if we have DMA enabled, so do a sanity check based on
-						 * the current setting of the MODE register.
-						 */
+				/*
+				 * We should only get PHASE MISMATCH and EOP interrupts
+				 * if we have DMA enabled, so do a sanity check based on
+				 * the current setting of the MODE register.
+				 */
 
-						if ((NCR5380_read(MODE_REG) & MR_DMA) && ((basr & BASR_END_DMA_TRANSFER) || !(basr & BASR_PHASE_MATCH))) {
-							int transfered;
+				if ((NCR5380_read(MODE_REG) & MR_DMA) && ((basr & BASR_END_DMA_TRANSFER) || !(basr & BASR_PHASE_MATCH))) {
+					int transferred;
 
-							if (!hostdata->connected)
-								panic("scsi%d : received end of DMA interrupt with no connected cmd\n", instance->hostno);
+					if (!hostdata->connected)
+						panic("scsi%d : received end of DMA interrupt with no connected cmd\n", instance->hostno);
 
-							transfered = (hostdata->dmalen - NCR5380_dma_residual(instance));
-							hostdata->connected->SCp.this_residual -= transferred;
-							hostdata->connected->SCp.ptr += transferred;
-							hostdata->dmalen = 0;
+					transferred = (hostdata->dmalen - NCR5380_dma_residual(instance));
+					hostdata->connected->SCp.this_residual -= transferred;
+					hostdata->connected->SCp.ptr += transferred;
+					hostdata->dmalen = 0;
 
-							(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
+					(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
 							
-							/* FIXME: we need to poll briefly then defer a workqueue task ! */
-							NCR5380_poll_politely(hostdata, BUS_AND_STATUS_REG, BASR_ACK, 0, 2*HZ);
+					/* FIXME: we need to poll briefly then defer a workqueue task ! */
+					NCR5380_poll_politely(hostdata, BUS_AND_STATUS_REG, BASR_ACK, 0, 2*HZ);
 
-							NCR5380_write(MODE_REG, MR_BASE);
-							NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE);
-						}
+					NCR5380_write(MODE_REG, MR_BASE);
+					NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE);
+				}
 #else
-						dprintk(NDEBUG_INTR, ("scsi : unknown interrupt, BASR 0x%X, MR 0x%X, SR 0x%x\n", basr, NCR5380_read(MODE_REG), NCR5380_read(STATUS_REG)));
-						(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
+				dprintk(NDEBUG_INTR, ("scsi : unknown interrupt, BASR 0x%X, MR 0x%X, SR 0x%x\n", basr, NCR5380_read(MODE_REG), NCR5380_read(STATUS_REG)));
+				(void) NCR5380_read(RESET_PARITY_INTERRUPT_REG);
 #endif
-					}
-				}	/* if BASR_IRQ */
-				spin_unlock_irq(instance->host_lock);
-				if(!done)
-					schedule_work(&hostdata->coroutine);
-			}	/* if (instance->irq == irq) */
-		}
+			}
+		}	/* if BASR_IRQ */
+		spin_unlock_irqrestore(instance->host_lock, flags);
+		if(!done)
+			schedule_delayed_work(&hostdata->coroutine, 0);
 	} while (!done);
-	return IRQ_RETVAL(handled);
+	return IRQ_HANDLED;
 }
 
 #endif 
@@ -1420,13 +1246,13 @@ static void collect_stats(struct NCR5380_hostdata *hostdata, Scsi_Cmnd * cmd)
 	case WRITE:
 	case WRITE_6:
 	case WRITE_10:
-		hostdata->time_write[cmd->device->id] += (jiffies - hostdata->timebase);
+		hostdata->time_write[scmd_id(cmd)] += (jiffies - hostdata->timebase);
 		hostdata->pendingw--;
 		break;
 	case READ:
 	case READ_6:
 	case READ_10:
-		hostdata->time_read[cmd->device->id] += (jiffies - hostdata->timebase);
+		hostdata->time_read[scmd_id(cmd)] += (jiffies - hostdata->timebase);
 		hostdata->pendingr--;
 		break;
 	}
@@ -1479,12 +1305,8 @@ static int NCR5380_select(struct Scsi_Host *instance, Scsi_Cmnd * cmd, int tag)
 	int err;
 	NCR5380_setup(instance);
 
-	if (hostdata->selecting) {
-		if(instance->irq != SCSI_IRQ_NONE)
-			spin_unlock_irq(instance->host_lock);
-		goto part2;	/* RvC: sorry prof. Dijkstra, but it keeps the
-				   rest of the code nearly the same */
-	}
+	if (hostdata->selecting)
+		goto part2;
 
 	hostdata->restart_select = 0;
 
@@ -1505,16 +1327,12 @@ static int NCR5380_select(struct Scsi_Host *instance, Scsi_Cmnd * cmd, int tag)
 	NCR5380_write(OUTPUT_DATA_REG, hostdata->id_mask);
 	NCR5380_write(MODE_REG, MR_ARBITRATE);
 
-	if(instance->irq != SCSI_IRQ_NONE)
-		spin_unlock_irq(instance->host_lock);
 
 	/* We can be relaxed here, interrupts are on, we are
 	   in workqueue context, the birds are singing in the trees */
-
+	spin_unlock_irq(instance->host_lock);
 	err = NCR5380_poll_politely(instance, INITIATOR_COMMAND_REG, ICR_ARBITRATION_PROGRESS, ICR_ARBITRATION_PROGRESS, 5*HZ);
-	if(instance->irq != SCSI_IRQ_NONE)
-		spin_lock_irq(instance->host_lock);
-
+	spin_lock_irq(instance->host_lock);
 	if (err < 0) {
 		printk(KERN_DEBUG "scsi: arbitration timeout at %d\n", __LINE__);
 		NCR5380_write(MODE_REG, MR_BASE);
@@ -1566,7 +1384,7 @@ static int NCR5380_select(struct Scsi_Host *instance, Scsi_Cmnd * cmd, int tag)
 	 * the host and target ID's on the SCSI bus.
 	 */
 
-	NCR5380_write(OUTPUT_DATA_REG, (hostdata->id_mask | (1 << cmd->device->id)));
+	NCR5380_write(OUTPUT_DATA_REG, (hostdata->id_mask | (1 << scmd_id(cmd))));
 
 	/* 
 	 * Raise ATN while SEL is true before BSY goes false from arbitration,
@@ -1611,7 +1429,7 @@ static int NCR5380_select(struct Scsi_Host *instance, Scsi_Cmnd * cmd, int tag)
 
 	udelay(1);
 
-	dprintk(NDEBUG_SELECTION, ("scsi%d : selecting target %d\n", instance->host_no, cmd->device->id));
+	dprintk(NDEBUG_SELECTION, ("scsi%d : selecting target %d\n", instance->host_no, scmd_id(cmd)));
 
 	/* 
 	 * The SCSI specification calls for a 250 ms timeout for the actual 
@@ -1638,18 +1456,15 @@ part2:
 	if (!value && (hostdata->select_time < HZ/4)) {
 		/* RvC: we still must wait for a device response */
 		hostdata->select_time++;	/* after 25 ticks the device has failed */
-		hostdata->time_expires = jiffies + 1;
-		NCR5380_set_timer(instance);
+		NCR5380_set_timer(hostdata, 1);
 		return 0;	/* RvC: we return here with hostdata->selecting set,
 				   to go to sleep */
 	}
 
-	hostdata->selecting = 0;	/* clear this pointer, because we passed the
+	hostdata->selecting = NULL;/* clear this pointer, because we passed the
 					   waiting period */
 	if ((NCR5380_read(STATUS_REG) & (SR_SEL | SR_IO)) == (SR_SEL | SR_IO)) {
 		NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE);
-		if(instance->irq != SCSI_IRQ_NONE)
-			spin_lock_irq(instance->host_lock);
 		NCR5380_reselect(instance);
 		printk("scsi%d : reselection after won arbitration?\n", instance->host_no);
 		NCR5380_write(SELECT_ENABLE_REG, hostdata->id_mask);
@@ -1667,7 +1482,7 @@ part2:
 
 	if (!(NCR5380_read(STATUS_REG) & SR_BSY)) {
 		NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE);
-		if (hostdata->targets_present & (1 << cmd->device->id)) {
+		if (hostdata->targets_present & (1 << scmd_id(cmd))) {
 			printk(KERN_DEBUG "scsi%d : weirdness\n", instance->host_no);
 			if (hostdata->restart_select)
 				printk(KERN_DEBUG "\trestart select\n");
@@ -1675,8 +1490,6 @@ part2:
 			NCR5380_write(SELECT_ENABLE_REG, hostdata->id_mask);
 			return -1;
 		}
-		if(instance->irq != SCSI_IRQ_NONE)
-			spin_lock_irq(instance->host_lock);
 		cmd->result = DID_BAD_TARGET << 16;
 		collect_stats(hostdata, cmd);
 		cmd->scsi_done(cmd);
@@ -1685,7 +1498,7 @@ part2:
 		NCR5380_write(SELECT_ENABLE_REG, hostdata->id_mask);
 		return 0;
 	}
-	hostdata->targets_present |= (1 << cmd->device->id);
+	hostdata->targets_present |= (1 << scmd_id(cmd));
 
 	/*
 	 * Since we followed the SCSI spec, and raised ATN while SEL 
@@ -1703,11 +1516,13 @@ part2:
 	 */
 
 	/* Wait for start of REQ/ACK handshake */
-	
+
+	spin_unlock_irq(instance->host_lock);
 	err = NCR5380_poll_politely(instance, STATUS_REG, SR_REQ, SR_REQ, HZ);
+	spin_lock_irq(instance->host_lock);
 	
-	if(err)
-	{	printk(KERN_ERR "scsi%d: timeout at NCR5380.c:%d\n", instance->host_no, __LINE__);
+	if(err) {
+		printk(KERN_ERR "scsi%d: timeout at NCR5380.c:%d\n", instance->host_no, __LINE__);
 		NCR5380_write(SELECT_ENABLE_REG, hostdata->id_mask);
 		goto failed;
 	}
@@ -1715,9 +1530,6 @@ part2:
 	dprintk(NDEBUG_SELECTION, ("scsi%d : target %d selected, going into MESSAGE OUT phase.\n", instance->host_no, cmd->device->id));
 	tmp[0] = IDENTIFY(((instance->irq == SCSI_IRQ_NONE) ? 0 : 1), cmd->device->lun);
 
-	if(instance->irq != SCSI_IRQ_NONE)
-		spin_lock_irq(instance->host_lock);
-		
 	len = 1;
 	cmd->tag = 0;
 
@@ -1732,13 +1544,10 @@ part2:
 
 	initialize_SCp(cmd);
 
-
 	return 0;
 
 	/* Selection failed */
 failed:
-	if(instance->irq != SCSI_IRQ_NONE)
-		spin_lock_irq(instance->host_lock);
 	return -1;
 
 }
@@ -1754,7 +1563,7 @@ failed:
  *      bytes to transfer, **data - pointer to data pointer.
  * 
  * Returns : -1 when different phase is entered without transferring
- *      maximum number of bytes, 0 if all bytes or transfered or exit
+ *      maximum number of bytes, 0 if all bytes or transferred or exit
  *      is in same phase.
  *
  *      Also, *phase, *count, *data are modified in place.
@@ -1814,8 +1623,7 @@ static int NCR5380_transfer_pio(struct Scsi_Host *instance, unsigned char *phase
 		while (!((tmp = NCR5380_read(STATUS_REG)) & SR_REQ) && !break_allowed);
 		if (!(tmp & SR_REQ)) {
 			/* timeout condition */
-			hostdata->time_expires = jiffies + USLEEP_SLEEP;
-			NCR5380_set_timer(instance);
+			NCR5380_set_timer(hostdata, USLEEP_SLEEP);
 			break;
 		}
 
@@ -1992,7 +1800,7 @@ static int do_abort(struct Scsi_Host *host) {
  *      bytes to transfer, **data - pointer to data pointer.
  * 
  * Returns : -1 when different phase is entered without transferring
- *      maximum number of bytes, 0 if all bytes or transfered or exit
+ *      maximum number of bytes, 0 if all bytes or transferred or exit
  *      is in same phase.
  *
  *      Also, *phase, *count, *data are modified in place.
@@ -2049,7 +1857,9 @@ static int NCR5380_transfer_dma(struct Scsi_Host *instance, unsigned char *phase
 #endif
 	/* KLL May need eop and parity in 53c400 */
 	if (hostdata->flags & FLAG_NCR53C400)
-		NCR5380_write(MODE_REG, MR_BASE | MR_DMA_MODE | MR_ENABLE_PAR_CHECK | MR_ENABLE_PAR_INTR | MR_ENABLE_EOP_INTR | MR_DMA_MODE | MR_MONITOR_BSY);
+		NCR5380_write(MODE_REG, MR_BASE | MR_DMA_MODE |
+				MR_ENABLE_PAR_CHECK | MR_ENABLE_PAR_INTR |
+				MR_ENABLE_EOP_INTR | MR_MONITOR_BSY);
 	else
 		NCR5380_write(MODE_REG, MR_BASE | MR_DMA_MODE);
 #endif				/* def REAL_DMA */
@@ -2323,7 +2133,7 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
 				sink = 1;
 				do_abort(instance);
 				cmd->result = DID_ERROR << 16;
-				cmd->done(cmd);
+				cmd->scsi_done(cmd);
 				return;
 #endif
 				/* 
@@ -2335,8 +2145,7 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
 					++cmd->SCp.buffer;
 					--cmd->SCp.buffers_residual;
 					cmd->SCp.this_residual = cmd->SCp.buffer->length;
-					cmd->SCp.ptr = page_address(cmd->SCp.buffer->page)+
-						       cmd->SCp.buffer->offset;
+					cmd->SCp.ptr = sg_virt(cmd->SCp.buffer);
 					dprintk(NDEBUG_INFORMATION, ("scsi%d : %d bytes and %d buffers left\n", instance->host_no, cmd->SCp.this_residual, cmd->SCp.buffers_residual));
 				}
 				/*
@@ -2379,13 +2188,14 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
 						 * If the watchdog timer fires, all future accesses to this
 						 * device will use the polled-IO.
 						 */
-						printk("scsi%d : switching target %d lun %d to slow handshake\n", instance->host_no, cmd->device->id, cmd->device->lun);
+						scmd_printk(KERN_INFO, cmd,
+							    "switching to slow handshake\n");
 						cmd->device->borken = 1;
 						NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_ATN);
 						sink = 1;
 						do_abort(instance);
 						cmd->result = DID_ERROR << 16;
-						cmd->done(cmd);
+						cmd->scsi_done(cmd);
 						/* XXX - need to source or sink data here, as appropriate */
 					} else
 						cmd->SCp.this_residual -= transfersize - len;
@@ -2469,19 +2279,16 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
 						cmd->result = (cmd->result & 0x00ffff) | (DID_ERROR << 16);
 
 #ifdef AUTOSENSE
-					if ((cmd->cmnd[0] != REQUEST_SENSE) && (status_byte(cmd->SCp.Status) == CHECK_CONDITION)) {
-						dprintk(NDEBUG_AUTOSENSE, ("scsi%d : performing request sense\n", instance->host_no));
-						cmd->cmnd[0] = REQUEST_SENSE;
-						cmd->cmnd[1] &= 0xe0;
-						cmd->cmnd[2] = 0;
-						cmd->cmnd[3] = 0;
-						cmd->cmnd[4] = sizeof(cmd->sense_buffer);
-						cmd->cmnd[5] = 0;
+					if ((cmd->cmnd[0] == REQUEST_SENSE) &&
+						hostdata->ses.cmd_len) {
+						scsi_eh_restore_cmnd(cmd, &hostdata->ses);
+						hostdata->ses.cmd_len = 0 ;
+					}
 
-						cmd->SCp.buffer = NULL;
-						cmd->SCp.buffers_residual = 0;
-						cmd->SCp.ptr = (char *) cmd->sense_buffer;
-						cmd->SCp.this_residual = sizeof(cmd->sense_buffer);
+					if ((cmd->cmnd[0] != REQUEST_SENSE) && (status_byte(cmd->SCp.Status) == CHECK_CONDITION)) {
+						scsi_eh_prep_cmnd(cmd, &hostdata->ses, NULL, 0, ~0);
+
+						dprintk(NDEBUG_AUTOSENSE, ("scsi%d : performing request sense\n", instance->host_no));
 
 						LIST(cmd, hostdata->issue_queue);
 						cmd->host_scribble = (unsigned char *)
@@ -2568,7 +2375,7 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
  * 3..length+1  arguments
  *
  * Start the extended message buffer with the EXTENDED_MESSAGE
- * byte, since print_msg() wants the whole thing.  
+ * byte, since spi_print_msg() wants the whole thing.  
  */
 					extended_msg[0] = EXTENDED_MESSAGE;
 					/* Accept first byte by clearing ACK */
@@ -2615,12 +2422,14 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
 				default:
 					if (!tmp) {
 						printk("scsi%d: rejecting message ", instance->host_no);
-						print_msg(extended_msg);
+						spi_print_msg(extended_msg);
 						printk("\n");
 					} else if (tmp != EXTENDED_MESSAGE)
-						printk("scsi%d: rejecting unknown message %02x from target %d, lun %d\n", instance->host_no, tmp, cmd->device->id, cmd->device->lun);
+						scmd_printk(KERN_INFO, cmd,
+							"rejecting unknown message %02x\n",tmp);
 					else
-						printk("scsi%d: rejecting unknown extended message code %02x, length %d from target %d, lun %d\n", instance->host_no, extended_msg[1], extended_msg[0], cmd->device->id, cmd->device->lun);
+						scmd_printk(KERN_INFO, cmd,
+							"rejecting unknown extended message code %02x, length %d\n", extended_msg[1], extended_msg[0]);
 
 					msgout = MESSAGE_REJECT;
 					NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_ATN);
@@ -2653,9 +2462,8 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
 				 */
 				NCR5380_transfer_pio(instance, &phase, &len, &data);
 				if (!cmd->device->disconnect && should_disconnect(cmd->cmnd[0])) {
-					hostdata->time_expires = jiffies + USLEEP_SLEEP;
+					NCR5380_set_timer(hostdata, USLEEP_SLEEP);
 					dprintk(NDEBUG_USLEEP, ("scsi%d : issued command, sleeping until %ul\n", instance->host_no, hostdata->time_expires));
-					NCR5380_set_timer(instance);
 					return;
 				}
 				break;
@@ -2674,9 +2482,8 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
 			/* RvC: go to sleep if polling time expired
 			 */
 			if (!cmd->device->disconnect && time_after_eq(jiffies, poll_time)) {
-				hostdata->time_expires = jiffies + USLEEP_SLEEP;
+				NCR5380_set_timer(hostdata, USLEEP_SLEEP);
 				dprintk(NDEBUG_USLEEP, ("scsi%d : poll timed out, sleeping until %ul\n", instance->host_no, hostdata->time_expires));
-				NCR5380_set_timer(instance);
 				return;
 			}
 		}
@@ -2751,7 +2558,7 @@ static void NCR5380_reselect(struct Scsi_Host *instance) {
 
 	if (!(msg[0] & 0x80)) {
 		printk(KERN_ERR "scsi%d : expecting IDENTIFY message, got ", instance->host_no);
-		print_msg(msg);
+		spi_print_msg(msg);
 		abort = 1;
 	} else {
 		/* Accept message by clearing ACK */
@@ -2816,7 +2623,7 @@ static void NCR5380_reselect(struct Scsi_Host *instance) {
 #ifdef REAL_DMA
 static void NCR5380_dma_complete(NCR5380_instance * instance) {
 	NCR5380_local_declare();
-	struct NCR5380_hostdata *hostdata = (struct NCR5380_hostdata * instance->hostdata);
+	struct NCR5380_hostdata *hostdata = (struct NCR5380_hostdata *) instance->hostdata;
 	int transferred;
 	NCR5380_setup(instance);
 
@@ -2876,12 +2683,7 @@ static int NCR5380_abort(Scsi_Cmnd * cmd) {
 	Scsi_Cmnd *tmp, **prev;
 	
 	printk(KERN_WARNING "scsi%d : aborting command\n", instance->host_no);
-	print_Scsi_Cmnd(cmd);
-
-	NCR5380_print_status(instance);
-
-	printk(KERN_WARNING "scsi%d : aborting command\n", instance->host_no);
-	print_Scsi_Cmnd(cmd);
+	scsi_print_command(cmd);
 
 	NCR5380_print_status(instance);
 
@@ -2934,7 +2736,7 @@ static int NCR5380_abort(Scsi_Cmnd * cmd) {
 			tmp->host_scribble = NULL;
 			tmp->result = DID_ABORT << 16;
 			dprintk(NDEBUG_ABORT, ("scsi%d : abort removed command from issue queue.\n", instance->host_no));
-			tmp->done(tmp);
+			tmp->scsi_done(tmp);
 			return SUCCESS;
 		}
 #if (NDEBUG  & NDEBUG_ABORT)
@@ -2999,7 +2801,7 @@ static int NCR5380_abort(Scsi_Cmnd * cmd) {
 					*prev = (Scsi_Cmnd *) tmp->host_scribble;
 					tmp->host_scribble = NULL;
 					tmp->result = DID_ABORT << 16;
-					tmp->done(tmp);
+					tmp->scsi_done(tmp);
 					return SUCCESS;
 				}
 		}
@@ -3028,39 +2830,17 @@ static int NCR5380_abort(Scsi_Cmnd * cmd) {
  * Locks: host lock taken by caller
  */
 
-static int NCR5380_bus_reset(Scsi_Cmnd * cmd) {
+static int NCR5380_bus_reset(Scsi_Cmnd * cmd)
+{
+	struct Scsi_Host *instance = cmd->device->host;
+
 	NCR5380_local_declare();
-	NCR5380_setup(cmd->device->host);
+	NCR5380_setup(instance);
+	NCR5380_print_status(instance);
 
-	NCR5380_print_status(cmd->device->host);
-	do_reset(cmd->device->host);
+	spin_lock_irq(instance->host_lock);
+	do_reset(instance);
+	spin_unlock_irq(instance->host_lock);
+
 	return SUCCESS;
-}
-
-/* 
- * Function : int NCR5380_device_reset (Scsi_Cmnd *cmd)
- * 
- * Purpose : reset a SCSI device
- *
- * Returns : FAILED
- *
- * Locks: io_request_lock held by caller
- */
-
-static int NCR5380_device_reset(Scsi_Cmnd * cmd) {
-	return FAILED;
-}
-
-/* 
- * Function : int NCR5380_host_reset (Scsi_Cmnd *cmd)
- * 
- * Purpose : reset a SCSI device
- *
- * Returns : FAILED
- *
- * Locks: io_request_lock held by caller
- */
-
-static int NCR5380_host_reset(Scsi_Cmnd * cmd) {
-	return FAILED;
 }

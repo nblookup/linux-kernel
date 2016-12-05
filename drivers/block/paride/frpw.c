@@ -261,7 +261,7 @@ static int frpw_test_proto( PIA *pi, char * scratch, int verbose )
 	frpw_disconnect(pi);
 
         if (verbose)  {
-            printk("%s: frpw: port 0x%x, chip %d, mode %d, test=(%d,%d,%d)\n",
+            printk("%s: frpw: port 0x%x, chip %ld, mode %d, test=(%d,%d,%d)\n",
                    pi->device,pi->port,(pi->private%2),pi->mode,e[0],e[1],r);
         }
 
@@ -300,12 +300,12 @@ static struct pi_protocol frpw = {
 
 static int __init frpw_init(void)
 {
-	return pi_register(&frpw)-1;
+	return paride_register(&frpw);
 }
 
 static void __exit frpw_exit(void)
 {
-	pi_unregister(&frpw);
+	paride_unregister(&frpw);
 }
 
 MODULE_LICENSE("GPL");

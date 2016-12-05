@@ -14,7 +14,6 @@
    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
    */
 
-#include <linux/config.h>
 
 #define PP_ChipID 0x0000	/* offset   0h -> Corp -ID              */
 				/* offset   2h -> Model/Product Number  */
@@ -86,6 +85,7 @@
 #endif
 
 #define CHIP_EISA_ID_SIG 0x630E   /*  Product ID Code for Crystal Chip (CS8900 spec 4.3) */
+#define CHIP_EISA_ID_SIG_STR "0x630E"
 
 #ifdef IBMEIPKT
 #define EISA_ID_SIG 0x4D24	/*  IBM */
@@ -427,8 +427,8 @@
 #define DMA_SIZE (16*1024) /*  Size of dma buffer - 16k */
 
 #define CS8900 0x0000
-#define CS8920 0x4000   
-#define CS8920M 0x6000   
+#define CS8920 0x4000
+#define CS8920M 0x6000
 #define REVISON_BITS 0x1F00
 #define EEVER_NUMBER 0x12
 #define CHKSUM_LEN 0x14
@@ -437,11 +437,7 @@
 #define IRQ_MAP_EEPROM_DATA 0x0046 /*  Offset into eeprom for the IRQ map */
 #define IRQ_MAP_LEN 0x0004 /*  No of bytes to read for the IRQ map */
 #define PNP_IRQ_FRMT 0x0022 /*  PNP small item IRQ format */
-#ifdef CONFIG_SH_HICOSH4
-#define CS8900_IRQ_MAP 0x0002 /* HiCO-SH4 board has its IRQ on #1 */
-#else
 #define CS8900_IRQ_MAP 0x1c20 /*  This IRQ map is fixed */
-#endif
 
 #define CS8920_NO_INTS 0x0F   /*  Max CS8920 interrupt select # */
 

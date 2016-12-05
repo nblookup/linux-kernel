@@ -5,6 +5,7 @@
 **	(c) Copyright 1999 SuSE GmbH
 **	(c) Copyright 1999,2000 Hewlett-Packard Company
 **	(c) Copyright 2000 Grant Grundler
+**	(c) Copyright 2006 Helge Deller
 **
 **	This program is free software; you can redistribute it and/or modify
 **	it under the terms of the GNU General Public License as published by
@@ -42,7 +43,6 @@
 **       for PCI drivers devices which implement/use MMIO registers.
 */
 
-#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -57,7 +57,6 @@
 #include <asm/page.h>
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/hardware.h>
 
 #include "gsc.h"
@@ -84,7 +83,8 @@
 ** bus number for each dino.
 */
 
-#define is_card_dino(id) ((id)->hw_type == HPHW_A_DMA)
+#define is_card_dino(id)	((id)->hw_type == HPHW_A_DMA)
+#define is_cujo(id)		((id)->hversion == 0x682)
 
 #define DINO_IAR0		0x004
 #define DINO_IODC_ADDR		0x008
@@ -125,6 +125,7 @@
 
 #define DINO_IRQS 11		/* bits 0-10 are architected */
 #define DINO_IRR_MASK	0x5ff	/* only 10 bits are implemented */
+#define DINO_LOCAL_IRQS (DINO_IRQS+1)
 
 #define DINO_MASK_IRQ(x)	(1<<(x))
 
@@ -146,12 +147,10 @@ struct dino_device
 	spinlock_t		dinosaur_pen;
 	unsigned long		txn_addr; /* EIR addr to generate interrupt */ 
 	u32			txn_data; /* EIR data assign to each dino */ 
-	int			irq;      /* Virtual IRQ dino uses */
-	struct irq_region	*dino_region;  /* region for this Dino */
-
-	u32 			imr; /* IRQ's which are enabled */ 
+	u32 			imr;	  /* IRQ's which are enabled */ 
+	int			global_irq[DINO_LOCAL_IRQS]; /* map IMR bit to global irq */
 #ifdef DINO_DEBUG
-	unsigned int		dino_irr0; /* save most recent IRQ line stat */ 
+	unsigned int		dino_irr0; /* save most recent IRQ line stat */
 #endif
 };
 
@@ -165,28 +164,36 @@ struct dino_device
 
 #define DINO_CFG_TOK(bus,dfn,pos) ((u32) ((bus)<<16 | (dfn)<<8 | (pos)))
 
+/*
+ * keep the current highest bus count to assist in allocating busses.  This
+ * tries to keep a global bus count total so that when we discover an 
+ * entirely new bus, it can be given a unique bus number.
+ */
+static int dino_current_bus = 0;
+
 static int dino_cfg_read(struct pci_bus *bus, unsigned int devfn, int where,
 		int size, u32 *val)
 {
-	struct dino_device *d = DINO_DEV(parisc_walk_tree(bus->dev));
+	struct dino_device *d = DINO_DEV(parisc_walk_tree(bus->bridge));
 	u32 local_bus = (bus->parent == NULL) ? 0 : bus->secondary;
 	u32 v = DINO_CFG_TOK(local_bus, devfn, where & ~3);
-	unsigned long base_addr = d->hba.base_addr;
+	void __iomem *base_addr = d->hba.base_addr;
 	unsigned long flags;
 
+	DBG("%s: %p, %d, %d, %d\n", __func__, base_addr, devfn, where,
+									size);
 	spin_lock_irqsave(&d->dinosaur_pen, flags);
 
 	/* tell HW which CFG address */
-	gsc_writel(v, base_addr + DINO_PCI_ADDR);
+	__raw_writel(v, base_addr + DINO_PCI_ADDR);
 
 	/* generate cfg read cycle */
 	if (size == 1) {
-		*val = gsc_readb(base_addr + DINO_CONFIG_DATA + (where & 3));
+		*val = readb(base_addr + DINO_CONFIG_DATA + (where & 3));
 	} else if (size == 2) {
-		*val = le16_to_cpu(gsc_readw(base_addr +
-					DINO_CONFIG_DATA + (where & 2)));
+		*val = readw(base_addr + DINO_CONFIG_DATA + (where & 2));
 	} else if (size == 4) {
-		*val = le32_to_cpu(gsc_readl(base_addr + DINO_CONFIG_DATA));
+		*val = readl(base_addr + DINO_CONFIG_DATA);
 	}
 
 	spin_unlock_irqrestore(&d->dinosaur_pen, flags);
@@ -202,28 +209,29 @@ static int dino_cfg_read(struct pci_bus *bus, unsigned int devfn, int where,
 static int dino_cfg_write(struct pci_bus *bus, unsigned int devfn, int where,
 	int size, u32 val)
 {
-	struct dino_device *d = DINO_DEV(parisc_walk_tree(bus->dev));
+	struct dino_device *d = DINO_DEV(parisc_walk_tree(bus->bridge));
 	u32 local_bus = (bus->parent == NULL) ? 0 : bus->secondary;
 	u32 v = DINO_CFG_TOK(local_bus, devfn, where & ~3);
-	unsigned long base_addr = d->hba.base_addr;
+	void __iomem *base_addr = d->hba.base_addr;
 	unsigned long flags;
 
+	DBG("%s: %p, %d, %d, %d\n", __func__, base_addr, devfn, where,
+									size);
 	spin_lock_irqsave(&d->dinosaur_pen, flags);
 
 	/* avoid address stepping feature */
-	gsc_writel(v & 0xffffff00, base_addr + DINO_PCI_ADDR);
-	gsc_readl(base_addr + DINO_CONFIG_DATA);
+	__raw_writel(v & 0xffffff00, base_addr + DINO_PCI_ADDR);
+	__raw_readl(base_addr + DINO_CONFIG_DATA);
 
 	/* tell HW which CFG address */
-	gsc_writel(v, base_addr + DINO_PCI_ADDR);
+	__raw_writel(v, base_addr + DINO_PCI_ADDR);
 	/* generate cfg read cycle */
 	if (size == 1) {
-		gsc_writeb(val, base_addr + DINO_CONFIG_DATA + (where & 3));
+		writeb(val, base_addr + DINO_CONFIG_DATA + (where & 3));
 	} else if (size == 2) {
-		gsc_writew(cpu_to_le16(val),
-				base_addr + DINO_CONFIG_DATA + (where & 2));
+		writew(val, base_addr + DINO_CONFIG_DATA + (where & 2));
 	} else if (size == 4) {
-		gsc_writel(cpu_to_le32(val), base_addr + DINO_CONFIG_DATA);
+		writel(val, base_addr + DINO_CONFIG_DATA);
 	}
 
 	spin_unlock_irqrestore(&d->dinosaur_pen, flags);
@@ -245,9 +253,6 @@ static struct pci_ops dino_cfg_ops = {
  * I/O port instead of MMIO.
  */
 
-#define cpu_to_le8(x) (x)
-#define le8_to_cpu(x) (x)
-
 #define DINO_PORT_IN(type, size, mask) \
 static u##size dino_in##size (struct pci_hba_data *d, u16 addr) \
 { \
@@ -255,11 +260,11 @@ static u##size dino_in##size (struct pci_hba_data *d, u16 addr) \
 	unsigned long flags; \
 	spin_lock_irqsave(&(DINO_DEV(d)->dinosaur_pen), flags); \
 	/* tell HW which IO Port address */ \
-	gsc_writel((u32) addr, d->base_addr + DINO_PCI_ADDR); \
+	__raw_writel((u32) addr, d->base_addr + DINO_PCI_ADDR); \
 	/* generate I/O PORT read cycle */ \
-	v = gsc_read##type(d->base_addr+DINO_IO_DATA+(addr&mask)); \
+	v = read##type(d->base_addr+DINO_IO_DATA+(addr&mask)); \
 	spin_unlock_irqrestore(&(DINO_DEV(d)->dinosaur_pen), flags); \
-	return le##size##_to_cpu(v); \
+	return v; \
 }
 
 DINO_PORT_IN(b,  8, 3)
@@ -272,9 +277,9 @@ static void dino_out##size (struct pci_hba_data *d, u16 addr, u##size val) \
 	unsigned long flags; \
 	spin_lock_irqsave(&(DINO_DEV(d)->dinosaur_pen), flags); \
 	/* tell HW which IO port address */ \
-	gsc_writel((u32) addr, d->base_addr + DINO_PCI_ADDR); \
+	__raw_writel((u32) addr, d->base_addr + DINO_PCI_ADDR); \
 	/* generate cfg write cycle */ \
-	gsc_write##type(cpu_to_le##size(val), d->base_addr+DINO_IO_DATA+(addr&mask)); \
+	write##type(val, d->base_addr+DINO_IO_DATA+(addr&mask)); \
 	spin_unlock_irqrestore(&(DINO_DEV(d)->dinosaur_pen), flags); \
 }
 
@@ -282,7 +287,7 @@ DINO_PORT_OUT(b,  8, 3)
 DINO_PORT_OUT(w, 16, 2)
 DINO_PORT_OUT(l, 32, 0)
 
-struct pci_port_ops dino_port_ops = {
+static struct pci_port_ops dino_port_ops = {
 	.inb	= dino_in8,
 	.inw	= dino_in16,
 	.inl	= dino_in32,
@@ -291,45 +296,37 @@ struct pci_port_ops dino_port_ops = {
 	.outl	= dino_out32
 };
 
-static void
-dino_mask_irq(void *irq_dev, int irq)
+static void dino_mask_irq(struct irq_data *d)
 {
-	struct dino_device *dino_dev = DINO_DEV(irq_dev);
+	struct dino_device *dino_dev = irq_data_get_irq_chip_data(d);
+	int local_irq = gsc_find_local_irq(d->irq, dino_dev->global_irq, DINO_LOCAL_IRQS);
 
-	DBG(KERN_WARNING "%s(0x%p, %d)\n", __FUNCTION__, irq_dev, irq);
+	DBG(KERN_WARNING "%s(0x%p, %d)\n", __func__, dino_dev, d->irq);
 
-	if (NULL == irq_dev || irq > DINO_IRQS || irq < 0) {
-		printk(KERN_WARNING "%s(0x%lx, %d) - not a dino irq?\n",
-			__FUNCTION__, (long) irq_dev, irq);
-		BUG();
-	} else {
-		/*
-		** Clear the matching bit in the IMR register
-		*/
-		dino_dev->imr &= ~(DINO_MASK_IRQ(irq));
-		gsc_writel(dino_dev->imr, dino_dev->hba.base_addr+DINO_IMR);
-	}
+	/* Clear the matching bit in the IMR register */
+	dino_dev->imr &= ~(DINO_MASK_IRQ(local_irq));
+	__raw_writel(dino_dev->imr, dino_dev->hba.base_addr+DINO_IMR);
 }
 
-
-static void
-dino_unmask_irq(void *irq_dev, int irq)
+static void dino_unmask_irq(struct irq_data *d)
 {
-	struct dino_device *dino_dev = DINO_DEV(irq_dev);
+	struct dino_device *dino_dev = irq_data_get_irq_chip_data(d);
+	int local_irq = gsc_find_local_irq(d->irq, dino_dev->global_irq, DINO_LOCAL_IRQS);
 	u32 tmp;
 
-	DBG(KERN_WARNING "%s(0x%p, %d)\n", __FUNCTION__, irq_dev, irq);
+	DBG(KERN_WARNING "%s(0x%p, %d)\n", __func__, dino_dev, d->irq);
 
-	if (NULL == irq_dev || irq > DINO_IRQS) {
-		printk(KERN_WARNING "%s(): %d not a dino irq?\n",
-				__FUNCTION__, irq);
-		BUG();
-		return;
-	}
+	/*
+	** clear pending IRQ bits
+	**
+	** This does NOT change ILR state!
+	** See comment below for ILR usage.
+	*/
+	__raw_readl(dino_dev->hba.base_addr+DINO_IPR);
 
 	/* set the matching bit in the IMR register */
-	dino_dev->imr |= DINO_MASK_IRQ(irq);          /* used in dino_isr() */
-	gsc_writel( dino_dev->imr, dino_dev->hba.base_addr+DINO_IMR);
+	dino_dev->imr |= DINO_MASK_IRQ(local_irq);	/* used in dino_isr() */
+	__raw_writel( dino_dev->imr, dino_dev->hba.base_addr+DINO_IMR);
 
 	/* Emulate "Level Triggered" Interrupt
 	** Basically, a driver is blowing it if the IRQ line is asserted
@@ -340,38 +337,18 @@ dino_unmask_irq(void *irq_dev, int irq)
 	** dino_isr() will read IPR and find nothing. But then catch this
 	** when it also checks ILR.
 	*/
-	tmp = gsc_readl(dino_dev->hba.base_addr+DINO_ILR);
-	if (tmp & DINO_MASK_IRQ(irq)) {
+	tmp = __raw_readl(dino_dev->hba.base_addr+DINO_ILR);
+	if (tmp & DINO_MASK_IRQ(local_irq)) {
 		DBG(KERN_WARNING "%s(): IRQ asserted! (ILR 0x%x)\n",
-				__FUNCTION__, tmp);
+				__func__, tmp);
 		gsc_writel(dino_dev->txn_data, dino_dev->txn_addr);
 	}
 }
 
-
-
-static void
-dino_enable_irq(void *irq_dev, int irq)
-{
-	struct dino_device *dino_dev = DINO_DEV(irq_dev);
-
-	/*
-	** clear pending IRQ bits
-	**
-	** This does NOT change ILR state!
-	** See comments in dino_unmask_irq() for ILR usage.
-	*/
-	gsc_readl(dino_dev->hba.base_addr+DINO_IPR);
-
-	dino_unmask_irq(irq_dev, irq);
-}
-
-
-static struct irq_region_ops dino_irq_ops = {
-	.disable_irq	= dino_mask_irq,	/* ??? */
-	.enable_irq	= dino_enable_irq, 
-	.mask_irq	= dino_mask_irq,
-	.unmask_irq	= dino_unmask_irq
+static struct irq_chip dino_interrupt_type = {
+	.name		= "GSC-PCI",
+	.irq_unmask	= dino_unmask_irq,
+	.irq_mask	= dino_mask_irq,
 };
 
 
@@ -381,37 +358,30 @@ static struct irq_region_ops dino_irq_ops = {
  * ilr_loop counter is a kluge to prevent a "stuck" IRQ line from
  * wedging the CPU. Could be removed or made optional at some point.
  */
-static irqreturn_t
-dino_isr(int irq, void *intr_dev, struct pt_regs *regs)
+static irqreturn_t dino_isr(int irq, void *intr_dev)
 {
-	struct dino_device *dino_dev = DINO_DEV(intr_dev);
+	struct dino_device *dino_dev = intr_dev;
 	u32 mask;
 	int ilr_loop = 100;
-	extern void do_irq(struct irqaction *a, int i, struct pt_regs *p);
-
 
 	/* read and acknowledge pending interrupts */
 #ifdef DINO_DEBUG
 	dino_dev->dino_irr0 =
 #endif
-	mask = gsc_readl(dino_dev->hba.base_addr+DINO_IRR0) & DINO_IRR_MASK;
+	mask = __raw_readl(dino_dev->hba.base_addr+DINO_IRR0) & DINO_IRR_MASK;
+
+	if (mask == 0)
+		return IRQ_NONE;
 
 ilr_again:
-	while (mask)
-	{
-		int irq;
-
-		irq = __ffs(mask);
-
-		mask &= ~(1<<irq);
-
-		DBG(KERN_WARNING "%s(%x, %p) mask %0x\n",
-			__FUNCTION__, irq, intr_dev, mask);
-		do_irq(&dino_dev->dino_region->action[irq],
-			dino_dev->dino_region->data.irqbase + irq,
-			regs);
-
-	}
+	do {
+		int local_irq = __ffs(mask);
+		int irq = dino_dev->global_irq[local_irq];
+		DBG(KERN_DEBUG "%s(%d, %p) mask 0x%x\n",
+			__func__, irq, intr_dev, mask);
+		generic_handle_irq(irq);
+		mask &= ~(1 << local_irq);
+	} while (mask);
 
 	/* Support for level triggered IRQ lines.
 	** 
@@ -420,28 +390,56 @@ ilr_again:
 	** device drivers may assume lines are level triggered (and not
 	** edge triggered like EISA/ISA can be).
 	*/
-	mask = gsc_readl(dino_dev->hba.base_addr+DINO_ILR) & dino_dev->imr;
+	mask = __raw_readl(dino_dev->hba.base_addr+DINO_ILR) & dino_dev->imr;
 	if (mask) {
 		if (--ilr_loop > 0)
 			goto ilr_again;
-		printk(KERN_ERR "Dino %lx: stuck interrupt %d\n", dino_dev->hba.base_addr, mask);
+		printk(KERN_ERR "Dino 0x%p: stuck interrupt %d\n", 
+		       dino_dev->hba.base_addr, mask);
 		return IRQ_NONE;
 	}
 	return IRQ_HANDLED;
 }
 
-static int dino_choose_irq(struct parisc_device *dev)
+static void dino_assign_irq(struct dino_device *dino, int local_irq, int *irqp)
 {
-	int irq = -1;
+	int irq = gsc_assign_irq(&dino_interrupt_type, dino);
+	if (irq == NO_IRQ)
+		return;
+
+	*irqp = irq;
+	dino->global_irq[local_irq] = irq;
+}
+
+static void dino_choose_irq(struct parisc_device *dev, void *ctrl)
+{
+	int irq;
+	struct dino_device *dino = ctrl;
 
 	switch (dev->id.sversion) {
 		case 0x00084:	irq =  8; break; /* PS/2 */
 		case 0x0008c:	irq = 10; break; /* RS232 */
 		case 0x00096:	irq =  8; break; /* PS/2 */
+		default:	return;		 /* Unknown */
 	}
 
-	return irq;
+	dino_assign_irq(dino, irq, &dev->irq);
 }
+
+
+/*
+ * Cirrus 6832 Cardbus reports wrong irq on RDI Tadpole PARISC Laptop (deller@gmx.de)
+ * (the irqs are off-by-one, not sure yet if this is a cirrus, dino-hardware or dino-driver problem...)
+ */
+static void __devinit quirk_cirrus_cardbus(struct pci_dev *dev)
+{
+	u8 new_irq = dev->irq - 1;
+	printk(KERN_INFO "PCI: Cirrus Cardbus IRQ fixup for %s, from %d to %d\n",
+			pci_name(dev), dev->irq, new_irq);
+	dev->irq = new_irq;
+}
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_CIRRUS, PCI_DEVICE_ID_CIRRUS_6832, quirk_cirrus_cardbus );
+
 
 static void __init
 dino_bios_init(void)
@@ -458,17 +456,18 @@ dino_bios_init(void)
  */
 #define _8MB 0x00800000UL
 static void __init
-dino_card_setup(struct pci_bus *bus, unsigned long base_addr)
+dino_card_setup(struct pci_bus *bus, void __iomem *base_addr)
 {
 	int i;
-	struct dino_device *dino_dev = DINO_DEV(parisc_walk_tree(bus->dev));
+	struct dino_device *dino_dev = DINO_DEV(parisc_walk_tree(bus->bridge));
 	struct resource *res;
 	char name[128];
 	int size;
 
 	res = &dino_dev->hba.lmmio_space;
 	res->flags = IORESOURCE_MEM;
-	size = snprintf(name, sizeof(name), "Dino LMMIO (%s)", bus->dev->bus_id);
+	size = scnprintf(name, sizeof(name), "Dino LMMIO (%s)", 
+			 dev_name(bus->bridge));
 	res->name = kmalloc(size+1, GFP_KERNEL);
 	if(res->name)
 		strcpy((char *)res->name, name);
@@ -478,17 +477,15 @@ dino_card_setup(struct pci_bus *bus, unsigned long base_addr)
 
 	if (ccio_allocate_resource(dino_dev->hba.dev, res, _8MB,
 				F_EXTEND(0xf0000000UL) | _8MB,
-				F_EXTEND(0xffffffffUL) &~ _8MB, _8MB,
-				NULL, NULL) < 0) {
+				F_EXTEND(0xffffffffUL) &~ _8MB, _8MB) < 0) {
 		struct list_head *ln, *tmp_ln;
 
 		printk(KERN_ERR "Dino: cannot attach bus %s\n",
-		       bus->dev->bus_id);
+		       dev_name(bus->bridge));
 		/* kill the bus, we can't do anything with it */
 		list_for_each_safe(ln, tmp_ln, &bus->devices) {
 			struct pci_dev *dev = pci_dev_b(ln);
 
-			list_del(&dev->global_list);
 			list_del(&dev->bus_list);
 		}
 			
@@ -502,11 +499,9 @@ dino_card_setup(struct pci_bus *bus, unsigned long base_addr)
 		if (res->start == F_EXTEND(0xf0000000UL | (i * _8MB)))
 			break;
 	}
-	DBG("DINO GSC WRITE i=%d, start=%lx, dino addr = %lx\n",
+	DBG("DINO GSC WRITE i=%d, start=%lx, dino addr = %p\n",
 	    i, res->start, base_addr + DINO_IO_ADDR_EN);
-	gsc_writel(1 << i, base_addr + DINO_IO_ADDR_EN);
-
-	pci_bus_assign_resources(bus);
+	__raw_writel(1 << i, base_addr + DINO_IO_ADDR_EN);
 }
 
 static void __init
@@ -527,7 +522,8 @@ dino_card_fixup(struct pci_dev *dev)
 	** Set Latency Timer to 0xff (not a shared bus)
 	** Set CACHELINE_SIZE.
 	*/
-	dino_cfg_write(dev->bus, dev->devfn, PCI_CACHE_LINE_SIZE, 2, 0xff00 | L1_CACHE_BYTES/4); 
+	dino_cfg_write(dev->bus, dev->devfn, 
+		       PCI_CACHE_LINE_SIZE, 2, 0xff00 | L1_CACHE_BYTES/4); 
 
 	/*
 	** Program INT_LINE for card-mode devices.
@@ -539,7 +535,7 @@ dino_card_fixup(struct pci_dev *dev)
 	** The additional "-1" adjusts for skewing the IRQ<->slot.
 	*/
 	dino_cfg_read(dev->bus, dev->devfn, PCI_INTERRUPT_PIN, 1, &irq_pin); 
-	dev->irq = (irq_pin + PCI_SLOT(dev->devfn) - 1) % 4 ;
+	dev->irq = pci_swizzle_interrupt_pin(dev, irq_pin) - 1;
 
 	/* Shouldn't really need to do this but it's in case someone tries
 	** to bypass PCI services and look at the card themselves.
@@ -547,25 +543,73 @@ dino_card_fixup(struct pci_dev *dev)
 	dino_cfg_write(dev->bus, dev->devfn, PCI_INTERRUPT_LINE, 1, dev->irq); 
 }
 
+/* The alignment contraints for PCI bridges under dino */
+#define DINO_BRIDGE_ALIGN 0x100000
+
 
 static void __init
 dino_fixup_bus(struct pci_bus *bus)
 {
 	struct list_head *ln;
         struct pci_dev *dev;
-        struct dino_device *dino_dev = DINO_DEV(parisc_walk_tree(bus->dev));
+        struct dino_device *dino_dev = DINO_DEV(parisc_walk_tree(bus->bridge));
 	int port_base = HBA_PORT_BASE(dino_dev->hba.hba_num);
 
-	DBG(KERN_WARNING "%s(0x%p) bus %d sysdata 0x%p\n",
-			__FUNCTION__, bus, bus->secondary, bus->dev->platform_data);
+	DBG(KERN_WARNING "%s(0x%p) bus %d platform_data 0x%p\n",
+	    __func__, bus, bus->secondary,
+	    bus->bridge->platform_data);
 
 	/* Firmware doesn't set up card-mode dino, so we have to */
-	if (is_card_dino(&dino_dev->hba.dev->id))
+	if (is_card_dino(&dino_dev->hba.dev->id)) {
 		dino_card_setup(bus, dino_dev->hba.base_addr);
+	} else if(bus->parent == NULL) {
+		/* must have a dino above it, reparent the resources
+		 * into the dino window */
+		int i;
+		struct resource *res = &dino_dev->hba.lmmio_space;
 
-	/* If this is a PCI-PCI Bridge, read the window registers etc */
-	if (bus->self)
+		bus->resource[0] = &(dino_dev->hba.io_space);
+		for(i = 0; i < DINO_MAX_LMMIO_RESOURCES; i++) {
+			if(res[i].flags == 0)
+				break;
+			bus->resource[i+1] = &res[i];
+		}
+
+	} else if (bus->parent) {
+		int i;
+
 		pci_read_bridge_bases(bus);
+
+
+		for(i = PCI_BRIDGE_RESOURCES; i < PCI_NUM_RESOURCES; i++) {
+			if((bus->self->resource[i].flags & 
+			    (IORESOURCE_IO | IORESOURCE_MEM)) == 0)
+				continue;
+			
+			if(bus->self->resource[i].flags & IORESOURCE_MEM) {
+				/* There's a quirk to alignment of
+				 * bridge memory resources: the start
+				 * is the alignment and start-end is
+				 * the size.  However, firmware will
+				 * have assigned start and end, so we
+				 * need to take this into account */
+				bus->self->resource[i].end = bus->self->resource[i].end - bus->self->resource[i].start + DINO_BRIDGE_ALIGN;
+				bus->self->resource[i].start = DINO_BRIDGE_ALIGN;
+				
+			}
+					
+			DBG("DEBUG %s assigning %d [0x%lx,0x%lx]\n",
+			    dev_name(&bus->self->dev), i,
+			    bus->self->resource[i].start,
+			    bus->self->resource[i].end);
+			WARN_ON(pci_assign_resource(bus->self, i));
+			DBG("DEBUG %s after assign %d [0x%lx,0x%lx]\n",
+			    dev_name(&bus->self->dev), i,
+			    bus->self->resource[i].start,
+			    bus->self->resource[i].end);
+		}
+	}
+
 
 	list_for_each(ln, &bus->devices) {
 		int i;
@@ -596,14 +640,45 @@ dino_fixup_bus(struct pci_bus *bus)
 			}
 #endif
 		}
+		/* null out the ROM resource if there is one (we don't
+		 * care about an expansion rom on parisc, since it
+		 * usually contains (x86) bios code) */
+		dev->resource[PCI_ROM_RESOURCE].flags = 0;
+				
+		if(dev->irq == 255) {
 
-		/* Adjust INT_LINE for that busses region */
-		dev->irq = dino_dev->dino_region->data.irqbase + dev->irq;
+#define DINO_FIX_UNASSIGNED_INTERRUPTS
+#ifdef DINO_FIX_UNASSIGNED_INTERRUPTS
+
+			/* This code tries to assign an unassigned
+			 * interrupt.  Leave it disabled unless you
+			 * *really* know what you're doing since the
+			 * pin<->interrupt line mapping varies by bus
+			 * and machine */
+
+			u32 irq_pin;
+			
+			dino_cfg_read(dev->bus, dev->devfn, 
+				      PCI_INTERRUPT_PIN, 1, &irq_pin);
+			irq_pin = pci_swizzle_interrupt_pin(dev, irq_pin) - 1;
+			printk(KERN_WARNING "Device %s has undefined IRQ, "
+					"setting to %d\n", pci_name(dev), irq_pin);
+			dino_cfg_write(dev->bus, dev->devfn, 
+				       PCI_INTERRUPT_LINE, 1, irq_pin);
+			dino_assign_irq(dino_dev, irq_pin, &dev->irq);
+#else
+			dev->irq = 65535;
+			printk(KERN_WARNING "Device %s has unassigned IRQ\n", pci_name(dev));
+#endif
+		} else {
+			/* Adjust INT_LINE for that busses region */
+			dino_assign_irq(dino_dev, dev->irq, &dev->irq);
+		}
 	}
 }
 
 
-struct pci_bios_ops dino_bios_ops = {
+static struct pci_bios_ops dino_bios_ops = {
 	.init		= dino_bios_init,
 	.fixup_bus	= dino_fixup_bus
 };
@@ -616,10 +691,18 @@ static void __init
 dino_card_init(struct dino_device *dino_dev)
 {
 	u32 brdg_feat = 0x00784e05;
+	unsigned long status;
 
-	gsc_writel(0x00000000, dino_dev->hba.base_addr+DINO_GMASK);
-	gsc_writel(0x00000001, dino_dev->hba.base_addr+DINO_IO_FBB_EN);
-	gsc_writel(0x00000000, dino_dev->hba.base_addr+DINO_ICR);
+	status = __raw_readl(dino_dev->hba.base_addr+DINO_IO_STATUS);
+	if (status & 0x0000ff80) {
+		__raw_writel(0x00000005,
+				dino_dev->hba.base_addr+DINO_IO_COMMAND);
+		udelay(1);
+	}
+
+	__raw_writel(0x00000000, dino_dev->hba.base_addr+DINO_GMASK);
+	__raw_writel(0x00000001, dino_dev->hba.base_addr+DINO_IO_FBB_EN);
+	__raw_writel(0x00000000, dino_dev->hba.base_addr+DINO_ICR);
 
 #if 1
 /* REVISIT - should be a runtime check (eg if (CPU_IS_PCX_L) ...) */
@@ -629,34 +712,34 @@ dino_card_init(struct dino_device *dino_dev)
 	*/
 	brdg_feat &= ~0x4;	/* UXQL */
 #endif
-	gsc_writel( brdg_feat, dino_dev->hba.base_addr+DINO_BRDG_FEAT);
+	__raw_writel( brdg_feat, dino_dev->hba.base_addr+DINO_BRDG_FEAT);
 
 	/*
 	** Don't enable address decoding until we know which I/O range
 	** currently is available from the host. Only affects MMIO
 	** and not I/O port space.
 	*/
-	gsc_writel(0x00000000, dino_dev->hba.base_addr+DINO_IO_ADDR_EN);
+	__raw_writel(0x00000000, dino_dev->hba.base_addr+DINO_IO_ADDR_EN);
 
-	gsc_writel(0x00000000, dino_dev->hba.base_addr+DINO_DAMODE);
-	gsc_writel(0x00222222, dino_dev->hba.base_addr+DINO_PCIROR);
-	gsc_writel(0x00222222, dino_dev->hba.base_addr+DINO_PCIWOR);
+	__raw_writel(0x00000000, dino_dev->hba.base_addr+DINO_DAMODE);
+	__raw_writel(0x00222222, dino_dev->hba.base_addr+DINO_PCIROR);
+	__raw_writel(0x00222222, dino_dev->hba.base_addr+DINO_PCIWOR);
 
-	gsc_writel(0x00000040, dino_dev->hba.base_addr+DINO_MLTIM);
-	gsc_writel(0x00000080, dino_dev->hba.base_addr+DINO_IO_CONTROL);
-	gsc_writel(0x0000008c, dino_dev->hba.base_addr+DINO_TLTIM);
+	__raw_writel(0x00000040, dino_dev->hba.base_addr+DINO_MLTIM);
+	__raw_writel(0x00000080, dino_dev->hba.base_addr+DINO_IO_CONTROL);
+	__raw_writel(0x0000008c, dino_dev->hba.base_addr+DINO_TLTIM);
 
 	/* Disable PAMR before writing PAPR */
-	gsc_writel(0x0000007e, dino_dev->hba.base_addr+DINO_PAMR);
-	gsc_writel(0x0000007f, dino_dev->hba.base_addr+DINO_PAPR);
-	gsc_writel(0x00000000, dino_dev->hba.base_addr+DINO_PAMR);
+	__raw_writel(0x0000007e, dino_dev->hba.base_addr+DINO_PAMR);
+	__raw_writel(0x0000007f, dino_dev->hba.base_addr+DINO_PAPR);
+	__raw_writel(0x00000000, dino_dev->hba.base_addr+DINO_PAMR);
 
 	/*
 	** Dino ERS encourages enabling FBB (0x6f).
 	** We can't until we know *all* devices below us can support it.
 	** (Something in device configuration header tells us).
 	*/
-	gsc_writel(0x0000004f, dino_dev->hba.base_addr+DINO_PCICMD);
+	__raw_writel(0x0000004f, dino_dev->hba.base_addr+DINO_PCICMD);
 
 	/* Somewhere, the PCI spec says give devices 1 second
 	** to recover from the #RESET being de-asserted.
@@ -669,35 +752,67 @@ dino_card_init(struct dino_device *dino_dev)
 static int __init
 dino_bridge_init(struct dino_device *dino_dev, const char *name)
 {
-	unsigned long io_addr, bpos;
-	int result;
-	struct resource *res;
+	unsigned long io_addr;
+	int result, i, count=0;
+	struct resource *res, *prevres = NULL;
 	/*
 	 * Decoding IO_ADDR_EN only works for Built-in Dino
 	 * since PDC has already initialized this.
 	 */
 
-	io_addr = gsc_readl(dino_dev->hba.base_addr + DINO_IO_ADDR_EN);
+	io_addr = __raw_readl(dino_dev->hba.base_addr + DINO_IO_ADDR_EN);
 	if (io_addr == 0) {
 		printk(KERN_WARNING "%s: No PCI devices enabled.\n", name);
 		return -ENODEV;
 	}
 
-	for (bpos = 0; (io_addr & (1 << bpos)) == 0; bpos++)
-		;
-
 	res = &dino_dev->hba.lmmio_space;
-	res->flags = IORESOURCE_MEM;
+	for (i = 0; i < 32; i++) {
+		unsigned long start, end;
 
-	res->start = (unsigned long)(signed int)(0xf0000000 | (bpos << 23));
-	res->end = res->start + 8 * 1024 * 1024 - 1;
+		if((io_addr & (1 << i)) == 0)
+			continue;
 
-	result = ccio_request_resource(dino_dev->hba.dev, res);
-	if (result < 0) {
-		printk(KERN_ERR "%s: failed to claim PCI Bus address space!\n", name);
-		return result;
+		start = F_EXTEND(0xf0000000UL) | (i << 23);
+		end = start + 8 * 1024 * 1024 - 1;
+
+		DBG("DINO RANGE %d is at 0x%lx-0x%lx\n", count,
+		    start, end);
+
+		if(prevres && prevres->end + 1 == start) {
+			prevres->end = end;
+		} else {
+			if(count >= DINO_MAX_LMMIO_RESOURCES) {
+				printk(KERN_ERR "%s is out of resource windows for range %d (0x%lx-0x%lx)\n", name, count, start, end);
+				break;
+			}
+			prevres = res;
+			res->start = start;
+			res->end = end;
+			res->flags = IORESOURCE_MEM;
+			res->name = kmalloc(64, GFP_KERNEL);
+			if(res->name)
+				snprintf((char *)res->name, 64, "%s LMMIO %d",
+					 name, count);
+			res++;
+			count++;
+		}
 	}
 
+	res = &dino_dev->hba.lmmio_space;
+
+	for(i = 0; i < DINO_MAX_LMMIO_RESOURCES; i++) {
+		if(res[i].flags == 0)
+			break;
+
+		result = ccio_request_resource(dino_dev->hba.dev, &res[i]);
+		if (result < 0) {
+			printk(KERN_ERR "%s: failed to claim PCI Bus address "
+			       "space %d (0x%lx-0x%lx)!\n", name, i,
+			       (unsigned long)res[i].start, (unsigned long)res[i].end);
+			return result;
+		}
+	}
 	return 0;
 }
 
@@ -721,7 +836,7 @@ static int __init dino_common_init(struct parisc_device *dev,
 	**   still only has 11 IRQ input lines - just map some of them
 	**   to a different processor.
 	*/
-	dino_dev->irq = gsc_alloc_irq(&gsc_irq);
+	dev->irq = gsc_alloc_irq(&gsc_irq);
 	dino_dev->txn_addr = gsc_irq.txn_addr;
 	dino_dev->txn_data = gsc_irq.txn_data;
 	eim = ((u32) gsc_irq.txn_addr) | gsc_irq.txn_data;
@@ -730,27 +845,15 @@ static int __init dino_common_init(struct parisc_device *dev,
 	** Dino needs a PA "IRQ" to get a processor's attention.
 	** arch/parisc/kernel/irq.c returns an EIRR bit.
 	*/
-	if (dino_dev->irq < 0) {
+	if (dev->irq < 0) {
 		printk(KERN_WARNING "%s: gsc_alloc_irq() failed\n", name);
 		return 1;
 	}
 
-	status = request_irq(dino_dev->irq, dino_isr, 0, name, dino_dev);
+	status = request_irq(dev->irq, dino_isr, 0, name, dino_dev);
 	if (status) {
 		printk(KERN_WARNING "%s: request_irq() failed with %d\n", 
 			name, status);
-		return 1;
-	}
-
-	/*
-	** Tell generic interrupt support we have 11 bits which need
-	** be checked in the interrupt handler.
-	*/
-	dino_dev->dino_region = alloc_irq_region(DINO_IRQS, &dino_irq_ops,
-						name, dino_dev);
-
-	if (NULL == dino_dev->dino_region) {
-		printk(KERN_WARNING "%s: alloc_irq_region() failed\n", name);
 		return 1;
 	}
 
@@ -758,37 +861,36 @@ static int __init dino_common_init(struct parisc_device *dev,
 	 * Dino / Cujo chips.
 	 */
 
-	fixup_child_irqs(dev, dino_dev->dino_region->data.irqbase,
-			dino_choose_irq);
+	gsc_fixup_irqs(dev, dino_dev, dino_choose_irq);
 
 	/*
 	** This enables DINO to generate interrupts when it sees
 	** any of its inputs *change*. Just asserting an IRQ
 	** before it's enabled (ie unmasked) isn't good enough.
 	*/
-	gsc_writel(eim, dino_dev->hba.base_addr+DINO_IAR0);
+	__raw_writel(eim, dino_dev->hba.base_addr+DINO_IAR0);
 
 	/*
 	** Some platforms don't clear Dino's IRR0 register at boot time.
 	** Reading will clear it now.
 	*/
-	gsc_readl(dino_dev->hba.base_addr+DINO_IRR0);
+	__raw_readl(dino_dev->hba.base_addr+DINO_IRR0);
 
 	/* allocate I/O Port resource region */
 	res = &dino_dev->hba.io_space;
-	if (dev->id.hversion == 0x680 || is_card_dino(&dev->id)) {
+	if (!is_cujo(&dev->id)) {
 		res->name = "Dino I/O Port";
-	        dino_dev->hba.lmmio_space.name = "Dino LMMIO";
 	} else {
 		res->name = "Cujo I/O Port";
-	        dino_dev->hba.lmmio_space.name = "Cujo LMMIO";
 	}
 	res->start = HBA_PORT_BASE(dino_dev->hba.hba_num);
 	res->end = res->start + (HBA_PORT_SPACE_SIZE - 1);
 	res->flags = IORESOURCE_IO; /* do not mark it busy ! */
 	if (request_resource(&ioport_resource, res) < 0) {
-		printk(KERN_ERR "%s: request I/O Port region failed 0x%lx/%lx (hpa 0x%lx)\n",
-				name, res->start, res->end, dino_dev->hba.base_addr);
+		printk(KERN_ERR "%s: request I/O Port region failed "
+		       "0x%lx/%lx (hpa 0x%p)\n",
+		       name, (unsigned long)res->start, (unsigned long)res->end,
+		       dino_dev->hba.base_addr);
 		return 1;
 	}
 
@@ -819,25 +921,20 @@ void ccio_cujo20_fixup(struct parisc_device *dev, u32 iovp);
 ** If so, initialize the chip appropriately (card-mode vs bridge mode).
 ** Much of the initialization is common though.
 */
-static int __init
-dino_driver_callback(struct parisc_device *dev)
+static int __init dino_probe(struct parisc_device *dev)
 {
 	struct dino_device *dino_dev;	// Dino specific control struct
 	const char *version = "unknown";
-	const int name_len = 32;
 	char *name;
 	int is_cujo = 0;
+	struct pci_bus *bus;
+	unsigned long hpa = dev->hpa.start;
 
-	name = kmalloc(name_len, GFP_KERNEL);
-	if(name)
-		snprintf(name, name_len, "Dino %s", dev->dev.bus_id);
-	else
-		name = "Dino";
-
+	name = "Dino";
 	if (is_card_dino(&dev->id)) {
 		version = "3.x (card mode)";
 	} else {
-		if(dev->id.hversion == 0x680) {
+		if (!is_cujo(&dev->id)) {
 			if (dev->id.hversion_rev < 4) {
 				version = dino_vers[dev->id.hversion_rev];
 			}
@@ -850,11 +947,11 @@ dino_driver_callback(struct parisc_device *dev)
 		}
 	}
 
-	printk("%s version %s found at 0x%lx\n", name, version, dev->hpa);
+	printk("%s version %s found at 0x%lx\n", name, version, hpa);
 
-	if (!request_mem_region(dev->hpa, PAGE_SIZE, name)) {
+	if (!request_mem_region(hpa, PAGE_SIZE, name)) {
 		printk(KERN_ERR "DINO: Hey! Someone took my MMIO space (0x%ld)!\n",
-			dev->hpa);
+			hpa);
 		return 1;
 	}
 
@@ -862,12 +959,12 @@ dino_driver_callback(struct parisc_device *dev)
 	if (is_cujo && dev->id.hversion_rev == 1) {
 #ifdef CONFIG_IOMMU_CCIO
 		printk(KERN_WARNING "Enabling Cujo 2.0 bug workaround\n");
-		if (dev->hpa == (unsigned long)CUJO_RAVEN_ADDR) {
-			ccio_cujo20_fixup(dev->parent, CUJO_RAVEN_BADPAGE);
-		} else if (dev->hpa == (unsigned long)CUJO_FIREHAWK_ADDR) {
-			ccio_cujo20_fixup(dev->parent, CUJO_FIREHAWK_BADPAGE);
+		if (hpa == (unsigned long)CUJO_RAVEN_ADDR) {
+			ccio_cujo20_fixup(dev, CUJO_RAVEN_BADPAGE);
+		} else if (hpa == (unsigned long)CUJO_FIREHAWK_ADDR) {
+			ccio_cujo20_fixup(dev, CUJO_FIREHAWK_BADPAGE);
 		} else {
-			printk("Don't recognise Cujo at address 0x%lx, not enabling workaround\n", dev->hpa);
+			printk("Don't recognise Cujo at address 0x%lx, not enabling workaround\n", hpa);
 		}
 #endif
 	} else if (!is_cujo && !is_card_dino(&dev->id) &&
@@ -883,18 +980,16 @@ dino_driver_callback(struct parisc_device *dev)
 */
 	}
 
-	dino_dev = kmalloc(sizeof(struct dino_device), GFP_KERNEL);
+	dino_dev = kzalloc(sizeof(struct dino_device), GFP_KERNEL);
 	if (!dino_dev) {
 		printk("dino_init_chip - couldn't alloc dino_device\n");
 		return 1;
 	}
 
-	memset(dino_dev, 0, sizeof(struct dino_device));
-
 	dino_dev->hba.dev = dev;
-	dino_dev->hba.base_addr = dev->hpa;  /* faster access */
+	dino_dev->hba.base_addr = ioremap_nocache(hpa, 4096);
 	dino_dev->hba.lmmio_space_offset = 0;	/* CPU addrs == bus addrs */
-	dino_dev->dinosaur_pen = SPIN_LOCK_UNLOCKED;
+	spin_lock_init(&dino_dev->dinosaur_pen);
 	dino_dev->hba.iommu = ccio_get_iommu(dev);
 
 	if (is_card_dino(&dev->id)) {
@@ -912,9 +1007,22 @@ dino_driver_callback(struct parisc_device *dev)
 	** It's not used to avoid chicken/egg problems
 	** with configuration accessor functions.
 	*/
-	dino_dev->hba.hba_bus = 
-		pci_scan_bus_parented(&dev->dev, dino_dev->hba.hba_num,
-				      &dino_cfg_ops, NULL);
+	dino_dev->hba.hba_bus = bus = pci_scan_bus_parented(&dev->dev,
+			 dino_current_bus, &dino_cfg_ops, NULL);
+
+	if(bus) {
+		/* This code *depends* on scanning being single threaded
+		 * if it isn't, this global bus number count will fail
+		 */
+		dino_current_bus = bus->subordinate + 1;
+		pci_bus_assign_resources(bus);
+		pci_bus_add_devices(bus);
+	} else {
+		printk(KERN_ERR "ERROR: failed to scan PCI bus on %s (duplicate bus number %d?)\n",
+		       dev_name(&dev->dev), dino_current_bus);
+		/* increment the bus number in case of duplicates */
+		dino_current_bus++;
+	}
 	return 0;
 }
 
@@ -923,10 +1031,13 @@ dino_driver_callback(struct parisc_device *dev)
  * the same sversion as Dino, so we have to check hversion as well.
  * Unfortunately, the J2240 PDC reports the wrong hversion for the first
  * Dino, so we have to test for Dino, Cujo and Dino-in-a-J2240.
+ * For card-mode Dino, most machines report an sversion of 9D.  But 715
+ * and 725 firmware misreport it as 0x08080 for no adequately explained
+ * reason.
  */
 static struct parisc_device_id dino_tbl[] = {
-	{ HPHW_A_DMA, HVERSION_REV_ANY_ID, 0x004, 0x0009D }, /* Card-mode Dino. */
-	{ HPHW_A_DMA, HVERSION_REV_ANY_ID, 0x444, 0x08080 }, /* Same card in a 715.  Bug? */
+	{ HPHW_A_DMA, HVERSION_REV_ANY_ID, 0x004, 0x0009D },/* Card-mode Dino */
+	{ HPHW_A_DMA, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x08080 }, /* XXX */
 	{ HPHW_BRIDGE, HVERSION_REV_ANY_ID, 0x680, 0xa }, /* Bridge-mode Dino */
 	{ HPHW_BRIDGE, HVERSION_REV_ANY_ID, 0x682, 0xa }, /* Bridge-mode Cujo */
 	{ HPHW_BRIDGE, HVERSION_REV_ANY_ID, 0x05d, 0xa }, /* Dino in a J2240 */
@@ -934,9 +1045,9 @@ static struct parisc_device_id dino_tbl[] = {
 };
 
 static struct parisc_driver dino_driver = {
-	.name =		"Dino",
+	.name =		"dino",
 	.id_table =	dino_tbl,
-	.probe =	dino_driver_callback,
+	.probe =	dino_probe,
 };
 
 /*

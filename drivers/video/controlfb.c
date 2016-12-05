@@ -31,17 +31,17 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -96,16 +96,16 @@ static inline int VAR_MATCH(struct fb_var_screeninfo *x, struct fb_var_screeninf
 struct fb_info_control {
 	struct fb_info		info;
 	struct fb_par_control	par;
-	u32			pseudo_palette[17];
+	u32			pseudo_palette[16];
 		
-	struct cmap_regs	*cmap_regs;
+	struct cmap_regs	__iomem *cmap_regs;
 	unsigned long		cmap_regs_phys;
 	
-	struct control_regs	*control_regs;
+	struct control_regs	__iomem *control_regs;
 	unsigned long		control_regs_phys;
 	unsigned long		control_regs_size;
 	
-	__u8			*frame_buffer;
+	__u8			__iomem *frame_buffer;
 	unsigned long		frame_buffer_phys;
 	unsigned long		fb_orig_base;
 	unsigned long		fb_orig_size;
@@ -128,16 +128,10 @@ static int controlfb_pan_display(struct fb_var_screeninfo *var,
 static int controlfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	u_int transp, struct fb_info *info);
 static int controlfb_blank(int blank_mode, struct fb_info *info);
-static int controlfb_mmap(struct fb_info *info, struct file *file,
+static int controlfb_mmap(struct fb_info *info,
 	struct vm_area_struct *vma);
 static int controlfb_set_par (struct fb_info *info);
 static int controlfb_check_var (struct fb_var_screeninfo *var, struct fb_info *info);
-
-/*
- * inititialization
- */
-int control_init(void);
-void control_setup(char *);
 
 /******************** Prototypes for internal functions **********************/
 
@@ -176,7 +170,6 @@ static struct fb_ops controlfb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 
@@ -188,12 +181,14 @@ MODULE_LICENSE("GPL");
 int init_module(void)
 {
 	struct device_node *dp;
+	int ret = -ENXIO;
 
-	dp = find_devices("control");
+	dp = of_find_node_by_name(NULL, "control");
 	if (dp != 0 && !control_of_init(dp))
-		return 0;
+		ret = 0;
+	of_node_put(dp);
 
-	return -ENXIO;
+	return ret;
 }
 
 void cleanup_module(void)
@@ -287,7 +282,7 @@ static int controlfb_pan_display(struct fb_var_screeninfo *var,
  * for controlfb.
  * Note there's no locking in here; it's done in fb_mmap() in fbmem.c.
  */
-static int controlfb_mmap(struct fb_info *info, struct file *file,
+static int controlfb_mmap(struct fb_info *info,
                        struct vm_area_struct *vma)
 {
        unsigned long off, start;
@@ -305,17 +300,17 @@ static int controlfb_mmap(struct fb_info *info, struct file *file,
                        return -EINVAL;
                start = info->fix.mmio_start;
                len = PAGE_ALIGN((start & ~PAGE_MASK)+info->fix.mmio_len);
-               pgprot_val(vma->vm_page_prot) |= _PAGE_NO_CACHE|_PAGE_GUARDED;
+	       vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
        } else {
                /* framebuffer */
-               pgprot_val(vma->vm_page_prot) |= _PAGE_WRITETHRU;
+	       vma->vm_page_prot = pgprot_cached_wthru(vma->vm_page_prot);
        }
        start &= PAGE_MASK;
        if ((vma->vm_end - vma->vm_start + off) > len)
        		return -EINVAL;
        off += start;
        vma->vm_pgoff = off >> PAGE_SHIFT;
-       if (io_remap_page_range(vma, vma->vm_start, off,
+       if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
            vma->vm_end - vma->vm_start, vma->vm_page_prot))
                return -EAGAIN;
 
@@ -329,17 +324,17 @@ static int controlfb_blank(int blank_mode, struct fb_info *info)
 
 	ctrl = ld_le32(CNTRL_REG(p,ctrl));
 	if (blank_mode > 0)
-		switch (blank_mode - 1) {
-		case VESA_VSYNC_SUSPEND:
+		switch (blank_mode) {
+		case FB_BLANK_VSYNC_SUSPEND:
 			ctrl &= ~3;
 			break;
-		case VESA_HSYNC_SUSPEND:
+		case FB_BLANK_HSYNC_SUSPEND:
 			ctrl &= ~0x30;
 			break;
-		case VESA_POWERDOWN:
+		case FB_BLANK_POWERDOWN:
 			ctrl &= ~0x33;
 			/* fall through */
-		case VESA_NO_BLANKING:
+		case FB_BLANK_NORMAL:
 			ctrl |= 0x400;
 			break;
 		default:
@@ -424,13 +419,15 @@ static int __init init_control(struct fb_info_control *p)
 	full = p->total_vram == 0x400000;
 
 	/* Try to pick a video mode out of NVRAM if we have one. */
+#ifdef CONFIG_NVRAM
 	if (default_cmode == CMODE_NVRAM){
 		cmode = nvram_read_byte(NV_CMODE);
 		if(cmode < CMODE_8 || cmode > CMODE_32)
 			cmode = CMODE_8;
 	} else
+#endif
 		cmode=default_cmode;
-
+#ifdef CONFIG_NVRAM
 	if (default_vmode == VMODE_NVRAM) {
 		vmode = nvram_read_byte(NV_VMODE);
 		if (vmode < 1 || vmode > VMODE_MAX ||
@@ -441,7 +438,9 @@ static int __init init_control(struct fb_info_control *p)
 			if (control_mac_modes[vmode - 1].m[full] < cmode)
 				vmode = VMODE_640_480_60;
 		}
-	} else {
+	} else
+#endif
+	{
 		vmode=default_vmode;
 		if (control_mac_modes[vmode - 1].m[full] < cmode) {
 			if (cmode > CMODE_8)
@@ -497,7 +496,7 @@ try_again:
 static void control_set_hardware(struct fb_info_control *p, struct fb_par_control *par)
 {
 	struct control_regvals	*r;
-	volatile struct preg	*rp;
+	volatile struct preg	__iomem *rp;
 	int			i, cmode;
 
 	if (PAR_EQUAL(&p->par, par)) {
@@ -551,19 +550,64 @@ static void control_set_hardware(struct fb_info_control *p, struct fb_par_contro
 
 
 /*
- * Called from fbmem.c for probing & initializing
+ * Parse user speficied options (`video=controlfb:')
  */
-int __init control_init(void)
+static void __init control_setup(char *options)
 {
-	struct device_node *dp;
+	char *this_opt;
 
-	dp = find_devices("control");
-	if (dp != 0 && !control_of_init(dp))
-		return 0;
+	if (!options || !*options)
+		return;
 
-	return -ENXIO;
+	while ((this_opt = strsep(&options, ",")) != NULL) {
+		if (!strncmp(this_opt, "vmode:", 6)) {
+			int vmode = simple_strtoul(this_opt+6, NULL, 0);
+			if (vmode > 0 && vmode <= VMODE_MAX &&
+			    control_mac_modes[vmode - 1].m[1] >= 0)
+				default_vmode = vmode;
+		} else if (!strncmp(this_opt, "cmode:", 6)) {
+			int depth = simple_strtoul(this_opt+6, NULL, 0);
+			switch (depth) {
+			 case CMODE_8:
+			 case CMODE_16:
+			 case CMODE_32:
+			 	default_cmode = depth;
+			 	break;
+			 case 8:
+				default_cmode = CMODE_8;
+				break;
+			 case 15:
+			 case 16:
+				default_cmode = CMODE_16;
+				break;
+			 case 24:
+			 case 32:
+				default_cmode = CMODE_32;
+				break;
+			}
+		}
+	}
 }
 
+static int __init control_init(void)
+{
+	struct device_node *dp;
+	char *option = NULL;
+	int ret = -ENXIO;
+
+	if (fb_get_options("controlfb", &option))
+		return -ENODEV;
+	control_setup(option);
+
+	dp = of_find_node_by_name(NULL, "control");
+	if (dp != 0 && !control_of_init(dp))
+		ret = 0;
+	of_node_put(dp);
+
+	return ret;
+}
+
+module_init(control_init);
 
 /* Work out which banks of VRAM we have installed. */
 /* danj: I guess the card just ignores writes to nonexistant VRAM... */
@@ -646,36 +690,30 @@ static void __init find_vram_size(struct fb_info_control *p)
 static int __init control_of_init(struct device_node *dp)
 {
 	struct fb_info_control	*p;
-	unsigned long		addr;
-	int			i;
+	struct resource		fb_res, reg_res;
 
 	if (control_fb) {
 		printk(KERN_ERR "controlfb: only one control is supported\n");
 		return -ENXIO;
 	}
-	if(dp->n_addrs != 2) {
-		printk(KERN_ERR "expecting 2 address for control (got %d)", dp->n_addrs);
+
+	if (of_pci_address_to_resource(dp, 2, &fb_res) ||
+	    of_pci_address_to_resource(dp, 1, &reg_res)) {
+		printk(KERN_ERR "can't get 2 addresses for control\n");
 		return -ENXIO;
 	}
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (p == 0)
 		return -ENXIO;
 	control_fb = p;	/* save it for cleanups */
-	memset(p, 0, sizeof(*p));
 
 	/* Map in frame buffer and registers */
-	for (i = 0; i < dp->n_addrs; ++i) {
-		addr = dp->addrs[i].address;
-		if (dp->addrs[i].size >= 0x800000) {
-			p->fb_orig_base = addr;
-			p->fb_orig_size = dp->addrs[i].size;
-			/* use the big-endian aperture (??) */
-			p->frame_buffer_phys = addr + 0x800000;
-		} else {
-			p->control_regs_phys = addr;
-			p->control_regs_size = dp->addrs[i].size;
-		}
-	}
+	p->fb_orig_base = fb_res.start;
+	p->fb_orig_size = fb_res.end - fb_res.start + 1;
+	/* use the big-endian aperture (??) */
+	p->frame_buffer_phys = fb_res.start + 0x800000;
+	p->control_regs_phys = reg_res.start;
+	p->control_regs_size = reg_res.end - reg_res.start + 1;
 
 	if (!p->fb_orig_base ||
 	    !request_mem_region(p->fb_orig_base,p->fb_orig_size,"controlfb")) {
@@ -1010,8 +1048,8 @@ static void __init control_init_info(struct fb_info *info, struct fb_info_contro
 	info->par = &p->par;
 	info->fbops = &controlfb_ops;
 	info->pseudo_palette = p->pseudo_palette;
-        info->flags = FBINFO_FLAG_DEFAULT;
-	info->screen_base = (char *) p->frame_buffer + CTRLFB_OFF;
+        info->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_YPAN;
+	info->screen_base = p->frame_buffer + CTRLFB_OFF;
 
 	fb_alloc_cmap(&info->cmap, 256, 0);
 
@@ -1053,44 +1091,4 @@ static void control_cleanup(void)
 	kfree(p);
 }
 
-
-/*
- * Parse user speficied options (`video=controlfb:')
- */
-void __init control_setup(char *options)
-{
-	char *this_opt;
-
-	if (!options || !*options)
-		return;
-
-	while ((this_opt = strsep(&options, ",")) != NULL) {
-		if (!strncmp(this_opt, "vmode:", 6)) {
-			int vmode = simple_strtoul(this_opt+6, NULL, 0);
-			if (vmode > 0 && vmode <= VMODE_MAX &&
-			    control_mac_modes[vmode - 1].m[1] >= 0)
-				default_vmode = vmode;
-		} else if (!strncmp(this_opt, "cmode:", 6)) {
-			int depth = simple_strtoul(this_opt+6, NULL, 0);
-			switch (depth) {
-			 case CMODE_8:
-			 case CMODE_16:
-			 case CMODE_32:
-			 	default_cmode = depth;
-			 	break;
-			 case 8:
-				default_cmode = CMODE_8;
-				break;
-			 case 15:
-			 case 16:
-				default_cmode = CMODE_16;
-				break;
-			 case 24:
-			 case 32:
-				default_cmode = CMODE_32;
-				break;
-			}
-		}
-	}
-}
 

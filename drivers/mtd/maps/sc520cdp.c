@@ -16,8 +16,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
  *
- * $Id: sc520cdp.c,v 1.15 2003/05/21 12:45:20 dwmw2 Exp $
- *
  *
  * The SC520CDP is an evaluation board for the Elan SC520 processor available
  * from AMD. It has two banks of 32-bit Flash ROM, each 8 Megabytes in size,
@@ -25,7 +23,6 @@
  * For details see http://www.amd.com/products/epd/desiging/evalboards/18.elansc520/520_cdp_brief/index.html
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -90,24 +87,24 @@ static struct map_info sc520cdp_map[] = {
 	{
 		.name = "SC520CDP Flash Bank #0",
 		.size = WINDOW_SIZE_0,
-		.buswidth = 4,
+		.bankwidth = 4,
 		.phys = WINDOW_ADDR_0
 	},
 	{
 		.name = "SC520CDP Flash Bank #1",
 		.size = WINDOW_SIZE_1,
-		.buswidth = 4,
+		.bankwidth = 4,
 		.phys = WINDOW_ADDR_1
 	},
 	{
 		.name = "SC520CDP DIL Flash",
 		.size = WINDOW_SIZE_2,
-		.buswidth = 1,
+		.bankwidth = 1,
 		.phys = WINDOW_ADDR_2
 	},
 };
 
-#define NUM_FLASH_BANKS	(sizeof(sc520cdp_map)/sizeof(struct map_info))
+#define NUM_FLASH_BANKS	ARRAY_SIZE(sc520cdp_map)
 
 static struct mtd_info *mymtd[NUM_FLASH_BANKS];
 static struct mtd_info *merged_mtd;
@@ -164,7 +161,7 @@ struct sc520_par_table
 	unsigned long default_address;
 };
 
-static struct sc520_par_table par_table[NUM_FLASH_BANKS] =
+static const struct sc520_par_table par_table[NUM_FLASH_BANKS] =
 {
 	{	/* Flash Bank #0: selected by ROMCS0 */
 		SC520_PAR_ROMCS0,
@@ -186,12 +183,12 @@ static struct sc520_par_table par_table[NUM_FLASH_BANKS] =
 
 static void sc520cdp_setup_par(void)
 {
-	volatile unsigned long *mmcr;
+	volatile unsigned long __iomem *mmcr;
 	unsigned long mmcr_val;
 	int i, j;
 
 	/* map in SC520's MMCR area */
-	mmcr = (unsigned long *)ioremap_nocache(SC520_MMCR_BASE, SC520_MMCR_EXTENT);
+	mmcr = ioremap_nocache(SC520_MMCR_BASE, SC520_MMCR_EXTENT);
 	if(!mmcr) { /* ioremap_nocache failed: skip the PAR reprogramming */
 		/* force physical address fields to BIOS defaults: */
 		for(i = 0; i < NUM_FLASH_BANKS; i++)
@@ -200,7 +197,7 @@ static void sc520cdp_setup_par(void)
 	}
 
 	/*
-	** Find the PARxx registers that are reponsible for activating
+	** Find the PARxx registers that are responsible for activating
 	** ROMCS0, ROMCS1 and BOOTCS. Reprogram each of these with a
 	** new value from the table.
 	*/
@@ -223,7 +220,7 @@ static void sc520cdp_setup_par(void)
 			sc520cdp_map[i].phys = par_table[i].default_address;
 		}
 	}
-	iounmap((void *)mmcr);
+	iounmap(mmcr);
 }
 #endif
 
@@ -231,17 +228,18 @@ static void sc520cdp_setup_par(void)
 static int __init init_sc520cdp(void)
 {
 	int i, devices_found = 0;
-	
+
 #ifdef REPROGRAM_PAR
 	/* reprogram PAR registers so flash appears at the desired addresses */
 	sc520cdp_setup_par();
 #endif
 
 	for (i = 0; i < NUM_FLASH_BANKS; i++) {
-		printk(KERN_NOTICE "SC520 CDP flash device: 0x%lx at 0x%lx\n",
-		       sc520cdp_map[i].size, sc520cdp_map[i].phys);
+		printk(KERN_NOTICE "SC520 CDP flash device: 0x%Lx at 0x%Lx\n",
+			(unsigned long long)sc520cdp_map[i].size,
+			(unsigned long long)sc520cdp_map[i].phys);
 
-		sc520cdp_map[i].virt = (unsigned long)ioremap_nocache(sc520cdp_map[i].phys, sc520cdp_map[i].size);
+		sc520cdp_map[i].virt = ioremap_nocache(sc520cdp_map[i].phys, sc520cdp_map[i].size);
 
 		if (!sc520cdp_map[i].virt) {
 			printk("Failed to ioremap_nocache\n");
@@ -261,7 +259,7 @@ static int __init init_sc520cdp(void)
 			++devices_found;
 		}
 		else {
-			iounmap((void *)sc520cdp_map[i].virt);
+			iounmap(sc520cdp_map[i].virt);
 		}
 	}
 	if(devices_found >= 2) {
@@ -278,7 +276,7 @@ static int __init init_sc520cdp(void)
 static void __exit cleanup_sc520cdp(void)
 {
 	int i;
-	
+
 	if (merged_mtd) {
 		del_mtd_device(merged_mtd);
 		mtd_concat_destroy(merged_mtd);
@@ -290,8 +288,8 @@ static void __exit cleanup_sc520cdp(void)
 		if (mymtd[i])
 			map_destroy(mymtd[i]);
 		if (sc520cdp_map[i].virt) {
-			iounmap((void *)sc520cdp_map[i].virt);
-			sc520cdp_map[i].virt = 0;
+			iounmap(sc520cdp_map[i].virt);
+			sc520cdp_map[i].virt = NULL;
 		}
 	}
 }

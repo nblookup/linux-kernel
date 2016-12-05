@@ -10,14 +10,12 @@
  * Further modifications to make this work:
  * Copyright (c) 1998-2000 Harald Koerfgen
  */
-#include <linux/config.h>
 #include <asm/asm.h>
 #include <asm/cachectl.h>
 #include <asm/fpregdef.h>
 #include <asm/mipsregs.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/page.h>
-#include <asm/processor.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
 #include <asm/thread_info.h>
@@ -31,12 +29,12 @@
  * Offset to the current process status flags, the first 32 bytes of the
  * stack are not used.
  */
-#define ST_OFF (THREAD_SIZE - 32 - PT_SIZE + PT_STATUS)
+#define ST_OFF (_THREAD_SIZE - 32 - PT_SIZE + PT_STATUS)
 
 /*
  * FPU context is saved iff the process has used it's FPU in the current
  * time slice as indicated by TIF_USEDFPU.  In any case, the CU1 bit for user
- * space STATUS register should be 0, so that a process *always* starts its 
+ * space STATUS register should be 0, so that a process *always* starts its
  * userland with FPU disabled after each context switch.
  *
  * FPU will be enabled as soon as the process accesses FPU again, through
@@ -48,15 +46,12 @@
  *                     struct thread_info *next_ti) )
  */
 LEAF(resume)
-#ifndef CONFIG_CPU_HAS_LLSC
-	sw      zero, ll_bit
-#endif
 	mfc0	t1, CP0_STATUS
 	sw	t1, THREAD_STATUS(a0)
 	cpu_save_nonscratch a0
 	sw	ra, THREAD_REG31(a0)
 
-	/* 
+	/*
 	 * check if we need to save FPU registers
 	 */
 	lw	t3, TASK_THREAD_INFO(a0)
@@ -87,11 +82,11 @@ LEAF(resume)
 	move	$28, a2
 	cpu_restore_nonscratch a1
 
-	addiu	t1, $28, THREAD_SIZE-32
+	addiu	t1, $28, _THREAD_SIZE - 32
 	sw	t1, kernelsp
 
 	mfc0	t1, CP0_STATUS		/* Do we really need this? */
-	li	a3, 0xff00
+	li	a3, 0xff01
 	and	t1, a3
 	lw	a2, THREAD_STATUS(a1)
 	nor	a3, $0, a3

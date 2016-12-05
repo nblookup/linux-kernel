@@ -1,89 +1,37 @@
 #ifndef _LINUX_HDREG_H
 #define _LINUX_HDREG_H
 
-/*
- * This file contains some defines for the AT-hd-controller.
- * Various sources.
- */
-
-/* ide.c has its own port definitions in "ide.h" */
-
-#define HD_IRQ		14
-
-/* Hd controller regs. Ref: IBM AT Bios-listing */
-#define HD_DATA		0x1f0		/* _CTL when writing */
-#define HD_ERROR	0x1f1		/* see err-bits */
-#define HD_NSECTOR	0x1f2		/* nr of sectors to read/write */
-#define HD_SECTOR	0x1f3		/* starting sector */
-#define HD_LCYL		0x1f4		/* starting cylinder */
-#define HD_HCYL		0x1f5		/* high byte of starting cyl */
-#define HD_CURRENT	0x1f6		/* 101dhhhh , d=drive, hhhh=head */
-#define HD_STATUS	0x1f7		/* see status-bits */
-#define HD_FEATURE	HD_ERROR	/* same io address, read=error, write=feature */
-#define HD_PRECOMP	HD_FEATURE	/* obsolete use of this port - predates IDE */
-#define HD_COMMAND	HD_STATUS	/* same io address, read=status, write=cmd */
-
-#define HD_CMD		0x3f6		/* used for resets */
-#define HD_ALTSTATUS	0x3f6		/* same as HD_STATUS but doesn't clear irq */
-
-/* remainder is shared between hd.c, ide.c, ide-cd.c, and the hdparm utility */
-
-/* Bits of HD_STATUS */
-#define ERR_STAT		0x01
-#define INDEX_STAT		0x02
-#define ECC_STAT		0x04	/* Corrected error */
-#define DRQ_STAT		0x08
-#define SEEK_STAT		0x10
-#define SRV_STAT		0x10
-#define WRERR_STAT		0x20
-#define READY_STAT		0x40
-#define BUSY_STAT		0x80
-
-/* Bits for HD_ERROR */
-#define MARK_ERR		0x01	/* Bad address mark */
-#define TRK0_ERR		0x02	/* couldn't find track 0 */
-#define ABRT_ERR		0x04	/* Command aborted */
-#define MCR_ERR			0x08	/* media change request */
-#define ID_ERR			0x10	/* ID field not found */
-#define MC_ERR			0x20	/* media changed */
-#define ECC_ERR			0x40	/* Uncorrectable ECC error */
-#define BBD_ERR			0x80	/* pre-EIDE meaning:  block marked bad */
-#define ICRC_ERR		0x80	/* new meaning:  CRC error during transfer */
-
-/* Bits of HD_NSECTOR */
-#define CD			0x01
-#define IO			0x02
-#define REL			0x04
-#define TAG_MASK		0xf8
-
+#include <linux/types.h>
 
 /*
  * Command Header sizes for IOCTL commands
  */
 
-#define HDIO_DRIVE_CMD_HDR_SIZE		(4 * sizeof(u8))
-#define HDIO_DRIVE_HOB_HDR_SIZE		(8 * sizeof(u8))
-#define HDIO_DRIVE_TASK_HDR_SIZE	(8 * sizeof(u8))
+#define HDIO_DRIVE_CMD_HDR_SIZE		(4 * sizeof(__u8))
+#define HDIO_DRIVE_HOB_HDR_SIZE		(8 * sizeof(__u8))
+#define HDIO_DRIVE_TASK_HDR_SIZE	(8 * sizeof(__u8))
 
-#define IDE_DRIVE_TASK_INVALID		-1
 #define IDE_DRIVE_TASK_NO_DATA		0
+#ifndef __KERNEL__
+#define IDE_DRIVE_TASK_INVALID		-1
 #define IDE_DRIVE_TASK_SET_XFER		1
-
 #define IDE_DRIVE_TASK_IN		2
-
 #define IDE_DRIVE_TASK_OUT		3
+#endif
 #define IDE_DRIVE_TASK_RAW_WRITE	4
 
 /*
  * Define standard taskfile in/out register
  */
-#define IDE_TASKFILE_STD_OUT_FLAGS	0xFE
 #define IDE_TASKFILE_STD_IN_FLAGS	0xFE
-#define IDE_HOB_STD_OUT_FLAGS		0x3C
 #define IDE_HOB_STD_IN_FLAGS		0x3C
+#ifndef __KERNEL__
+#define IDE_TASKFILE_STD_OUT_FLAGS	0xFE
+#define IDE_HOB_STD_OUT_FLAGS		0x3C
 
 typedef unsigned char task_ioreg_t;
 typedef unsigned long sata_ioreg_t;
+#endif
 
 typedef union ide_reg_valid_s {
 	unsigned all				: 16;
@@ -109,8 +57,8 @@ typedef union ide_reg_valid_s {
 } ide_reg_valid_t;
 
 typedef struct ide_task_request_s {
-	task_ioreg_t	io_ports[8];
-	task_ioreg_t	hob_ports[8];
+	__u8		io_ports[8];
+	__u8		hob_ports[8]; /* bytes 6 and 7 are unused */
 	ide_reg_valid_t	out_flags;
 	ide_reg_valid_t	in_flags;
 	int		data_phase;
@@ -126,36 +74,35 @@ typedef struct ide_ioctl_request_s {
 } ide_ioctl_request_t;
 
 struct hd_drive_cmd_hdr {
-	task_ioreg_t command;
-	task_ioreg_t sector_number;
-	task_ioreg_t feature;
-	task_ioreg_t sector_count;
+	__u8 command;
+	__u8 sector_number;
+	__u8 feature;
+	__u8 sector_count;
 };
 
+#ifndef __KERNEL__
 typedef struct hd_drive_task_hdr {
-	task_ioreg_t data;
-	task_ioreg_t feature;
-	task_ioreg_t sector_count;
-	task_ioreg_t sector_number;
-	task_ioreg_t low_cylinder;
-	task_ioreg_t high_cylinder;
-	task_ioreg_t device_head;
-	task_ioreg_t command;
+	__u8 data;
+	__u8 feature;
+	__u8 sector_count;
+	__u8 sector_number;
+	__u8 low_cylinder;
+	__u8 high_cylinder;
+	__u8 device_head;
+	__u8 command;
 } task_struct_t;
 
 typedef struct hd_drive_hob_hdr {
-	task_ioreg_t data;
-	task_ioreg_t feature;
-	task_ioreg_t sector_count;
-	task_ioreg_t sector_number;
-	task_ioreg_t low_cylinder;
-	task_ioreg_t high_cylinder;
-	task_ioreg_t device_head;
-	task_ioreg_t control;
+	__u8 data;
+	__u8 feature;
+	__u8 sector_count;
+	__u8 sector_number;
+	__u8 low_cylinder;
+	__u8 high_cylinder;
+	__u8 device_head;
+	__u8 control;
 } hob_struct_t;
-
-#define TASKFILE_INVALID		0x7fff
-#define TASKFILE_48			0x8000
+#endif
 
 #define TASKFILE_NO_DATA		0x0000
 
@@ -171,13 +118,18 @@ typedef struct hd_drive_hob_hdr {
 #define TASKFILE_IN_DMAQ		0x0080
 #define TASKFILE_OUT_DMAQ		0x0100
 
+#ifndef __KERNEL__
 #define TASKFILE_P_IN			0x0200
 #define TASKFILE_P_OUT			0x0400
 #define TASKFILE_P_IN_DMA		0x0800
 #define TASKFILE_P_OUT_DMA		0x1000
 #define TASKFILE_P_IN_DMAQ		0x2000
 #define TASKFILE_P_OUT_DMAQ		0x4000
+#define TASKFILE_48			0x8000
+#define TASKFILE_INVALID		0x7fff
+#endif
 
+#ifndef __KERNEL__
 /* ATA/ATAPI Commands pre T13 Spec */
 #define WIN_NOP				0x00
 /*
@@ -328,27 +280,6 @@ typedef struct hd_drive_hob_hdr {
 /* WIN_SETFEATURES sub-commands */
 #define SETFEATURES_EN_8BIT	0x01	/* Enable 8-Bit Transfers */
 #define SETFEATURES_EN_WCACHE	0x02	/* Enable write cache */
-#define SETFEATURES_XFER	0x03	/* Set transfer mode */
-#	define XFER_UDMA_7	0x47	/* 0100|0111 */
-#	define XFER_UDMA_6	0x46	/* 0100|0110 */
-#	define XFER_UDMA_5	0x45	/* 0100|0101 */
-#	define XFER_UDMA_4	0x44	/* 0100|0100 */
-#	define XFER_UDMA_3	0x43	/* 0100|0011 */
-#	define XFER_UDMA_2	0x42	/* 0100|0010 */
-#	define XFER_UDMA_1	0x41	/* 0100|0001 */
-#	define XFER_UDMA_0	0x40	/* 0100|0000 */
-#	define XFER_MW_DMA_2	0x22	/* 0010|0010 */
-#	define XFER_MW_DMA_1	0x21	/* 0010|0001 */
-#	define XFER_MW_DMA_0	0x20	/* 0010|0000 */
-#	define XFER_SW_DMA_2	0x12	/* 0001|0010 */
-#	define XFER_SW_DMA_1	0x11	/* 0001|0001 */
-#	define XFER_SW_DMA_0	0x10	/* 0001|0000 */
-#	define XFER_PIO_4	0x0C	/* 0000|1100 */
-#	define XFER_PIO_3	0x0B	/* 0000|1011 */
-#	define XFER_PIO_2	0x0A	/* 0000|1010 */
-#	define XFER_PIO_1	0x09	/* 0000|1001 */
-#	define XFER_PIO_0	0x08	/* 0000|1000 */
-#	define XFER_PIO_SLOW	0x00	/* 0000|0000 */
 #define SETFEATURES_DIS_DEFECT	0x04	/* Disable Defect Management */
 #define SETFEATURES_EN_APM	0x05	/* Enable advanced power management */
 #define SETFEATURES_EN_SAME_R	0x22	/* for a region ATA-1 */
@@ -372,7 +303,7 @@ typedef struct hd_drive_hob_hdr {
 #define SETFEATURES_EN_RLA	0xAA	/* Enable read look-ahead feature */
 #define SETFEATURES_PREFETCH	0xAB	/* Sets drive prefetch value */
 #define SETFEATURES_EN_REST	0xAC	/* ATA-1 */
-#define SETFEATURES_4B_RW_LONG	0xBB	/* Set Lenght of 4 bytes */
+#define SETFEATURES_4B_RW_LONG	0xBB	/* Set Length of 4 bytes */
 #define SETFEATURES_DIS_AAM	0xC2	/* Disable Automatic Acoustic Management */
 #define SETFEATURES_EN_RPOD	0xCC	/* Enable reverting to power on defaults */
 #define SETFEATURES_DIS_RI	0xDD	/* Disable release interrupt ATAPI */
@@ -387,6 +318,7 @@ typedef struct hd_drive_hob_hdr {
 #define SECURITY_ERASE_UNIT		0xBD
 #define SECURITY_FREEZE_LOCK		0xBE
 #define SECURITY_DISABLE_PASSWORD	0xBF
+#endif /* __KERNEL__ */
 
 struct hd_geometry {
       unsigned char heads;
@@ -430,9 +362,11 @@ struct hd_geometry {
 #define HDIO_SET_NOWERR		0x0325	/* change ignore-write-error flag */
 #define HDIO_SET_DMA		0x0326	/* change use-dma flag */
 #define HDIO_SET_PIO_MODE	0x0327	/* reconfig interface to new speed */
+#ifndef __KERNEL__
 #define HDIO_SCAN_HWIF		0x0328	/* register and (re)scan interface */
-#define HDIO_SET_NICE		0x0329	/* set nice flags */
 #define HDIO_UNREGISTER_HWIF	0x032a  /* unregister interface */
+#endif
+#define HDIO_SET_NICE		0x0329	/* set nice flags */
 #define HDIO_SET_WCACHE		0x032b	/* change write cache enable-disable */
 #define HDIO_SET_ACOUSTIC	0x032c	/* change acoustic behavior */
 #define HDIO_SET_BUSSTATE	0x032d	/* set the bus state of the hwif */
@@ -449,12 +383,12 @@ enum {
 /* hd/ide ctl's that pass (arg) ptrs to user space are numbered 0x033n/0x033n */
 /* 0x330 is reserved - used to be HDIO_GETGEO_BIG */
 /* 0x331 is reserved - used to be HDIO_GETGEO_BIG_RAW */
-
-#define HDIO_SET_IDE_SCSI      0x0338
-#define HDIO_SET_SCSI_IDE      0x0339
+/* 0x338 is reserved - used to be HDIO_SET_IDE_SCSI */
+/* 0x339 is reserved - used to be HDIO_SET_SCSI_IDE */
 
 #define __NEW_HD_DRIVE_ID
 
+#ifndef __KERNEL__
 /*
  * Structure returned by HDIO_GET_IDENTITY, as per ANSI NCITS ATA6 rev.1b spec.
  *
@@ -518,7 +452,6 @@ struct hd_driveid {
 	unsigned short	words69_70[2];	/* reserved words 69-70
 					 * future command overlap and queuing
 					 */
-	/* HDIO_GET_IDENTITY currently returns only words 0 through 70 */
 	unsigned short	words71_74[4];	/* reserved words 71-74
 					 * for IDENTIFY PACKET DEVICE command
 					 */
@@ -707,6 +640,7 @@ struct hd_driveid {
 					 *  7:0 Signature
 					 */
 };
+#endif /* __KERNEL__ */
 
 /*
  * IDE "nice" flags. These are used on a per drive basis to determine
@@ -715,8 +649,10 @@ struct hd_driveid {
  */
 #define IDE_NICE_DSC_OVERLAP	(0)	/* per the DSC overlap protocol */
 #define IDE_NICE_ATAPI_OVERLAP	(1)	/* not supported yet */
-#define IDE_NICE_0		(2)	/* when sure that it won't affect us */
 #define IDE_NICE_1		(3)	/* when probably won't affect us much */
+#ifndef __KERNEL__
+#define IDE_NICE_0		(2)	/* when sure that it won't affect us */
 #define IDE_NICE_2		(4)	/* when we know it's on our expense */
+#endif
 
 #endif	/* _LINUX_HDREG_H */

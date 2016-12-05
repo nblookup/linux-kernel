@@ -10,113 +10,192 @@
  *  2001-09-13: Cliff Brake <cbrake@accelent.com>
  *              Initial code
  *
- * Expected command line: mem=32M initrd=0xa1000000,4M root=/dev/ram ramdisk=8192
+ *  2005-02-15: Cliff Brake <cliff.brake@gmail.com>
+ *  		<http://www.vibren.com> <http://bec-systems.com>
+ *              Updated for 2.6 kernel
+ *
  */
-#include <linux/kernel.h>
+
 #include <linux/init.h>
-#include <linux/major.h>
-#include <linux/fs.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
+#include <linux/platform_device.h>
+#include <linux/fb.h>
 
 #include <asm/setup.h>
 #include <asm/memory.h>
 #include <asm/mach-types.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
+#include <mach/pxa25x.h>
+#include <mach/idp.h>
+#include <mach/pxafb.h>
+#include <mach/bitfield.h>
+#include <mach/mmc.h>
+
 #include "generic.h"
+#include "devices.h"
 
-#ifndef PXA_IDP_REV02
-/* shadow registers for write only registers */
-unsigned int idp_cpld_led_control_shadow = 0x1;
-unsigned int idp_cpld_periph_pwr_shadow = 0xd;
-unsigned int ipd_cpld_cir_shadow = 0;
-unsigned int idp_cpld_kb_col_high_shadow = 0;
-unsigned int idp_cpld_kb_col_low_shadow = 0;
-unsigned int idp_cpld_pccard_en_shadow = 0xC3;
-unsigned int idp_cpld_gpioh_dir_shadow = 0;
-unsigned int idp_cpld_gpioh_value_shadow = 0;
-unsigned int idp_cpld_gpiol_dir_shadow = 0;
-unsigned int idp_cpld_gpiol_value_shadow = 0;
-
-/*
- * enable all LCD signals -- they should still be on
- * write protect flash
- * enable all serial port transceivers
+/* TODO:
+ * - add pxa2xx_audio_ops_t device structure
+ * - Ethernet interrupt
  */
 
-unsigned int idp_control_port_shadow = ((0x7 << 21) | 		/* LCD power */
-					(0x1 << 19) |		/* disable flash write enable */
-					(0x7 << 9));		/* enable serial port transeivers */
+static unsigned long idp_pin_config[] __initdata = {
+	/* LCD */
+	GPIOxx_LCD_DSTN_16BPP,
 
-#endif
+	/* BTUART */
+	GPIO42_BTUART_RXD,
+	GPIO43_BTUART_TXD,
+	GPIO44_BTUART_CTS,
+	GPIO45_BTUART_RTS,
 
-static int __init idp_init(void)
+	/* STUART */
+	GPIO46_STUART_RXD,
+	GPIO47_STUART_TXD,
+
+	/* MMC */
+	GPIO6_MMC_CLK,
+	GPIO8_MMC_CS0,
+
+	/* Ethernet */
+	GPIO33_nCS_5,	/* Ethernet CS */
+	GPIO4_GPIO,	/* Ethernet IRQ */
+};
+
+static struct resource smc91x_resources[] = {
+	[0] = {
+		.start	= (IDP_ETH_PHYS + 0x300),
+		.end	= (IDP_ETH_PHYS + 0xfffff),
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= IRQ_GPIO(4),
+		.end	= IRQ_GPIO(4),
+		.flags	= IORESOURCE_IRQ | IORESOURCE_IRQ_HIGHEDGE,
+	}
+};
+
+static struct platform_device smc91x_device = {
+	.name		= "smc91x",
+	.id		= 0,
+	.num_resources	= ARRAY_SIZE(smc91x_resources),
+	.resource	= smc91x_resources,
+};
+
+static void idp_backlight_power(int on)
 {
-	printk("idp_init()\n");
-	return 0;
+	if (on) {
+		IDP_CPLD_LCD |= (1<<1);
+	} else {
+		IDP_CPLD_LCD &= ~(1<<1);
+	}
 }
 
-__initcall(idp_init);
-
-static void __init idp_init_irq(void)
+static void idp_vlcd(int on)
 {
-	pxa_init_irq();
+	if (on) {
+		IDP_CPLD_LCD |= (1<<2);
+	} else {
+		IDP_CPLD_LCD &= ~(1<<2);
+	}
+}
+
+static void idp_lcd_power(int on, struct fb_var_screeninfo *var)
+{
+	if (on) {
+		IDP_CPLD_LCD |= (1<<0);
+	} else {
+		IDP_CPLD_LCD &= ~(1<<0);
+	}
+
+	/* call idp_vlcd for now as core driver does not support
+	 * both power and vlcd hooks.  Note, this is not technically
+	 * the correct sequence, but seems to work.  Disclaimer:
+	 * this may eventually damage the display.
+	 */
+
+	idp_vlcd(on);
+}
+
+static struct pxafb_mode_info sharp_lm8v31_mode = {
+	.pixclock	= 270000,
+	.xres		= 640,
+	.yres		= 480,
+	.bpp		= 16,
+	.hsync_len	= 1,
+	.left_margin	= 3,
+	.right_margin	= 3,
+	.vsync_len	= 1,
+	.upper_margin	= 0,
+	.lower_margin	= 0,
+	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
+	.cmap_greyscale	= 0,
+};
+
+static struct pxafb_mach_info sharp_lm8v31 = {
+	.modes          = &sharp_lm8v31_mode,
+	.num_modes      = 1,
+	.cmap_inverse	= 0,
+	.cmap_static	= 0,
+	.lcd_conn	= LCD_COLOR_DSTN_16BPP | LCD_PCLK_EDGE_FALL |
+			  LCD_AC_BIAS_FREQ(255),
+	.pxafb_backlight_power = &idp_backlight_power,
+	.pxafb_lcd_power = &idp_lcd_power
+};
+
+static struct pxamci_platform_data idp_mci_platform_data = {
+	.ocr_mask		= MMC_VDD_32_33|MMC_VDD_33_34,
+	.gpio_card_detect	= -1,
+	.gpio_card_ro		= -1,
+	.gpio_power		= -1,
+};
+
+static void __init idp_init(void)
+{
+	printk("idp_init()\n");
+
+	pxa2xx_mfp_config(ARRAY_AND_SIZE(idp_pin_config));
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
+
+	platform_device_register(&smc91x_device);
+	//platform_device_register(&mst_audio_device);
+	pxa_set_fb_info(NULL, &sharp_lm8v31);
+	pxa_set_mci_info(&idp_mci_platform_data);
 }
 
 static struct map_desc idp_io_desc[] __initdata = {
- /* virtual     physical    length      type */
-
-
-#ifndef PXA_IDP_REV02
-  { IDP_CTRL_PORT_BASE,
-    IDP_CTRL_PORT_PHYS,
-    IDP_CTRL_PORT_SIZE,
-    MT_DEVICE },
-#endif
-
-  { IDP_IDE_BASE,
-    IDP_IDE_PHYS,
-    IDP_IDE_SIZE,
-    MT_DEVICE },
-  { IDP_ETH_BASE,
-    IDP_ETH_PHYS,
-    IDP_ETH_SIZE,
-    MT_DEVICE },
-  { IDP_COREVOLT_BASE,
-    IDP_COREVOLT_PHYS,
-    IDP_COREVOLT_SIZE,
-    MT_DEVICE },
-  { IDP_CPLD_BASE,
-    IDP_CPLD_PHYS,
-    IDP_CPLD_SIZE,
-    MT_DEVICE }
+  	{
+		.virtual	=  IDP_COREVOLT_VIRT,
+		.pfn		= __phys_to_pfn(IDP_COREVOLT_PHYS),
+		.length		= IDP_COREVOLT_SIZE,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	=  IDP_CPLD_VIRT,
+		.pfn		= __phys_to_pfn(IDP_CPLD_PHYS),
+		.length		= IDP_CPLD_SIZE,
+		.type		= MT_DEVICE
+	}
 };
 
 static void __init idp_map_io(void)
 {
-	pxa_map_io();
+	pxa25x_map_io();
 	iotable_init(idp_io_desc, ARRAY_SIZE(idp_io_desc));
-
-	set_irq_type(IRQ_TO_GPIO_2_80(TOUCH_PANEL_IRQ), TOUCH_PANEL_IRQ_EDGE);
-
-	// serial ports 2 & 3
-	pxa_gpio_mode(GPIO42_BTRXD_MD);
-	pxa_gpio_mode(GPIO43_BTTXD_MD);
-	pxa_gpio_mode(GPIO44_BTCTS_MD);
-	pxa_gpio_mode(GPIO45_BTRTS_MD);
-	pxa_gpio_mode(GPIO46_STRXD_MD);
-	pxa_gpio_mode(GPIO47_STTXD_MD);
-
 }
 
 
-MACHINE_START(PXA_IDP, "Accelent Xscale IDP")
-	MAINTAINER("Accelent Systems Inc.")
-	BOOT_MEM(0xa0000000, 0x40000000, 0xfc000000)
-	MAPIO(idp_map_io)
-	INITIRQ(idp_init_irq)
+MACHINE_START(PXA_IDP, "Vibren PXA255 IDP")
+	/* Maintainer: Vibren Technologies */
+	.map_io		= idp_map_io,
+	.init_irq	= pxa25x_init_irq,
+	.timer		= &pxa_timer,
+	.init_machine	= idp_init,
 MACHINE_END

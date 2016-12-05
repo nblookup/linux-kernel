@@ -1,10 +1,8 @@
 /*
- * $Id: impa7.c,v 1.9 2003/06/23 11:47:43 dwmw2 Exp $
- *
  * Handle mapping of the NOR flash on implementa A7 boards
  *
  * Copyright 2002 SYSGO Real-Time Solutions GmbH
- * 
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
@@ -17,7 +15,6 @@
 #include <asm/io.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
-#include <linux/config.h>
 
 #ifdef CONFIG_MTD_PARTITIONS
 #include <linux/mtd/partitions.h>
@@ -30,32 +27,32 @@
 #define NUM_FLASHBANKS 2
 #define BUSWIDTH     4
 
-/* can be { "cfi_probe", "jedec_probe", "map_rom", 0 }; */
-#define PROBETYPES { "jedec_probe", 0 }
+/* can be { "cfi_probe", "jedec_probe", "map_rom", NULL } */
+#define PROBETYPES { "jedec_probe", NULL }
 
 #define MSG_PREFIX "impA7:"   /* prefix for our printk()'s */
 #define MTDID      "impa7-%d"  /* for mtdparts= partitioning */
 
-static struct mtd_info *impa7_mtd[NUM_FLASHBANKS] = { 0 };
+static struct mtd_info *impa7_mtd[NUM_FLASHBANKS];
 
 
 static struct map_info impa7_map[NUM_FLASHBANKS] = {
 	{
 		.name = "impA7 NOR Flash Bank #0",
 		.size = WINDOW_SIZE0,
-		.buswidth = BUSWIDTH,
+		.bankwidth = BUSWIDTH,
 	},
 	{
 		.name = "impA7 NOR Flash Bank #1",
 		.size = WINDOW_SIZE1,
-		.buswidth = BUSWIDTH,
+		.bankwidth = BUSWIDTH,
 	},
 };
 
 #ifdef CONFIG_MTD_PARTITIONS
 
 /*
- * MTD partitioning stuff 
+ * MTD partitioning stuff
  */
 static struct mtd_partition static_partitions[] =
 {
@@ -73,7 +70,7 @@ static struct mtd_partition *mtd_parts[NUM_FLASHBANKS];
 
 static const char *probes[] = { "cmdlinepart", NULL };
 
-int __init init_impa7(void)
+static int __init init_impa7(void)
 {
 	static const char *rom_probe_types[] = PROBETYPES;
 	const char **type;
@@ -91,8 +88,7 @@ int __init init_impa7(void)
 		       pt[i].size, pt[i].addr);
 
 		impa7_map[i].phys = pt[i].addr;
-		impa7_map[i].virt = (unsigned long)
-		  ioremap(pt[i].addr, pt[i].size);
+		impa7_map[i].virt = ioremap(pt[i].addr, pt[i].size);
 		if (!impa7_map[i].virt) {
 			printk(MSG_PREFIX "failed to ioremap\n");
 			return -EIO;
@@ -109,9 +105,9 @@ int __init init_impa7(void)
 			impa7_mtd[i]->owner = THIS_MODULE;
 			devicesfound++;
 #ifdef CONFIG_MTD_PARTITIONS
-			mtd_parts_nb[i] = parse_mtd_partitions(impa7_mtd[i], 
+			mtd_parts_nb[i] = parse_mtd_partitions(impa7_mtd[i],
 							       probes,
-							       &mtd_parts[i], 
+							       &mtd_parts[i],
 							       0);
 			if (mtd_parts_nb[i] > 0) {
 				part_type = "command line";
@@ -122,16 +118,16 @@ int __init init_impa7(void)
 			}
 
 			printk(KERN_NOTICE MSG_PREFIX
-			       "using %s partition definition\n", 
+			       "using %s partition definition\n",
 			       part_type);
-			add_mtd_partitions(impa7_mtd[i], 
+			add_mtd_partitions(impa7_mtd[i],
 					   mtd_parts[i], mtd_parts_nb[i]);
 #else
 			add_mtd_device(impa7_mtd[i]);
 
 #endif
 		}
-		else 
+		else
 			iounmap((void *)impa7_map[i].virt);
 	}
 	return devicesfound == 0 ? -ENXIO : 0;

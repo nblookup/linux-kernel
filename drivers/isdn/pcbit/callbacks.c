@@ -15,12 +15,10 @@
  * NULL pointer dereference in cb_in_1 (originally fixed in 2.0)
  */
 
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/skbuff.h>
 
@@ -121,23 +119,6 @@ void cb_out_2(struct pcbit_dev * dev, struct pcbit_chan* chan,
         chan->s_refnum = refnum;
 
         pcbit_l2_write(dev, MSG_SELP_REQ, refnum, skb, len);
-}
-
-
-/*
- * Disconnect received (actually RELEASE COMPLETE) 
- * This means we were not able to establish connection with remote
- * Inform the big boss above
- */
-void cb_out_3(struct pcbit_dev * dev, struct pcbit_chan* chan,
-	      struct callb_data *data) 
-{
-        isdn_ctrl ictl;
-
-        ictl.command = ISDN_STAT_DHUP;
-        ictl.driver=dev->id;
-        ictl.arg=chan->id;
-        dev->dev_if->statcallb(&ictl);
 }
 
 

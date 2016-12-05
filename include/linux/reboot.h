@@ -22,6 +22,7 @@
  * POWER_OFF   Stop OS and remove all power from system, if possible.
  * RESTART2    Restart system using given command string.
  * SW_SUSPEND  Suspend system using software suspend if compiled in.
+ * KEXEC       Restart system using a previously loaded Linux kernel
  */
 
 #define	LINUX_REBOOT_CMD_RESTART	0x01234567
@@ -31,6 +32,7 @@
 #define	LINUX_REBOOT_CMD_POWER_OFF	0x4321FEDC
 #define	LINUX_REBOOT_CMD_RESTART2	0xA1B2C3D4
 #define	LINUX_REBOOT_CMD_SW_SUSPEND	0xD000FCE2
+#define	LINUX_REBOOT_CMD_KEXEC		0x45584543
 
 
 #ifdef __KERNEL__
@@ -48,6 +50,34 @@ extern int unregister_reboot_notifier(struct notifier_block *);
 extern void machine_restart(char *cmd);
 extern void machine_halt(void);
 extern void machine_power_off(void);
+
+extern void machine_shutdown(void);
+struct pt_regs;
+extern void machine_crash_shutdown(struct pt_regs *);
+
+/* 
+ * Architecture independent implemenations of sys_reboot commands.
+ */
+
+extern void kernel_restart_prepare(char *cmd);
+extern void kernel_restart(char *cmd);
+extern void kernel_halt(void);
+extern void kernel_power_off(void);
+
+extern int C_A_D; /* for sysctl */
+void ctrl_alt_del(void);
+
+#define POWEROFF_CMD_PATH_LEN	256
+extern char poweroff_cmd[POWEROFF_CMD_PATH_LEN];
+
+extern int orderly_poweroff(bool force);
+
+/*
+ * Emergency restart, callable from an interrupt handler.
+ */
+
+extern void emergency_restart(void);
+#include <asm/emergency-restart.h>
 
 #endif
 

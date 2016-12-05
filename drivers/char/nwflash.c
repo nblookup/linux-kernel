@@ -21,12 +21,12 @@
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/proc_fs.h>
-#include <linux/sched.h>
 #include <linux/miscdevice.h>
 #include <linux/spinlock.h>
 #include <linux/rwsem.h>
 #include <linux/init.h>
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
+#include <linux/jiffies.h>
 
 #include <asm/hardware/dec21285.h>
 #include <asm/io.h>
@@ -40,14 +40,11 @@
 
 #define	NWFLASH_VERSION "6.4"
 
+static DEFINE_MUTEX(flash_mutex);
 static void kick_open(void);
 static int get_flash_id(void);
 static int erase_block(int nBlock);
-static int write_block(unsigned long p, const char *buf, int count);
-static int flash_ioctl(struct inode *inodep, struct file *filep, unsigned int cmd, unsigned long arg);
-static ssize_t flash_read(struct file *file, char *buf, size_t count, loff_t * ppos);
-static ssize_t flash_write(struct file *file, const char *buf, size_t count, loff_t * ppos);
-static loff_t flash_llseek(struct file *file, loff_t offset, int orig);
+static int write_block(unsigned long p, const char __user *buf, int count);
 
 #define KFLASH_SIZE	1024*1024	//1 Meg
 #define KFLASH_SIZE4	4*1024*1024	//4 Meg
@@ -60,18 +57,7 @@ static int gbWriteEnable;
 static int gbWriteBase64Enable;
 static volatile unsigned char *FLASH_BASE;
 static int gbFlashSize = KFLASH_SIZE;
-static DECLARE_MUTEX(nwflash_sem);
-
-extern spinlock_t gpio_lock;
-
-/*
- * the delay routine - it is often required to let the flash "breeze"...
- */
-void flash_wait(int timeout)
-{
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(timeout);
-}
+static DEFINE_MUTEX(nwflash_mutex);
 
 static int get_flash_id(void)
 {
@@ -108,8 +94,9 @@ static int get_flash_id(void)
 	return c2;
 }
 
-static int flash_ioctl(struct inode *inodep, struct file *filep, unsigned int cmd, unsigned long arg)
+static long flash_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
+	mutex_lock(&flash_mutex);
 	switch (cmd) {
 	case CMD_WRITE_DISABLE:
 		gbWriteBase64Enable = 0;
@@ -127,46 +114,35 @@ static int flash_ioctl(struct inode *inodep, struct file *filep, unsigned int cm
 	default:
 		gbWriteBase64Enable = 0;
 		gbWriteEnable = 0;
+		mutex_unlock(&flash_mutex);
 		return -EINVAL;
 	}
+	mutex_unlock(&flash_mutex);
 	return 0;
 }
 
-static ssize_t flash_read(struct file *file, char *buf, size_t size, loff_t * ppos)
+static ssize_t flash_read(struct file *file, char __user *buf, size_t size,
+			  loff_t *ppos)
 {
-	unsigned long p = *ppos;
-	unsigned int count = size;
-	int ret = 0;
+	ssize_t ret;
 
 	if (flashdebug)
-		printk(KERN_DEBUG "flash_read: flash_read: offset=0x%lX, buffer=%p, count=0x%X.\n",
-		       p, buf, count);
+		printk(KERN_DEBUG "flash_read: flash_read: offset=0x%llx, "
+		       "buffer=%p, count=0x%zx.\n", *ppos, buf, size);
+	/*
+	 * We now lock against reads and writes. --rmk
+	 */
+	if (mutex_lock_interruptible(&nwflash_mutex))
+		return -ERESTARTSYS;
 
-	if (count)
-		ret = -ENXIO;
+	ret = simple_read_from_buffer(buf, size, ppos, (void *)FLASH_BASE, gbFlashSize);
+	mutex_unlock(&nwflash_mutex);
 
-	if (p < gbFlashSize) {
-		if (count > gbFlashSize - p)
-			count = gbFlashSize - p;
-
-		/*
-		 * We now lock against reads and writes. --rmk
-		 */
-		if (down_interruptible(&nwflash_sem))
-			return -ERESTARTSYS;
-
-		ret = copy_to_user(buf, (void *)(FLASH_BASE + p), count);
-		if (ret == 0) {
-			ret = count;
-			*ppos += count;
-		} else
-			ret = -EFAULT;
-		up(&nwflash_sem);
-	}
 	return ret;
 }
 
-static ssize_t flash_write(struct file *file, const char *buf, size_t size, loff_t * ppos)
+static ssize_t flash_write(struct file *file, const char __user *buf,
+			   size_t size, loff_t * ppos)
 {
 	unsigned long p = *ppos;
 	unsigned int count = size;
@@ -193,13 +169,13 @@ static ssize_t flash_write(struct file *file, const char *buf, size_t size, loff
 	if (count > gbFlashSize - p)
 		count = gbFlashSize - p;
 			
-	if (verify_area(VERIFY_READ, buf, count))
+	if (!access_ok(VERIFY_READ, buf, count))
 		return -EFAULT;
 
 	/*
 	 * We now lock against reads and writes. --rmk
 	 */
-	if (down_interruptible(&nwflash_sem))
+	if (mutex_lock_interruptible(&nwflash_mutex))
 		return -ERESTARTSYS;
 
 	written = 0;
@@ -244,8 +220,9 @@ static ssize_t flash_write(struct file *file, const char *buf, size_t size, loff
 			break;
 		}
 		if (flashdebug)
-			printk(KERN_DEBUG "flash_write: writing offset %lX, from buf "
-				"%p, bytes left %X.\n", p, buf, count - written);
+			printk(KERN_DEBUG "flash_write: writing offset %lX, "
+			       "from buf %p, bytes left %X.\n", p, buf,
+			       count - written);
 
 		/*
 		 * write_block will limit write to space left in this block
@@ -287,7 +264,7 @@ static ssize_t flash_write(struct file *file, const char *buf, size_t size, loff
 	 */
 	leds_event(led_release);
 
-	up(&nwflash_sem);
+	mutex_unlock(&nwflash_mutex);
 
 	return written;
 }
@@ -305,7 +282,7 @@ static loff_t flash_llseek(struct file *file, loff_t offset, int orig)
 {
 	loff_t ret;
 
-	lock_kernel();
+	mutex_lock(&flash_mutex);
 	if (flashdebug)
 		printk(KERN_DEBUG "flash_llseek: offset=0x%X, orig=0x%X.\n",
 		       (unsigned int) offset, orig);
@@ -340,7 +317,7 @@ static loff_t flash_llseek(struct file *file, loff_t offset, int orig)
 	default:
 		ret = -EINVAL;
 	}
-	unlock_kernel();
+	mutex_unlock(&flash_mutex);
 	return ret;
 }
 
@@ -402,7 +379,7 @@ static int erase_block(int nBlock)
 	/*
 	 * wait 10 ms
 	 */
-	flash_wait(HZ / 100);
+	msleep(10);
 
 	/*
 	 * wait while erasing in process (up to 10 sec)
@@ -410,7 +387,7 @@ static int erase_block(int nBlock)
 	timeout = jiffies + 10 * HZ;
 	c1 = 0;
 	while (!(c1 & 0x80) && time_before(jiffies, timeout)) {
-		flash_wait(HZ / 100);
+		msleep(10);
 		/*
 		 * read any address
 		 */
@@ -441,7 +418,7 @@ static int erase_block(int nBlock)
 	/*
 	 * just to make sure - verify if erased OK...
 	 */
-	flash_wait(HZ / 100);
+	msleep(10);
 
 	pWritePtr = (unsigned char *) ((unsigned int) (FLASH_BASE + (nBlock << 16)));
 
@@ -460,7 +437,7 @@ static int erase_block(int nBlock)
 /*
  * write_block will limit number of bytes written to the space in this block
  */
-static int write_block(unsigned long p, const char *buf, int count)
+static int write_block(unsigned long p, const char __user *buf, int count)
 {
 	volatile unsigned int c1;
 	volatile unsigned int c2;
@@ -588,7 +565,7 @@ static int write_block(unsigned long p, const char *buf, int count)
 				/*
 				 * wait couple ms
 				 */
-				flash_wait(HZ / 100);
+				msleep(10);
 				/*
 				 * red LED == write
 				 */
@@ -613,7 +590,7 @@ static int write_block(unsigned long p, const char *buf, int count)
 	leds_event(led_amber_off);
 	leds_event(led_green_on);
 
-	flash_wait(HZ / 100);
+	msleep(10);
 
 	pWritePtr = (unsigned char *) ((unsigned int) (FLASH_BASE + p));
 
@@ -641,9 +618,9 @@ static void kick_open(void)
 	 * we want to write a bit pattern XXX1 to Xilinx to enable
 	 * the write gate, which will be open for about the next 2ms.
 	 */
-	spin_lock_irqsave(&gpio_lock, flags);
-	cpld_modify(1, 1);
-	spin_unlock_irqrestore(&gpio_lock, flags);
+	spin_lock_irqsave(&nw_gpio_lock, flags);
+	nw_cpld_modify(CPLD_FLASH_WR_ENABLE, CPLD_FLASH_WR_ENABLE);
+	spin_unlock_irqrestore(&nw_gpio_lock, flags);
 
 	/*
 	 * let the ISA bus to catch on...
@@ -651,13 +628,13 @@ static void kick_open(void)
 	udelay(25);
 }
 
-static struct file_operations flash_fops =
+static const struct file_operations flash_fops =
 {
 	.owner		= THIS_MODULE,
 	.llseek		= flash_llseek,
 	.read		= flash_read,
 	.write		= flash_write,
-	.ioctl		= flash_ioctl,
+	.unlocked_ioctl	= flash_ioctl,
 };
 
 static struct miscdevice flash_miscdev =
@@ -706,7 +683,7 @@ static void __exit nwflash_exit(void)
 
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(flashdebug, "i");
+module_param(flashdebug, bool, 0644);
 
 module_init(nwflash_init);
 module_exit(nwflash_exit);

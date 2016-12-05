@@ -11,11 +11,13 @@
  */
 
 #include <linux/module.h>
-#include <linux/version.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/signal.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
+#include <linux/slab.h>
 
 #define	VER_DRIVER	0
 #define	VER_CARDTYPE	1
@@ -32,7 +34,7 @@
 static char hycapi_revision[]="$Revision: 1.8.6.4 $";
 
 unsigned int hycapi_enable = 0xffffffff; 
-MODULE_PARM(hycapi_enable, "i");
+module_param(hycapi_enable, uint, 0);
 
 typedef struct _hycapi_appl {
 	unsigned int ctrl_mask;
@@ -41,6 +43,8 @@ typedef struct _hycapi_appl {
 } hycapi_appl;
 
 static hycapi_appl hycapi_applications[CAPI_MAXAPPL];
+
+static u16 hycapi_send_message(struct capi_ctr *ctrl, struct sk_buff *skb);
 
 static inline int _hycapi_appCheck(int app_id, int ctrl_no)
 {
@@ -57,7 +61,7 @@ static inline int _hycapi_appCheck(int app_id, int ctrl_no)
 Kernel-Capi callback reset_ctr
 ******************************/     
 
-void 
+static void
 hycapi_reset_ctr(struct capi_ctr *ctrl)
 {
 	hycapictrl_info *cinfo = ctrl->driverdata;
@@ -66,14 +70,14 @@ hycapi_reset_ctr(struct capi_ctr *ctrl)
 	printk(KERN_NOTICE "HYCAPI hycapi_reset_ctr\n");
 #endif
 	capilib_release(&cinfo->ncci_head);
-	capi_ctr_reseted(ctrl);
+	capi_ctr_down(ctrl);
 }
 
 /******************************
 Kernel-Capi callback remove_ctr
 ******************************/     
 
-void 
+static void
 hycapi_remove_ctr(struct capi_ctr *ctrl)
 {
 	int i;
@@ -96,7 +100,7 @@ hycapi_remove_ctr(struct capi_ctr *ctrl)
 		}
 	}
 	detach_capi_ctr(ctrl);
-	ctrl->driverdata = 0;
+	ctrl->driverdata = NULL;
 	kfree(card->hyctrlinfo);
 
 		
@@ -215,7 +219,7 @@ Error-checking is done for CAPI-compliance.
 The application is recorded in the internal list.
 *************************************************************/
 
-void 
+static void
 hycapi_register_appl(struct capi_ctr *ctrl, __u16 appl, 
 		     capi_register_params *rp)
 {
@@ -246,8 +250,6 @@ hycapi_register_appl(struct capi_ctr *ctrl, __u16 appl,
 	rp->level3cnt = MaxLogicalConnections;
 	memcpy(&hycapi_applications[appl-1].rp, 
 	       rp, sizeof(capi_register_params));
-	
-/*        MOD_INC_USE_COUNT; */
 }
 
 /*********************************************************************
@@ -293,7 +295,7 @@ Release the application from the internal list an remove it's
 registration at controller-level
 ******************************************************************/
 
-void 
+static void
 hycapi_release_appl(struct capi_ctr *ctrl, __u16 appl)
 {
 	int chk;
@@ -311,7 +313,6 @@ hycapi_release_appl(struct capi_ctr *ctrl, __u16 appl)
 	{
 		hycapi_release_internal(ctrl, appl);
 	}
-/*        MOD_DEC_USE_COUNT;  */
 }
 
 
@@ -349,7 +350,7 @@ int hycapi_capi_stop(hysdn_card *card)
 	if(cinfo) {
 		ctrl = &cinfo->capi_ctrl;
 /*		ctrl->suspend_output(ctrl); */
-		capi_ctr_reseted(ctrl);
+		capi_ctr_down(ctrl);
 	}
 	return 0;
 }
@@ -367,7 +368,7 @@ firmware-releases that do not check the MsgLen-Indication!
 
 ***************************************************************/
 
-u16 hycapi_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
+static u16 hycapi_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 {
 	__u16 appl_id;
 	int _len, _len2;
@@ -400,8 +401,9 @@ u16 hycapi_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 			_len = CAPIMSG_LEN(skb->data);
 			if (_len > 22) {
 				_len2 = _len - 22;
-				memcpy(msghead, skb->data, 22);
-				memcpy(skb->data + _len2, msghead, 22);
+				skb_copy_from_linear_data(skb, msghead, 22);
+				skb_copy_to_linear_data_offset(skb, _len2,
+							       msghead, 22);
 				skb_pull(skb, _len2);
 				CAPIMSG_SETLEN(skb->data, 22);
 				retval = capilib_data_b3_req(&cinfo->ncci_head,
@@ -433,26 +435,16 @@ u16 hycapi_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 	return retval;
 }
 
-/*********************************************************************
-hycapi_read_proc
-
-Informations provided in the /proc/capi-entries.
-
-*********************************************************************/
-
-int hycapi_read_proc(char *page, char **start, off_t off,
-		     int count, int *eof, struct capi_ctr *ctrl)
+static int hycapi_proc_show(struct seq_file *m, void *v)
 {
+	struct capi_ctr *ctrl = m->private;
 	hycapictrl_info *cinfo = (hycapictrl_info *)(ctrl->driverdata);
 	hysdn_card *card = cinfo->card;
-	int len = 0;
 	char *s;
-#ifdef HYCAPI_PRINTFNAMES
-	printk(KERN_NOTICE "hycapi_read_proc\n");    
-#endif
-	len += sprintf(page+len, "%-16s %s\n", "name", cinfo->cardname);
-	len += sprintf(page+len, "%-16s 0x%x\n", "io", card->iobase);
-	len += sprintf(page+len, "%-16s %d\n", "irq", card->irq);
+
+	seq_printf(m, "%-16s %s\n", "name", cinfo->cardname);
+	seq_printf(m, "%-16s 0x%x\n", "io", card->iobase);
+	seq_printf(m, "%-16s %d\n", "irq", card->irq);
     
 	switch (card->brdtype) {
 		case BD_PCCARD:  s = "HYSDN Hycard"; break;
@@ -462,23 +454,31 @@ int hycapi_read_proc(char *page, char **start, off_t off,
 		case BD_PLEXUS: s = "HYSDN Plexus30"; break;
 		default: s = "???"; break;
 	}
-	len += sprintf(page+len, "%-16s %s\n", "type", s);
-	if ((s = cinfo->version[VER_DRIVER]) != 0)
-		len += sprintf(page+len, "%-16s %s\n", "ver_driver", s);
-	if ((s = cinfo->version[VER_CARDTYPE]) != 0)
-		len += sprintf(page+len, "%-16s %s\n", "ver_cardtype", s);
-	if ((s = cinfo->version[VER_SERIAL]) != 0)
-		len += sprintf(page+len, "%-16s %s\n", "ver_serial", s);
+	seq_printf(m, "%-16s %s\n", "type", s);
+	if ((s = cinfo->version[VER_DRIVER]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_driver", s);
+	if ((s = cinfo->version[VER_CARDTYPE]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_cardtype", s);
+	if ((s = cinfo->version[VER_SERIAL]) != NULL)
+		seq_printf(m, "%-16s %s\n", "ver_serial", s);
     
-	len += sprintf(page+len, "%-16s %s\n", "cardname", cinfo->cardname);
+	seq_printf(m, "%-16s %s\n", "cardname", cinfo->cardname);
     
-	if (off+count >= len)
-		*eof = 1;
-	if (len < off)
-		return 0;
-	*start = page + off;
-	return ((count < len-off) ? count : len-off);
+	return 0;
 }
+
+static int hycapi_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, hycapi_proc_show, PDE(inode)->data);
+}
+
+static const struct file_operations hycapi_proc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= hycapi_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 /**************************************************************
 hycapi_load_firmware
@@ -488,7 +488,7 @@ on capi-interface registration.
 
 **************************************************************/
 
-int hycapi_load_firmware(struct capi_ctr *ctrl, capiloaddata *data)
+static int hycapi_load_firmware(struct capi_ctr *ctrl, capiloaddata *data)
 {
 #ifdef HYCAPI_PRINTFNAMES
 	printk(KERN_NOTICE "hycapi_load_firmware\n");    
@@ -497,7 +497,7 @@ int hycapi_load_firmware(struct capi_ctr *ctrl, capiloaddata *data)
 }
 
 
-char *hycapi_procinfo(struct capi_ctr *ctrl)
+static char *hycapi_procinfo(struct capi_ctr *ctrl)
 {
 	hycapictrl_info *cinfo = (hycapictrl_info *)(ctrl->driverdata);
 #ifdef HYCAPI_PRINTFNAMES
@@ -525,7 +525,7 @@ New nccis are created if necessary.
 *******************************************************************/
 
 void
-hycapi_rx_capipkt(hysdn_card * card, uchar * buf, word len)
+hycapi_rx_capipkt(hysdn_card * card, unsigned char *buf, unsigned short len)
 {
 	struct sk_buff *skb;
 	hycapictrl_info *cinfo = card->hyctrlinfo;
@@ -542,7 +542,7 @@ hycapi_rx_capipkt(hysdn_card * card, uchar * buf, word len)
 	}
 	ctrl = &cinfo->capi_ctrl;
 	if(len < CAPI_MSG_BASELEN) {
-		printk(KERN_ERR "HYSDN Card%d: invalid CAPI-message, lenght %d!\n",
+		printk(KERN_ERR "HYSDN Card%d: invalid CAPI-message, length %d!\n",
 		       card->myid, len);
 		return;
 	}	
@@ -678,7 +678,7 @@ attach the capi-driver to the kernel-capi.
 
 ***********************************************************/
 
-int hycapi_init()
+int hycapi_init(void)
 {
 	int i;
 	for(i=0;i<CAPI_MAXAPPL;i++) {
@@ -747,12 +747,11 @@ hycapi_capi_create(hysdn_card *card)
 		return 1;
 	}
 	if (!card->hyctrlinfo) {
-		cinfo = (hycapictrl_info *) kmalloc(sizeof(hycapictrl_info), GFP_ATOMIC);
+		cinfo = kzalloc(sizeof(hycapictrl_info), GFP_ATOMIC);
 		if (!cinfo) {
 			printk(KERN_WARNING "HYSDN: no memory for capi-ctrl.\n");
 			return -ENOMEM;
 		}
-		memset(cinfo, 0, sizeof(hycapictrl_info));
 		card->hyctrlinfo = cinfo;
 		cinfo->card = card;
 		spin_lock_init(&cinfo->lock);
@@ -776,7 +775,7 @@ hycapi_capi_create(hysdn_card *card)
 		ctrl->load_firmware = hycapi_load_firmware;
 		ctrl->reset_ctr     = hycapi_reset_ctr;
 		ctrl->procinfo      = hycapi_procinfo;
-		ctrl->ctr_read_proc = hycapi_read_proc;
+		ctrl->proc_fops = &hycapi_proc_fops;
 		strcpy(ctrl->name, cinfo->cardname);
 		ctrl->owner = THIS_MODULE;
 

@@ -12,17 +12,17 @@ enum {
 
 struct hdlc_stat_reg {
 #ifdef __BIG_ENDIAN
-	u8 fill __attribute__((packed));
-	u8 mode __attribute__((packed));
-	u8 xml  __attribute__((packed));
-	u8 cmd  __attribute__((packed));
+	u_char fill;
+	u_char mode;
+	u_char xml;
+	u_char cmd;
 #else
-	u8 cmd  __attribute__((packed));
-	u8 xml  __attribute__((packed));
-	u8 mode __attribute__((packed));
-	u8 fill __attribute__((packed));
+	u_char cmd;
+	u_char xml;
+	u_char mode;
+	u_char fill;
 #endif
-};
+} __attribute__((packed));
 
 struct fritz_bcs {
 	struct hisax_b_if b_if;
@@ -36,8 +36,9 @@ struct fritz_bcs {
 	} ctrl;
 	u_int stat;
 	int rcvidx;
-	u8 rcvbuf[HSCX_BUFMAX]; /* B-Channel receive Buffer */
-
+	int fifo_size;
+	u_char rcvbuf[HSCX_BUFMAX]; /* B-Channel receive Buffer */
+	
 	int tx_cnt;		    /* B-Channel transmit counter */
 	struct sk_buff *tx_skb;     /* B-Channel transmit Buffer */
 };

@@ -16,7 +16,7 @@
  *    along with this program; if not, write to the Free Software
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- *    Questions/Comments/Bugfixes to arrays@compaq.com
+ *    Questions/Comments/Bugfixes to iss_storagedev@hp.com
  *
  */
 #ifndef ARRAYCMD_H
@@ -67,7 +67,7 @@ typedef struct {
 	__u8	reserved;
 } rhdr_t;
 
-#define SG_MAX			31
+#define SG_MAX			32
 typedef struct {
 	rhdr_t	hdr;
 	sg_t	sg[SG_MAX];

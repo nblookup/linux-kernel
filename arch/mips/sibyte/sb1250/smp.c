@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2001 Broadcom Corporation
+ * Copyright (C) 2001, 2002, 2003 Broadcom Corporation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,134 +24,164 @@
 
 #include <asm/mmu_context.h>
 #include <asm/io.h>
+#include <asm/fw/cfe/cfe_api.h>
 #include <asm/sibyte/sb1250.h>
 #include <asm/sibyte/sb1250_regs.h>
 #include <asm/sibyte/sb1250_int.h>
 
-extern irqreturn_t smp_call_function_interrupt(int irq, void *dev,
-	struct pt_regs *regs);
-extern void smp_tune_scheduling(void);
+static void *mailbox_set_regs[] = {
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_SET_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_SET_CPU)
+};
+
+static void *mailbox_clear_regs[] = {
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_CLR_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_CLR_CPU)
+};
+
+static void *mailbox_regs[] = {
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_CPU)
+};
+
+/*
+ * SMP init and finish on secondary CPUs
+ */
+void __cpuinit sb1250_smp_init(void)
+{
+	unsigned int imask = STATUSF_IP4 | STATUSF_IP3 | STATUSF_IP2 |
+		STATUSF_IP1 | STATUSF_IP0;
+
+	/* Set interrupt mask, but don't enable */
+	change_c0_status(ST0_IM, imask);
+}
 
 /*
  * These are routines for dealing with the sb1250 smp capabilities
  * independent of board/firmware
  */
 
-static u64 mailbox_set_regs[] = {
-	KSEG1 + A_IMR_CPU0_BASE + R_IMR_MAILBOX_SET_CPU,
-	KSEG1 + A_IMR_CPU1_BASE + R_IMR_MAILBOX_SET_CPU
-};
-
-static u64 mailbox_clear_regs[] = {
-	KSEG1 + A_IMR_CPU0_BASE + R_IMR_MAILBOX_CLR_CPU,
-	KSEG1 + A_IMR_CPU1_BASE + R_IMR_MAILBOX_CLR_CPU
-};
-
-static u64 mailbox_regs[] = {
-	KSEG1 + A_IMR_CPU0_BASE + R_IMR_MAILBOX_CPU,
-	KSEG1 + A_IMR_CPU1_BASE + R_IMR_MAILBOX_CPU
-};
-
-
 /*
  * Simple enough; everything is set up, so just poke the appropriate mailbox
  * register, and we should be set
  */
-void core_send_ipi(int cpu, unsigned int action)
+static void sb1250_send_ipi_single(int cpu, unsigned int action)
 {
-	__raw_writeq((((u64)action)<< 48), mailbox_set_regs[cpu]);
+	__raw_writeq((((u64)action) << 48), mailbox_set_regs[cpu]);
 }
 
-
-void sb1250_smp_finish(void)
+static inline void sb1250_send_ipi_mask(const struct cpumask *mask,
+					unsigned int action)
 {
-	extern void sb1_sanitize_tlb(void);
+	unsigned int i;
 
-	sb1_sanitize_tlb();
-	sb1250_time_init();
+	for_each_cpu(i, mask)
+		sb1250_send_ipi_single(i, action);
 }
 
-void sb1250_mailbox_interrupt(struct pt_regs *regs)
+/*
+ * Code to run on secondary just after probing the CPU
+ */
+static void __cpuinit sb1250_init_secondary(void)
+{
+	extern void sb1250_smp_init(void);
+
+	sb1250_smp_init();
+}
+
+/*
+ * Do any tidying up before marking online and running the idle
+ * loop
+ */
+static void __cpuinit sb1250_smp_finish(void)
+{
+	extern void sb1250_clockevent_init(void);
+
+	sb1250_clockevent_init();
+	local_irq_enable();
+}
+
+/*
+ * Final cleanup after all secondaries booted
+ */
+static void sb1250_cpus_done(void)
+{
+}
+
+/*
+ * Setup the PC, SP, and GP of a secondary processor and start it
+ * running!
+ */
+static void __cpuinit sb1250_boot_secondary(int cpu, struct task_struct *idle)
+{
+	int retval;
+
+	retval = cfe_cpu_start(cpu_logical_map(cpu), &smp_bootstrap,
+			       __KSTK_TOS(idle),
+			       (unsigned long)task_thread_info(idle), 0);
+	if (retval != 0)
+		printk("cfe_start_cpu(%i) returned %i\n" , cpu, retval);
+}
+
+/*
+ * Use CFE to find out how many CPUs are available, setting up
+ * cpu_possible_map and the logical/physical mappings.
+ * XXXKW will the boot CPU ever not be physical 0?
+ *
+ * Common setup before any secondaries are started
+ */
+static void __init sb1250_smp_setup(void)
+{
+	int i, num;
+
+	cpus_clear(cpu_possible_map);
+	cpu_set(0, cpu_possible_map);
+	__cpu_number_map[0] = 0;
+	__cpu_logical_map[0] = 0;
+
+	for (i = 1, num = 0; i < NR_CPUS; i++) {
+		if (cfe_cpu_stop(i) == 0) {
+			cpu_set(i, cpu_possible_map);
+			__cpu_number_map[i] = ++num;
+			__cpu_logical_map[num] = i;
+		}
+	}
+	printk(KERN_INFO "Detected %i available secondary CPU(s)\n", num);
+}
+
+static void __init sb1250_prepare_cpus(unsigned int max_cpus)
+{
+}
+
+struct plat_smp_ops sb_smp_ops = {
+	.send_ipi_single	= sb1250_send_ipi_single,
+	.send_ipi_mask		= sb1250_send_ipi_mask,
+	.init_secondary		= sb1250_init_secondary,
+	.smp_finish		= sb1250_smp_finish,
+	.cpus_done		= sb1250_cpus_done,
+	.boot_secondary		= sb1250_boot_secondary,
+	.smp_setup		= sb1250_smp_setup,
+	.prepare_cpus		= sb1250_prepare_cpus,
+};
+
+void sb1250_mailbox_interrupt(void)
 {
 	int cpu = smp_processor_id();
+	int irq = K_INT_MBOX_0;
 	unsigned int action;
 
-	kstat_this_cpu.irqs[K_INT_MBOX_0]++;
+	kstat_incr_irqs_this_cpu(irq, irq_to_desc(irq));
 	/* Load the mailbox register to figure out what we're supposed to do */
-	action = (__raw_readq(mailbox_regs[cpu]) >> 48) & 0xffff;
+	action = (____raw_readq(mailbox_regs[cpu]) >> 48) & 0xffff;
 
 	/* Clear the mailbox to clear the interrupt */
-	__raw_writeq(((u64)action)<<48, mailbox_clear_regs[cpu]);
+	____raw_writeq(((u64)action) << 48, mailbox_clear_regs[cpu]);
 
 	/*
 	 * Nothing to do for SMP_RESCHEDULE_YOURSELF; returning from the
 	 * interrupt will do the reschedule for us
 	 */
 
-	if (action & SMP_CALL_FUNCTION) {
-		smp_call_function_interrupt(0, NULL, regs);
-	}
-}
-
-extern atomic_t cpus_booted;
-extern void prom_setup_smp(void);
-extern int prom_boot_secondary(int cpu, unsigned long sp, unsigned long gp);
-
-void __init smp_boot_cpus(void)
-{
-	int cur_cpu = 0;
-	int cpu;
-
-	prom_setup_smp();
-	init_new_context(current, &init_mm);
-	current_thread_info()->cpu = 0;
-	cpu_data[0].udelay_val = loops_per_jiffy;
-	cpu_data[0].asid_cache = ASID_FIRST_VERSION;
-	cpus_clear(cpu_online_map);
-	cpu_set(0, cpu_online_map);
-	atomic_set(&cpus_booted, 1);  /* Master CPU is already booted... */
-	smp_tune_scheduling();
-
-	/*
-	 * This loop attempts to compensate for "holes" in the CPU
-	 * numbering.  It's overkill, but general.
-	 */
-	for (cpu = 1; cpu < num_online_cpus(); ) {
-		struct task_struct *idle;
-		struct pt_regs regs;
-		int retval;
-		printk("Starting CPU %d... ", cpu);
-
-		/* Spawn a new process normally.  Grab a pointer to
-		   its task struct so we can mess with it */
-		idle = copy_process(CLONE_VM | CLONE_IDLETASK, 0, &regs, 0,
-		                    NULL, NULL);
-		if (IS_ERR(idle))
-			panic("failed fork for CPU %d", cpu);
-
-		/*
-		 * We remove it from the pidhash and the runqueue
-		 * once we got the process:
-		 */
-		init_idle(idle, cpu);
-
-		unhash_process(idle);
-
-		do {
-			/* Iterate until we find a CPU that comes up */
-			cur_cpu++;
-			retval = prom_boot_secondary(cur_cpu,
-					    (unsigned long)idle + THREAD_SIZE - 32,
-					    (unsigned long)idle);
-		} while (!retval && (cur_cpu < NR_CPUS));
-		if (retval) {
-			cpu++;
-		} else {
-			panic("CPU discovery disaster");
-		}
-	}
-
-	/* Wait for everyone to come up */
-	while (atomic_read(&cpus_booted) != num_online_cpus());
-	smp_threads_ready = 1;
+	if (action & SMP_CALL_FUNCTION)
+		smp_call_function_interrupt();
 }

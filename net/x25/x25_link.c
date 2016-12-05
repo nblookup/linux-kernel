@@ -3,7 +3,7 @@
  *
  *	This is ALPHA test software. This code may break your machine,
  *	randomly fail to work with new releases, misbehave and/or generally
- *	screw up. It might even work. 
+ *	screw up. It might even work.
  *
  *	This code REQUIRES 2.1.15 or higher
  *
@@ -16,37 +16,28 @@
  *	History
  *	X.25 001	Jonathan Naylor	  Started coding.
  *	X.25 002	Jonathan Naylor	  New timer architecture.
- *	mar/20/00	Daniela Squassoni Disabling/enabling of facilities 
+ *	mar/20/00	Daniela Squassoni Disabling/enabling of facilities
  *					  negotiation.
  *	2000-09-04	Henner Eisen	  dev_hold() / dev_put() for x25_neigh.
  */
 
-#include <linux/errno.h>
-#include <linux/types.h>
-#include <linux/socket.h>
-#include <linux/in.h>
 #include <linux/kernel.h>
 #include <linux/jiffies.h>
 #include <linux/timer.h>
-#include <linux/string.h>
-#include <linux/sockios.h>
-#include <linux/net.h>
-#include <linux/inet.h>
+#include <linux/slab.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
-#include <net/sock.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
-#include <linux/fcntl.h>
-#include <linux/mm.h>
-#include <linux/interrupt.h>
 #include <linux/init.h>
 #include <net/x25.h>
 
-static struct list_head x25_neigh_list = LIST_HEAD_INIT(x25_neigh_list);
-static rwlock_t x25_neigh_list_lock = RW_LOCK_UNLOCKED;
+LIST_HEAD(x25_neigh_list);
+DEFINE_RWLOCK(x25_neigh_list_lock);
 
 static void x25_t20timer_expiry(unsigned long);
+
+static void x25_transmit_restart_confirmation(struct x25_neigh *nb);
+static void x25_transmit_restart_request(struct x25_neigh *nb);
 
 /*
  *	Linux set/reset timer routines
@@ -104,7 +95,7 @@ void x25_link_control(struct sk_buff *skb, struct x25_neigh *nb,
 			       skb->data[3], skb->data[4],
 			       skb->data[5], skb->data[6]);
 			break;
-			
+
 		default:
 			printk(KERN_WARNING "x25: received unknown %02X "
 			       "with LCI 000\n", frametype);
@@ -119,7 +110,7 @@ void x25_link_control(struct sk_buff *skb, struct x25_neigh *nb,
 /*
  *	This routine is called when a Restart Request is needed
  */
-void x25_transmit_restart_request(struct x25_neigh *nb)
+static void x25_transmit_restart_request(struct x25_neigh *nb)
 {
 	unsigned char *dptr;
 	int len = X25_MAX_L2_LEN + X25_STD_MIN_LEN + 2;
@@ -146,7 +137,7 @@ void x25_transmit_restart_request(struct x25_neigh *nb)
 /*
  * This routine is called when a Restart Confirmation is needed
  */
-void x25_transmit_restart_confirmation(struct x25_neigh *nb)
+static void x25_transmit_restart_confirmation(struct x25_neigh *nb)
 {
 	unsigned char *dptr;
 	int len = X25_MAX_L2_LEN + X25_STD_MIN_LEN;
@@ -162,32 +153,6 @@ void x25_transmit_restart_confirmation(struct x25_neigh *nb)
 	*dptr++ = nb->extended ? X25_GFI_EXTSEQ : X25_GFI_STDSEQ;
 	*dptr++ = 0x00;
 	*dptr++ = X25_RESTART_CONFIRMATION;
-
-	skb->sk = NULL;
-
-	x25_send_frame(skb, nb);
-}
-
-/*
- * This routine is called when a Diagnostic is required.
- */
-void x25_transmit_diagnostic(struct x25_neigh *nb, unsigned char diag)
-{
-	unsigned char *dptr;
-	int len = X25_MAX_L2_LEN + X25_STD_MIN_LEN + 1;
-	struct sk_buff *skb = alloc_skb(len, GFP_ATOMIC);
-
-	if (!skb)
-		return;
-
-	skb_reserve(skb, X25_MAX_L2_LEN);
-
-	dptr = skb_put(skb, X25_STD_MIN_LEN + 1);
-
-	*dptr++ = nb->extended ? X25_GFI_EXTSEQ : X25_GFI_STDSEQ;
-	*dptr++ = 0x00;
-	*dptr++ = X25_DIAGNOSTIC;
-	*dptr++ = diag;
 
 	skb->sk = NULL;
 
@@ -283,10 +248,7 @@ void x25_link_device_up(struct net_device *dev)
 		return;
 
 	skb_queue_head_init(&nb->queue);
-
-	init_timer(&nb->t20timer);
-	nb->t20timer.data     = (unsigned long)nb;
-	nb->t20timer.function = &x25_t20timer_expiry;
+	setup_timer(&nb->t20timer, x25_t20timer_expiry, (unsigned long)nb);
 
 	dev_hold(dev);
 	nb->dev      = dev;
@@ -374,7 +336,7 @@ struct x25_neigh *x25_get_neigh(struct net_device *dev)
 /*
  *	Handle the ioctls that control the subscription functions.
  */
-int x25_subscr_ioctl(unsigned int cmd, void *arg)
+int x25_subscr_ioctl(unsigned int cmd, void __user *arg)
 {
 	struct x25_subscrip_struct x25_subscr;
 	struct x25_neigh *nb;
@@ -398,16 +360,20 @@ int x25_subscr_ioctl(unsigned int cmd, void *arg)
 	dev_put(dev);
 
 	if (cmd == SIOCX25GSUBSCRIP) {
+		read_lock_bh(&x25_neigh_list_lock);
 		x25_subscr.extended	     = nb->extended;
 		x25_subscr.global_facil_mask = nb->global_facil_mask;
+		read_unlock_bh(&x25_neigh_list_lock);
 		rc = copy_to_user(arg, &x25_subscr,
 				  sizeof(x25_subscr)) ? -EFAULT : 0;
 	} else {
 		rc = -EINVAL;
 		if (!(x25_subscr.extended && x25_subscr.extended != 1)) {
 			rc = 0;
+			write_lock_bh(&x25_neigh_list_lock);
 			nb->extended	     = x25_subscr.extended;
 			nb->global_facil_mask = x25_subscr.global_facil_mask;
+			write_unlock_bh(&x25_neigh_list_lock);
 		}
 	}
 	x25_neigh_put(nb);
@@ -430,8 +396,12 @@ void __exit x25_link_free(void)
 	write_lock_bh(&x25_neigh_list_lock);
 
 	list_for_each_safe(entry, tmp, &x25_neigh_list) {
+		struct net_device *dev;
+
 		nb = list_entry(entry, struct x25_neigh, node);
+		dev = nb->dev;
 		__x25_remove_neigh(nb);
+		dev_put(dev);
 	}
 	write_unlock_bh(&x25_neigh_list_lock);
 }

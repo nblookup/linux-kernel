@@ -19,22 +19,29 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/initrd.h>
 
-#include <asm/hardware.h>
-#include <asm/irq.h>
+#include <mach/hardware.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
 
 #include <asm/mach/arch.h>
 
-extern void clps711x_map_io(void);
-extern void clps711x_init_irq(void);
+#include <asm/memory.h>
 
-struct meminfo memmap = { 1, 0xC1000000, {{0xC0000000,0x01000000,0}}};
+#include "common.h"
+
+struct meminfo memmap = {
+	.nr_banks	= 1,
+	.bank		= {
+		{
+			.start	= 0xC0000000,
+			.size	= 0x01000000,
+		},
+	},
+};
 
 typedef struct tag_IMAGE_PARAMS
 {
@@ -53,9 +60,8 @@ static void __init
 fortunet_fixup(struct machine_desc *desc, struct tag *tags,
 		 char **cmdline, struct meminfo *mi)
 {
-	IMAGE_PARAMS *ip;
-	ip = (IMAGE_PARAMS *)__phys_to_virt(IMAGE_PARAMS_PHYS);
-	*cmdline = (char *)__phys_to_virt(ip->command_line);
+	IMAGE_PARAMS *ip = phys_to_virt(IMAGE_PARAMS_PHYS);
+	*cmdline = phys_to_virt(ip->command_line);
 #ifdef CONFIG_BLK_DEV_INITRD
 	if(ip->ramdisk_ok)
 	{
@@ -64,15 +70,14 @@ fortunet_fixup(struct machine_desc *desc, struct tag *tags,
 	}
 #endif
 	memmap.bank[0].size = ip->ram_size;
-	memmap.end = ip->ram_size+0xC0000000;
 	*mi = memmap;
 }
 
 MACHINE_START(FORTUNET, "ARM-FortuNet")
-	MAINTAINER("FortuNet Inc.")
-        BOOT_MEM(0xc0000000, 0x80000000, 0xf0000000)
-	BOOT_PARAMS(0x00000000)
-	FIXUP(fortunet_fixup)
-	MAPIO(clps711x_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: FortuNet Inc. */
+	.boot_params	= 0x00000000,
+	.fixup		= fortunet_fixup,
+	.map_io		= clps711x_map_io,
+	.init_irq	= clps711x_init_irq,
+	.timer		= &clps711x_timer,
 MACHINE_END

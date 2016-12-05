@@ -387,7 +387,7 @@ struct scc_port {
 /* The SCC needs 3.5 PCLK cycles recovery time between to register
  * accesses. PCLK runs with 8 MHz on an Atari, so this delay is 3.5 *
  * 125 ns = 437.5 ns. This is too short for udelay().
- * 10/16/95: A tstb mfp.par_dt_reg takes 600ns (sure?) and thus should be
+ * 10/16/95: A tstb st_mfp.par_dt_reg takes 600ns (sure?) and thus should be
  * quite right
  */
 
@@ -399,7 +399,7 @@ struct scc_port {
 		__asm__ __volatile__ ( "tstb %0" : : "g" (*_scc_del) : "cc" );\
     } while (0)
 
-extern unsigned char scc_shadow[2][16];
+static unsigned char scc_shadow[2][16];
 
 /* The following functions should relax the somehow complicated
  * register access of the SCC. _SCCwrite() stores all written values

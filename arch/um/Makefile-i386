@@ -1,37 +1,42 @@
-ifeq ($(CONFIG_HOST_2G_2G), y)
-TOP_ADDR = 0x80000000
-else
-TOP_ADDR = 0xc0000000
+core-y += arch/um/sys-i386/ arch/x86/crypto/
+
+TOP_ADDR := $(CONFIG_TOP_ADDR)
+
+START := 0x8048000
+
+LDFLAGS			+= -m elf_i386
+ELF_ARCH		:= $(SUBARCH)
+ELF_FORMAT 		:= elf32-$(SUBARCH)
+OBJCOPYFLAGS  		:= -O binary -R .note -R .comment -S
+HEADER_ARCH		:= x86
+CHECKFLAGS	+= -D__i386__
+
+ifeq ("$(origin SUBARCH)", "command line")
+ifneq ("$(shell uname -m | sed -e s/i.86/i386/)", "$(SUBARCH)")
+KBUILD_CFLAGS		+= $(call cc-option,-m32)
+KBUILD_AFLAGS		+= $(call cc-option,-m32)
+LINK-y			+= $(call cc-option,-m32)
+UML_OBJCOPYFLAGS	+= -F $(ELF_FORMAT)
+
+export LDFLAGS HOSTCFLAGS HOSTLDFLAGS UML_OBJCOPYFLAGS
+endif
 endif
 
-CFLAGS += -U__$(SUBARCH)__ -U$(SUBARCH)
-ELF_ARCH = $(SUBARCH)
-ELF_FORMAT = elf32-$(SUBARCH)
+# First of all, tune CFLAGS for the specific CPU. This actually sets cflags-y.
+include $(srctree)/arch/x86/Makefile_32.cpu
 
-OBJCOPYFLAGS  := -O binary -R .note -R .comment -S
-LDFLAGS_BLOB	:= --format binary --oformat elf32-i386
+# prevent gcc from keeping the stack 16 byte aligned. Taken from i386.
+cflags-y += $(call cc-option,-mpreferred-stack-boundary=2)
 
-SYS_DIR		:= $(ARCH_DIR)/include/sysdep-i386
-SYS_UTIL_DIR	:= $(ARCH_DIR)/sys-i386/util
+# Prevent sprintf in nfsd from being converted to strcpy and resulting in
+# an unresolved reference.
+cflags-y += -ffreestanding
 
-SYS_HEADERS = $(SYS_DIR)/sc.h $(SYS_DIR)/thread.h
+# Disable unit-at-a-time mode on pre-gcc-4.0 compilers, it makes gcc use
+# a lot more stack due to the lack of sharing of stacklots.  Also, gcc
+# 4.3.0 needs -funit-at-a-time for extern inline functions.
+KBUILD_CFLAGS += $(shell if [ $(call cc-version) -lt 0400 ] ; then \
+			echo $(call cc-option,-fno-unit-at-a-time); \
+			else echo $(call cc-option,-funit-at-a-time); fi ;)
 
-prepare: $(SYS_HEADERS)
-
-$(SYS_DIR)/sc.h: $(SYS_UTIL_DIR)/mk_sc
-	$< > $@
-
-$(SYS_DIR)/thread.h: $(SYS_UTIL_DIR)/mk_thread 
-	$< > $@
-
-$(SYS_UTIL_DIR)/mk_sc: FORCE ; 
-	@$(call descend,$(SYS_UTIL_DIR),$@)
-
-$(SYS_UTIL_DIR)/mk_thread: $(ARCH_SYMLINKS) $(GEN_HEADERS) FORCE ; 
-	@$(call descend,$(SYS_UTIL_DIR),$@)
-
-$(SYS_UTIL_DIR): include/asm FORCE
-	@$(call descend,$@,)
-
-sysclean :
-	rm -f $(SYS_HEADERS)
+KBUILD_CFLAGS += $(cflags-y)

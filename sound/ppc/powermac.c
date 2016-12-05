@@ -18,10 +18,11 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
+#include <linux/err.h>
+#include <linux/platform_device.h>
+#include <linux/moduleparam.h>
 #include <sound/core.h>
-#define SNDRV_GET_ID
 #include <sound/initval.h>
 #include "pmac.h"
 #include "awacs.h"
@@ -30,55 +31,40 @@
 #define CHIP_NAME "PMac"
 
 MODULE_DESCRIPTION("PowerMac");
-MODULE_CLASSES("{sound}");
-MODULE_DEVICES("{{Apple,PowerMac}}");
+MODULE_SUPPORTED_DEVICE("{{Apple,PowerMac}}");
 MODULE_LICENSE("GPL");
 
 static int index = SNDRV_DEFAULT_IDX1;		/* Index 0-MAX */
 static char *id = SNDRV_DEFAULT_STR1;		/* ID for this card */
-static int enable = 1;
-#ifdef PMAC_SUPPORT_PCM_BEEP
 static int enable_beep = 1;
-#endif
 
-MODULE_PARM(index, "i");
+module_param(index, int, 0444);
 MODULE_PARM_DESC(index, "Index value for " CHIP_NAME " soundchip.");
-MODULE_PARM_SYNTAX(index, SNDRV_INDEX_DESC);
-MODULE_PARM(id, "s");
+module_param(id, charp, 0444);
 MODULE_PARM_DESC(id, "ID string for " CHIP_NAME " soundchip.");
-MODULE_PARM_SYNTAX(id, SNDRV_ID_DESC);
-MODULE_PARM(enable, "i");
-MODULE_PARM_DESC(enable, "Enable this soundchip.");
-MODULE_PARM_SYNTAX(enable, SNDRV_ENABLE_DESC);
-#ifdef PMAC_SUPPORT_PCM_BEEP
-MODULE_PARM(enable_beep, "i");
+module_param(enable_beep, bool, 0444);
 MODULE_PARM_DESC(enable_beep, "Enable beep using PCM.");
-MODULE_PARM_SYNTAX(enable_beep, SNDRV_ENABLED "," SNDRV_BOOLEAN_TRUE_DESC);
-#endif
 
+static struct platform_device *device;
 
-/*
- * card entry
- */
-
-static snd_card_t *snd_pmac_card = NULL;
 
 /*
  */
 
-static int __init snd_pmac_probe(void)
+static int __devinit snd_pmac_probe(struct platform_device *devptr)
 {
-	snd_card_t *card;
-	pmac_t *chip;
+	struct snd_card *card;
+	struct snd_pmac *chip;
 	char *name_ext;
 	int err;
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index, id, THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	if ((err = snd_pmac_new(card, &chip)) < 0)
 		goto __error;
+	card->private_data = chip;
 
 	switch (chip->model) {
 	case PMAC_BURGUNDY:
@@ -104,7 +90,7 @@ static int __init snd_pmac_probe(void)
 		sprintf(card->shortname, "PowerMac %s", name_ext);
 		sprintf(card->longname, "%s (Dev %d) Sub-frame %d",
 			card->shortname, chip->device_id, chip->subframe);
-		if ((err = snd_pmac_tumbler_init(chip)) < 0)
+		if ( snd_pmac_tumbler_init(chip) < 0 || snd_pmac_tumbler_post_init() < 0)
 			goto __error;
 		break;
 	case PMAC_AWACS:
@@ -124,7 +110,7 @@ static int __init snd_pmac_probe(void)
 			goto __error;
 		break;
 	default:
-		snd_printk("unsupported hardware %d\n", chip->model);
+		snd_printk(KERN_ERR "unsupported hardware %d\n", chip->model);
 		err = -EINVAL;
 		goto __error;
 	}
@@ -133,15 +119,15 @@ static int __init snd_pmac_probe(void)
 		goto __error;
 
 	chip->initialized = 1;
-#ifdef PMAC_SUPPORT_PCM_BEEP
 	if (enable_beep)
 		snd_pmac_attach_beep(chip);
-#endif
+
+	snd_card_set_dev(card, &devptr->dev);
 
 	if ((err = snd_card_register(card)) < 0)
 		goto __error;
 
-	snd_pmac_card = card;
+	platform_set_drvdata(devptr, card);
 	return 0;
 
 __error:
@@ -150,49 +136,60 @@ __error:
 }
 
 
-/*
- * MODULE sutff
- */
+static int __devexit snd_pmac_remove(struct platform_device *devptr)
+{
+	snd_card_free(platform_get_drvdata(devptr));
+	platform_set_drvdata(devptr, NULL);
+	return 0;
+}
+
+#ifdef CONFIG_PM
+static int snd_pmac_driver_suspend(struct platform_device *devptr, pm_message_t state)
+{
+	struct snd_card *card = platform_get_drvdata(devptr);
+	snd_pmac_suspend(card->private_data);
+	return 0;
+}
+
+static int snd_pmac_driver_resume(struct platform_device *devptr)
+{
+	struct snd_card *card = platform_get_drvdata(devptr);
+	snd_pmac_resume(card->private_data);
+	return 0;
+}
+#endif
+
+#define SND_PMAC_DRIVER		"snd_powermac"
+
+static struct platform_driver snd_pmac_driver = {
+	.probe		= snd_pmac_probe,
+	.remove		= __devexit_p(snd_pmac_remove),
+#ifdef CONFIG_PM
+	.suspend	= snd_pmac_driver_suspend,
+	.resume		= snd_pmac_driver_resume,
+#endif
+	.driver		= {
+		.name	= SND_PMAC_DRIVER
+	},
+};
 
 static int __init alsa_card_pmac_init(void)
 {
 	int err;
-	if ((err = snd_pmac_probe()) < 0) {
-#ifdef MODULE
-		printk(KERN_ERR "no PMac soundchip found\n");
-#endif
+
+	if ((err = platform_driver_register(&snd_pmac_driver)) < 0)
 		return err;
-	}
+	device = platform_device_register_simple(SND_PMAC_DRIVER, -1, NULL, 0);
 	return 0;
 
 }
 
 static void __exit alsa_card_pmac_exit(void)
 {
-	if (snd_pmac_card)
-		snd_card_free(snd_pmac_card);
+	if (!IS_ERR(device))
+		platform_device_unregister(device);
+	platform_driver_unregister(&snd_pmac_driver);
 }
 
 module_init(alsa_card_pmac_init)
 module_exit(alsa_card_pmac_exit)
-
-#ifndef MODULE
-
-/* format is: snd-pmac=enable,index,id,enable_beep
- */
-
-static int __init alsa_card_pmac_setup(char *str)
-{
-	(void)(get_option(&str,&enable) == 2 &&
-	       get_option(&str,&index) == 2 &&
-	       get_id(&str,&id) == 2
-#ifdef PMAC_SUPPORT_PCM_BEEP
-	       && get_option(&str,&enable_beep) == 2
-#endif
-	       );
-	return 1;
-}
-
-__setup("snd-pmac=", alsa_card_pmac_setup);
-
-#endif /* ifndef MODULE */

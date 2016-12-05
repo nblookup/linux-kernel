@@ -30,47 +30,22 @@
  *	Fills MAC header fields, depending on MAC type. Returns 0, If MAC type
  *	is a valid type and initialization completes correctly 1, otherwise.
  */
-int llc_mac_hdr_init(struct sk_buff *skb, unsigned char *sa, unsigned char *da)
+int llc_mac_hdr_init(struct sk_buff *skb,
+		     const unsigned char *sa, const unsigned char *da)
 {
-	int rc = 0;
+	int rc = -EINVAL;
 
 	switch (skb->dev->type) {
-#ifdef CONFIG_TR
-	case ARPHRD_IEEE802_TR: {
-		struct net_device *dev = skb->dev;
-		struct trh_hdr *trh;
-		
-		trh = (struct trh_hdr *)skb_push(skb, sizeof(*trh));
-		trh->ac = AC;
-		trh->fc = LLC_FRAME;
-		if (sa)
-			memcpy(trh->saddr, sa, dev->addr_len);
-		else
-			memset(trh->saddr, 0, dev->addr_len);
-		if (da) {
-			memcpy(trh->daddr, da, dev->addr_len);
-			tr_source_route(skb, trh, dev);
-		}
-		skb->mac.raw = skb->data;
-		break;
-	}
-#endif
+	case ARPHRD_IEEE802_TR:
 	case ARPHRD_ETHER:
-	case ARPHRD_LOOPBACK: {
-		unsigned short len = skb->len;
-		struct ethhdr *eth;
-
-		skb->mac.raw = skb_push(skb, sizeof(*eth));
-		eth = (struct ethhdr *)skb->mac.raw;
-		eth->h_proto = htons(len);
-		memcpy(eth->h_dest, da, ETH_ALEN);
-		memcpy(eth->h_source, sa, ETH_ALEN);
+	case ARPHRD_LOOPBACK:
+		rc = dev_hard_header(skb, skb->dev, ETH_P_802_2, da, sa,
+				     skb->len);
+		if (rc > 0)
+			rc = 0;
 		break;
-	}
 	default:
-		printk(KERN_WARNING "device type not supported: %d\n",
-		       skb->dev->type);
-		rc = -EINVAL;
+		WARN(1, "device type not supported: %d\n", skb->dev->type);
 	}
 	return rc;
 }
@@ -97,7 +72,7 @@ int llc_build_and_send_ui_pkt(struct llc_sap *sap, struct sk_buff *skb,
 			    dsap, LLC_PDU_CMD);
 	llc_pdu_init_as_ui_cmd(skb);
 	rc = llc_mac_hdr_init(skb, skb->dev->dev_addr, dmac);
-	if (!rc)
+	if (likely(!rc))
 		rc = dev_queue_xmit(skb);
 	return rc;
 }

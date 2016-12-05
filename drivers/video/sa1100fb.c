@@ -66,7 +66,7 @@
  *	- FrameBuffer memory is now allocated at run-time when the
  *	  driver is initialized.    
  *
- * 2000/04/10: Nicolas Pitre <nico@cam.org>
+ * 2000/04/10: Nicolas Pitre <nico@fluxnic.net>
  *	- Big cleanup for dynamic selection of machine type at run time.
  *
  * 2000/07/19: Jamey Hicks <jamey@crl.dec.com>
@@ -114,7 +114,7 @@
  *	- convert dma address types to dma_addr_t
  *	- remove unused 'montype' stuff
  *	- remove redundant zero inits of init_var after the initial
- *	  memzero.
+ *	  memset.
  *	- remove allow_modeset (acornfb idea does not belong here)
  *
  * 2001/05/28: <rmk@arm.linux.org.uk>
@@ -160,7 +160,6 @@
  *	- Add patch 681/1 and clean up stork definitions.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -168,21 +167,21 @@
 #include <linux/string.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
 #include <linux/fb.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/cpufreq.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
+#include <linux/mutex.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
-#include <asm/irq.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
-#include <asm/uaccess.h>
-#include <asm/arch/assabet.h>
-#include <asm/arch/shannon.h>
+#include <mach/assabet.h>
+#include <mach/shannon.h>
 
 /*
  * debugging?
@@ -200,13 +199,17 @@
 extern void (*sa1100fb_backlight_power)(int on);
 extern void (*sa1100fb_lcd_power)(int on);
 
-/*
- * IMHO this looks wrong.  In 8BPP, length should be 8.
- */
-static struct sa1100fb_rgb rgb_8 = {
+static struct sa1100fb_rgb rgb_4 = {
 	.red	= { .offset = 0,  .length = 4, },
 	.green	= { .offset = 0,  .length = 4, },
 	.blue	= { .offset = 0,  .length = 4, },
+	.transp	= { .offset = 0,  .length = 0, },
+};
+
+static struct sa1100fb_rgb rgb_8 = {
+	.red	= { .offset = 0,  .length = 8, },
+	.green	= { .offset = 0,  .length = 8, },
+	.blue	= { .offset = 0,  .length = 8, },
 	.transp	= { .offset = 0,  .length = 0, },
 };
 
@@ -252,22 +255,6 @@ static struct sa1100fb_mach_info pal_info __initdata = {
 #endif
 #endif
 
-#ifdef CONFIG_SA1100_H3800
-static struct sa1100fb_mach_info h3800_info __initdata = {
-	.pixclock	= 174757, 	.bpp		= 16,
-	.xres		= 320,		.yres		= 240,
-
-	.hsync_len	= 3,		.vsync_len	= 3,
-	.left_margin	= 12,		.upper_margin	= 10,
-	.right_margin	= 17,		.lower_margin	= 1,
-
-	.cmap_static	= 1,
-
-	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Act,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(2),
-};
-#endif
-
 #ifdef CONFIG_SA1100_H3600
 static struct sa1100fb_mach_info h3600_info __initdata = {
 	.pixclock	= 174757, 	.bpp		= 16,
@@ -309,127 +296,19 @@ static struct sa1100fb_mach_info h3100_info __initdata = {
 };
 #endif
 
-#ifdef CONFIG_SA1100_BRUTUS
-static struct sa1100fb_mach_info brutus_info __initdata = {
-	.pixclock	= 0,		.bpp		= 8,
+#ifdef CONFIG_SA1100_COLLIE
+static struct sa1100fb_mach_info collie_info __initdata = {
+	.pixclock	= 171521,	.bpp		= 16,
 	.xres		= 320,		.yres		= 240,
-
-	.hsync_len	= 3,		.vsync_len	= 1,
-	.left_margin	= 41,		.upper_margin	= 0,
-	.right_margin	= 101,		.lower_margin	= 0,
-
-	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
-
-	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Pas,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(2) |
-			  LCCR3_PixClkDiv(44),
-};
-#endif
-
-#ifdef CONFIG_SA1100_CERF
-static struct sa1100fb_mach_info cerf_info __initdata = {
-#if defined(CONFIG_CERF_LCD_72_A)
-	.pixclock	= 171521, 	.bpp		= 8,
-	.xres		= 640,		.yres		= 480,
-	.lccr0		= LCCR0_Color | LCCR0_Dual | LCCR0_Pas,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(2) |
-			  LCCR3_PixClkDiv(38),
-#elif defined(CONFIG_CERF_LCD_57_A)
-	.pixclock	= 171521, 	.bpp		= 8,
-	.xres		= 320,		.yres		= 240,
-	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Pas,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(2) |
-			  LCCR3_PixClkDiv(38),
-#elif defined(CONFIG_CERF_LCD_38_A)
-	.pixclock	= 171521, 	.bpp		= 8,
-	.xres		= 240,		.yres		= 320,
-	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Pas,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(56) |
-			  LCCR3_PixClkDiv(38),
-#elif defined(CONFIG_CERF_LCD_38_B)
-	.pixclock	= 171521,	.bpp		= 4,
-	.xres		= 320,		.yres		= 240,
-	.lccr0		= LCCR0_Mono | LCCR0_4PixMono | LCCR0_Sngl | LCCR0_Pas,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(56) |
-			  LCCR3_PixClkDiv(38),
-#else
-#error "Must have a CerfBoard LCD form factor selected"
-#endif
 
 	.hsync_len	= 5,		.vsync_len	= 1,
-	.left_margin	= 61,		.upper_margin	= 3,
-	.right_margin	= 9,		.lower_margin	= 0,
+	.left_margin	= 11,		.upper_margin	= 2,
+	.right_margin	= 30,		.lower_margin	= 0,
 
 	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
-
-};
-
-#if 0
-static struct sa1100fb_rgb cerf_rgb_16 = {
-	.red	= { .offset = 8,	.length = 4, },
-	.green	= { .offset = 4,	.length = 4, },
-	.blue	= { .offset = 0,	.length = 4, },
-	.transp	= { .offset = 0,	.length = 0, },
-};
-#endif
-#endif
-
-#ifdef CONFIG_SA1100_FREEBIRD
-#warning Please check this carefully
-static struct sa1100fb_mach_info freebird_info __initdata = {
-	.pixclock	= 171521,	.bpp		= 16,
-	.xres		= 240,		.yres		= 320,
-
-	.hsync_len	= 3,		.vsync_len	= 2,
-	.left_margin	= 2,		.upper_margin	= 0,
-	.right_margin	= 2,		.lower_margin	= 0,
-
-	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
-
-	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Pas,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixFlEdg | LCCR3_ACBsDiv(2),
-};
-
-static struct sa1100fb_rgb freebird_rgb_16 = {
-	.red	= { .offset = 8,  .length = 4, },
-	.green	= { .offset = 4,  .length = 4, },
-	.blue	= { .offset = 0,  .length = 4, },
-	.transp	= { .offset = 12, .length = 4, },
-};
-#endif
-
-#ifdef CONFIG_SA1100_GRAPHICSCLIENT
-static struct sa1100fb_mach_info graphicsclient_info __initdata = {
-	.pixclock	= 53500,	.bpp		= 8,
-	.xres		= 640,		.yres		= 480,
-
-	.hsync_len	= 9,		.vsync_len	= 9,
-	.left_margin	= 54,		.upper_margin	= 24,
-	.right_margin	= 54,		.lower_margin	= 32,
 
 	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Act,
 	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(2),
-};
-#endif
-
-#ifdef CONFIG_SA1100_HUW_WEBPANEL
-static struct sa1100fb_mach_info huw_webpanel_info __initdata = {
-	.pixclock	= 0,		.bpp		= 8,
-	.xres		= 640,		.yres		= 480,
-
-	.hsync_len	= 3,		.vsync_len	= 1,
-	.left_margin	= 41,		.upper_margin	= 0,
-	.right_margin	= 101,		.lower_margin	= 0,
-
-	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
-
-	.lccr0		= LCCR0_Color | LCCR0_Dual | LCCR0_Pas,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(2) | 8,
-#error FIXME
-	/*
-	 * FIXME: please get rid of the '| 8' in preference to an
-	 * LCCR3_PixClkDiv() version. --rmk
-	 */
 };
 #endif
 
@@ -501,142 +380,10 @@ static struct sa1100fb_mach_info shannon_info __initdata = {
 	.left_margin	= 2,		.upper_margin	= 0,
 	.right_margin	= 1,		.lower_margin	= 0,
 
-	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT, 
+	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
 
 	.lccr0		= LCCR0_Color | LCCR0_Dual | LCCR0_Pas,
 	.lccr3		= LCCR3_ACBsDiv(512),
-};
-#endif
-
-#ifdef CONFIG_SA1100_OMNIMETER
-static struct sa1100fb_mach_info omnimeter_info __initdata = {
-	.pixclock	= 0,		.bpp		= 4,
-	.xres		= 480,		.yres		= 320,
-
-	.hsync_len	= 1,		.vsync_len	= 1,
-	.left_margin	= 10,		.upper_margin	= 0,
-	.right_margin	= 10,		.lower_margin	= 0,
-
-	.cmap_greyscale	= 1,
-	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
-
-	.lccr0		= LCCR0_Mono | LCCR0_Sngl | LCCR0_Pas | LCCR0_8PixMono,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(255) |
-			  LCCR3_PixClkDiv(44),
-#error FIXME: fix pixclock, ACBsDiv
-	/*
-	 * FIXME: I think ACBsDiv is wrong above - should it be 512 (disabled)?
-	 *   - rmk
-	 */
-};
-#endif
-
-#ifdef CONFIG_SA1100_PANGOLIN
-static struct sa1100fb_mach_info pangolin_info __initdata = {
-	.pixclock	= 341521,	.bpp		= 16,
-	.xres		= 800,		.yres		= 600,
-
-	.hsync_len	= 64,		.vsync_len	= 7,
-	.left_margin	= 160,		.upper_margin	= 7,
-	.right_margin	= 24,		.lower_margin	= 1,
-
-	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
-
-	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Act,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixFlEdg | LCCR3_ACBsCntOff,
-};
-#endif
-
-#ifdef CONFIG_SA1100_STORK
-#if STORK_TFT			/* ie the NEC TFT */
-/*
- * pixclock is ps per clock. say 72Hz, 800x600 clocks => (1/72)/(800*600)
- * = 28935 and a bit
- * NB likely to be increased to ease bus timings wrt pcmcia interface
- */
-static struct sa1100fb_mach_info stork_tft_info __initdata = {
-	.pixclock	= 28935,	.bpp		= 16,
-	.xres		= 640,		.yres		= 480,
-
-	.hsync_len	= 64,		.vsync_len	= 2,
-	.left_margin	= 48,		.upper_margin	= 12,
-	.right_margin	= 48,		.lower_margin	= 31,
-
-	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Act,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsCntOff,
-};
-
-static struct sa1100fb_rgb stork_tft_rgb_16 = {
-	.red	= { .offset = 11, .length = 5, },
-	.green	= { .offset = 5,  .length = 6, },
-	.blue	= { .offset = 0,  .length = 5, },
-	.transp	= { .offset = 0,  .length = 0, },
-};
-
-#else	/* Kyocera DSTN */
-
-static struct sa1100fb_mach_info stork_dstn_info __initdata = {
-	.pixclock	= 0,		.bpp		= 16,
-	.xres		= 640,		.yres		= 480,
-
-	.hsync_len	= 2,		.vsync_len	= 2,
-	.left_margin	= 2,		.upper_margin	= 0,
-	.right_margin	= 2,		.lower_margin	= 0,
-
-	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT ,
-
-	.lccr0		= LCCR0_Color | LCCR0_Dual | LCCR0_Pas,
-#error Fixme
-	.lccr3		= 0xff00 |
-			0x18		/* ought to be 0x14 but DMA isn't up to that as yet */
-};
-
-static struct sa1100fb_rgb stork_dstn_rgb_16 = {
-	.red	= { .offset = 8,  .length = 4, },
-	.green	= { .offset = 4,  .length = 4, },
-	.blue	= { .offset = 0,  .length = 4, },
-	.transp	= { .offset = 0,  .length = 0, },
-};
-#endif
-#endif
-
-#ifdef CONFIG_SA1100_PT_SYSTEM3
-/*
- * 648 x 480 x 8bpp x 75Hz Dual Panel Color STN Display
- *
- * pixclock = 1/( 640*3/8*240 ), [pixclock]=1e-12s=ps
- *	3 due to r,g,b lines
- *	8 due to 8 bit data bus
- *	640 due to 640 pixels per line
- *	240 = 480/2 due to dual panel display
- *	=>4.32Mhz => 231481E-12s
- */
-static struct sa1100fb_mach_info system3_info __initdata = {
-	.pixclock	= 231481,	.bpp		= 8,
-	.xres		= 640,		.yres		= 480,
-
-	.hsync_len	= 2,		.vsync_len	= 2,
-	.left_margin	= 2,		.upper_margin	= 0,
-	.right_margin	= 2,		.lower_margin	= 0,
-
-	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
-
-	.lccr0		= LCCR0_Color | LCCR0_Dual | LCCR0_Pas,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_ACBsDiv(512),
-};
-#endif
-
-#ifdef CONFIG_SA1100_XP860
-static struct sa1100fb_mach_info xp860_info __initdata = {
-	.pixclock	= 0,		.bpp		= 8,
-	.xres		= 1024,		.yres		= 768,
-
-	.hsync_len	= 3,		.vsync_len	= 3,
-	.left_margin	= 3,		.upper_margin	= 2,
-	.right_margin	= 2,		.lower_margin	= 1,
-
-	.lccr0		= LCCR0_Color | LCCR0_Sngl | LCCR0_Act,
-	.lccr3		= LCCR3_OutEnH | LCCR3_PixRsEdg | LCCR3_PixClkDiv(6),
 };
 #endif
 
@@ -673,35 +420,9 @@ sa1100fb_get_machine_info(struct sa1100fb_info *fbi)
 		fbi->rgb[RGB_16] = &h3600_rgb_16;
 	}
 #endif
-#ifdef CONFIG_SA1100_H3800
-	if (machine_is_h3800()) {
-		inf = &h3800_info;
-	}
-#endif
-#ifdef CONFIG_SA1100_BRUTUS
-	if (machine_is_brutus()) {
-		inf = &brutus_info;
-	}
-#endif
-#ifdef CONFIG_SA1100_CERF
-	if (machine_is_cerf()) {
-		inf = &cerf_info;
-	}
-#endif
-#ifdef CONFIG_SA1100_FREEBIRD
-	if (machine_is_freebird()) {
-		inf = &freebird_info;
-		fbi->rgb[RGB_16] = &freebird_rgb16;
-	}
-#endif
-#ifdef CONFIG_SA1100_GRAPHICSCLIENT
-	if (machine_is_graphicsclient()) {
-		inf = &graphicsclient_info;
-	}
-#endif
-#ifdef CONFIG_SA1100_HUW_WEBPANEL
-	if (machine_is_huw_webpanel()) {
-		inf = &huw_webpanel_info;
+#ifdef CONFIG_SA1100_COLLIE
+	if (machine_is_collie()) {
+		inf = &collie_info;
 	}
 #endif
 #ifdef CONFIG_SA1100_LART
@@ -720,40 +441,9 @@ sa1100fb_get_machine_info(struct sa1100fb_info *fbi)
 #endif
 	}
 #endif
-#ifdef CONFIG_SA1100_OMNIMETER
-	if (machine_is_omnimeter()) {
-		inf = &omnimeter_info;
-	}
-#endif
-#ifdef CONFIG_SA1100_PANGOLIN
-	if (machine_is_pangolin()) {
-		inf = &pangolin_info;
-	}
-#endif
-#ifdef CONFIG_SA1100_PT_SYSTEM3
-	if (machine_is_pt_system3()) {
-		inf = &system3_info;
-	}
-#endif
 #ifdef CONFIG_SA1100_SHANNON
 	if (machine_is_shannon()) {
 		inf = &shannon_info;
-	}
-#endif
-#ifdef CONFIG_SA1100_STORK
-	if (machine_is_stork()) {
-#if STORK_TFT
-		inf = &stork_tft_info;
-		fbi->rgb[RGB_16] = &stork_tft_rgb_16;
-#else
-		inf = &stork_dstn_info;
-		fbi->rgb[RGB_16] = &stork_dstn_rgb_16;
-#endif
-	}
-#endif
-#ifdef CONFIG_SA1100_XP860
-	if (machine_is_xp860()) {
-		inf = &xp860_info;
 	}
 #endif
 	return inf;
@@ -884,13 +574,14 @@ sa1100fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	return ret;
 }
 
+#ifdef CONFIG_CPU_FREQ
 /*
  *  sa1100fb_display_dma_period()
  *    Calculate the minimum period (in picoseconds) between two DMA
  *    requests for the LCD controller.  If we hit this, it means we're
  *    doing nothing but LCD DMA.
  */
-static unsigned int sa1100fb_display_dma_period(struct fb_var_screeninfo *var)
+static inline unsigned int sa1100fb_display_dma_period(struct fb_var_screeninfo *var)
 {
 	/*
 	 * Period = pixclock * bits_per_byte * bytes_per_transfer
@@ -898,6 +589,7 @@ static unsigned int sa1100fb_display_dma_period(struct fb_var_screeninfo *var)
 	 */
 	return var->pixclock * 8 * 16 / var->bits_per_pixel;
 }
+#endif
 
 /*
  *  sa1100fb_check_var():
@@ -925,7 +617,7 @@ sa1100fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 	DPRINTK("var->bits_per_pixel=%d\n", var->bits_per_pixel);
 	switch (var->bits_per_pixel) {
 	case 4:
-		rgbidx = RGB_8;
+		rgbidx = RGB_4;
 		break;
 	case 8:
 		rgbidx = RGB_8;
@@ -1021,13 +713,6 @@ static int sa1100fb_set_par(struct fb_info *info)
 	 * Set (any) board control register to handle new color depth
 	 */
 	sa1100fb_set_truecolor(fbi->fb.fix.visual == FB_VISUAL_TRUECOLOR);
-
-#ifdef CONFIG_SA1100_OMNIMETER
-#error Do we have to do this here?   We already do it at init time.
-	if (machine_is_omnimeter())
-		SetLCDContrast(DefaultLCDContrast);
-#endif
-
 	sa1100fb_activate_var(var, fbi);
 
 	return 0;
@@ -1093,9 +778,10 @@ static int sa1100fb_blank(int blank, struct fb_info *info)
 	DPRINTK("sa1100fb_blank: blank=%d\n", blank);
 
 	switch (blank) {
-	case VESA_POWERDOWN:
-	case VESA_VSYNC_SUSPEND:
-	case VESA_HSYNC_SUSPEND:
+	case FB_BLANK_POWERDOWN:
+	case FB_BLANK_VSYNC_SUSPEND:
+	case FB_BLANK_HSYNC_SUSPEND:
+	case FB_BLANK_NORMAL:
 		if (fbi->fb.fix.visual == FB_VISUAL_PSEUDOCOLOR ||
 		    fbi->fb.fix.visual == FB_VISUAL_STATIC_PSEUDOCOLOR)
 			for (i = 0; i < fbi->palette_size; i++)
@@ -1103,13 +789,40 @@ static int sa1100fb_blank(int blank, struct fb_info *info)
 		sa1100fb_schedule_work(fbi, C_DISABLE);
 		break;
 
-	case VESA_NO_BLANKING:
+	case FB_BLANK_UNBLANK:
 		if (fbi->fb.fix.visual == FB_VISUAL_PSEUDOCOLOR ||
 		    fbi->fb.fix.visual == FB_VISUAL_STATIC_PSEUDOCOLOR)
-			fb_set_cmap(&fbi->fb.cmap, 1, info);
+			fb_set_cmap(&fbi->fb.cmap, info);
 		sa1100fb_schedule_work(fbi, C_ENABLE);
 	}
 	return 0;
+}
+
+static int sa1100fb_mmap(struct fb_info *info,
+			 struct vm_area_struct *vma)
+{
+	struct sa1100fb_info *fbi = (struct sa1100fb_info *)info;
+	unsigned long start, len, off = vma->vm_pgoff << PAGE_SHIFT;
+
+	if (off < info->fix.smem_len) {
+		vma->vm_pgoff += 1; /* skip over the palette */
+		return dma_mmap_writecombine(fbi->dev, vma, fbi->map_cpu,
+					     fbi->map_dma, fbi->map_size);
+	}
+
+	start = info->fix.mmio_start;
+	len = PAGE_ALIGN((start & ~PAGE_MASK) + info->fix.mmio_len);
+
+	if ((vma->vm_end - vma->vm_start + off) > len)
+		return -EINVAL;
+
+	off += start & PAGE_MASK;
+	vma->vm_pgoff = off >> PAGE_SHIFT;
+	vma->vm_flags |= VM_IO;
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+	return io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
+				   vma->vm_end - vma->vm_start,
+				   vma->vm_page_prot);
 }
 
 static struct fb_ops sa1100fb_ops = {
@@ -1122,7 +835,7 @@ static struct fb_ops sa1100fb_ops = {
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
 	.fb_blank	= sa1100fb_blank,
-	.fb_cursor	= soft_cursor,
+	.fb_mmap	= sa1100fb_mmap,
 };
 
 /*
@@ -1294,10 +1007,6 @@ static void sa1100fb_setup_gpio(struct sa1100fb_info *fbi)
 
 	}
 
-	/* GPIO15 is used as a bypass for 3.8" displays */
-	if (machine_is_cerf())
-		mask |= GPIO_GPIO15;
-
 	if (mask) {
 		GPDR |= mask;
 		GAFR |= mask;
@@ -1323,20 +1032,10 @@ static void sa1100fb_enable_controller(struct sa1100fb_info *fbi)
 	DBAR2 = fbi->dbar2;
 	LCCR0 |= LCCR0_LEN;
 
-#ifdef CONFIG_SA1100_GRAPHICSCLIENT
-#error Where is GPIO24 set as an output?  Can we fit this in somewhere else?
-	if (machine_is_graphicsclient()) {
-		// From ADS doc again...same as disable
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(20 * HZ / 1000);
-		GPSR |= GPIO_GPIO24;
-	}
-#endif
-
 	if (machine_is_shannon()) {
 		GPDR |= SHANNON_GPIO_DISP_EN;
 		GPSR |= SHANNON_GPIO_DISP_EN;
-	}	
+	}
 
 	DPRINTK("DBAR1 = 0x%08x\n", DBAR1);
 	DPRINTK("DBAR2 = 0x%08x\n", DBAR2);
@@ -1352,36 +1051,12 @@ static void sa1100fb_disable_controller(struct sa1100fb_info *fbi)
 
 	DPRINTK("Disabling LCD controller\n");
 
-#ifdef CONFIG_SA1100_GRAPHICSCLIENT
-#error Where is GPIO24 set as an output?  Can we fit this in somewhere else?
-	if (machine_is_graphicsclient()) {
-		/*
-		 * From ADS internal document:
-		 *  GPIO24 should be LOW at least 10msec prior to disabling
-		 *  the LCD interface.
-		 *
-		 * We'll wait 20msec.
-		 */
-		GPCR |= GPIO_GPIO24;
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(20 * HZ / 1000);
-	}
-#endif
-#ifdef CONFIG_SA1100_HUW_WEBPANEL
-#error Move me into __sa1100fb_lcd_power and/or __sa1100fb_backlight_power
-	if (machine_is_huw_webpanel()) {
-		// don't forget to set the control lines to zero (?)
-		DPRINTK("ShutDown HuW LCD controller\n");
-		BCR_clear(BCR_TFT_ENA + BCR_CCFL_POW + BCR_PWM_BACKLIGHT);
-	}
-#endif
-
 	if (machine_is_shannon()) {
 		GPCR |= SHANNON_GPIO_DISP_EN;
 	}	
 
-	add_wait_queue(&fbi->ctrlr_wait, &wait);
 	set_current_state(TASK_UNINTERRUPTIBLE);
+	add_wait_queue(&fbi->ctrlr_wait, &wait);
 
 	LCSR = 0xffffffff;	/* Clear LCD Status Register */
 	LCCR0 &= ~LCCR0_LDM;	/* Enable LCD Disable Done Interrupt */
@@ -1394,7 +1069,7 @@ static void sa1100fb_disable_controller(struct sa1100fb_info *fbi)
 /*
  *  sa1100fb_handle_irq: Handle 'LCD DONE' interrupts.
  */
-static irqreturn_t sa1100fb_handle_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sa1100fb_handle_irq(int irq, void *dev_id)
 {
 	struct sa1100fb_info *fbi = dev_id;
 	unsigned int lcsr = LCSR;
@@ -1417,7 +1092,7 @@ static void set_ctrlr_state(struct sa1100fb_info *fbi, u_int state)
 {
 	u_int old_state;
 
-	down(&fbi->ctrlr_sem);
+	mutex_lock(&fbi->ctrlr_lock);
 
 	old_state = fbi->state;
 
@@ -1502,16 +1177,16 @@ static void set_ctrlr_state(struct sa1100fb_info *fbi, u_int state)
 		}
 		break;
 	}
-	up(&fbi->ctrlr_sem);
+	mutex_unlock(&fbi->ctrlr_lock);
 }
 
 /*
  * Our LCD controller task (which is called when we blank or unblank)
  * via keventd.
  */
-static void sa1100fb_task(void *dummy)
+static void sa1100fb_task(struct work_struct *w)
 {
-	struct sa1100fb_info *fbi = dummy;
+	struct sa1100fb_info *fbi = container_of(w, struct sa1100fb_info, task);
 	u_int state = xchg(&fbi->task_state, -1);
 
 	set_ctrlr_state(fbi, state);
@@ -1615,21 +1290,19 @@ sa1100fb_freq_policy(struct notifier_block *nb, unsigned long val,
  * Power management hooks.  Note that we won't be called from IRQ context,
  * unlike the blank functions above, so we may sleep.
  */
-static int sa1100fb_suspend(struct device *dev, u32 state, u32 level)
+static int sa1100fb_suspend(struct platform_device *dev, pm_message_t state)
 {
-	struct sa1100fb_info *fbi = dev_get_drvdata(dev);
+	struct sa1100fb_info *fbi = platform_get_drvdata(dev);
 
-	if (level == SUSPEND_DISABLE || level == SUSPEND_POWER_DOWN)
-		set_ctrlr_state(fbi, C_DISABLE_PM);
+	set_ctrlr_state(fbi, C_DISABLE_PM);
 	return 0;
 }
 
-static int sa1100fb_resume(struct device *dev, u32 level)
+static int sa1100fb_resume(struct platform_device *dev)
 {
-	struct sa1100fb_info *fbi = dev_get_drvdata(dev);
+	struct sa1100fb_info *fbi = platform_get_drvdata(dev);
 
-	if (level == RESUME_ENABLE)
-		set_ctrlr_state(fbi, C_ENABLE_PM);
+	set_ctrlr_state(fbi, C_ENABLE_PM);
 	return 0;
 }
 #else
@@ -1652,12 +1325,18 @@ static int __init sa1100fb_map_video_memory(struct sa1100fb_info *fbi)
 	 * of the framebuffer.
 	 */
 	fbi->map_size = PAGE_ALIGN(fbi->fb.fix.smem_len + PAGE_SIZE);
-	fbi->map_cpu = consistent_alloc(GFP_KERNEL, fbi->map_size,
-					&fbi->map_dma, PTE_BUFFERABLE);
+	fbi->map_cpu = dma_alloc_writecombine(fbi->dev, fbi->map_size,
+					      &fbi->map_dma, GFP_KERNEL);
 
 	if (fbi->map_cpu) {
 		fbi->fb.screen_base = fbi->map_cpu + PAGE_SIZE;
 		fbi->screen_dma = fbi->map_dma + PAGE_SIZE;
+		/*
+		 * FIXME: this is actually the wrong thing to place in
+		 * smem_start.  But fbdev suffers from the problem that
+		 * it needs an API which doesn't exist (in this case,
+		 * dma_writecombine_mmap)
+		 */
 		fbi->fb.fix.smem_start = fbi->screen_dma;
 	}
 
@@ -1666,11 +1345,14 @@ static int __init sa1100fb_map_video_memory(struct sa1100fb_info *fbi)
 
 /* Fake monspecs to fill in fbinfo structure */
 static struct fb_monspecs monspecs __initdata = {
-	30000, 70000, 50, 65, 0	/* Generic */
+	.hfmin	= 30000,
+	.hfmax	= 70000,
+	.vfmin	= 50,
+	.vfmax	= 65,
 };
 
 
-static struct sa1100fb_info * __init sa1100fb_init_fbinfo(void)
+static struct sa1100fb_info * __init sa1100fb_init_fbinfo(struct device *dev)
 {
 	struct sa1100fb_mach_info *inf;
 	struct sa1100fb_info *fbi;
@@ -1681,6 +1363,7 @@ static struct sa1100fb_info * __init sa1100fb_init_fbinfo(void)
 		return NULL;
 
 	memset(fbi, 0, sizeof(struct sa1100fb_info));
+	fbi->dev = dev;
 
 	strcpy(fbi->fb.fix.id, SA1100_NAME);
 
@@ -1699,11 +1382,11 @@ static struct sa1100fb_info * __init sa1100fb_init_fbinfo(void)
 	fbi->fb.var.vmode	= FB_VMODE_NONINTERLACED;
 
 	fbi->fb.fbops		= &sa1100fb_ops;
-	fbi->fb.flags		= FBINFO_FLAG_DEFAULT;
+	fbi->fb.flags		= FBINFO_DEFAULT;
 	fbi->fb.monspecs	= monspecs;
-	fbi->fb.currcon		= -1;
 	fbi->fb.pseudo_palette	= (fbi + 1);
 
+	fbi->rgb[RGB_4]		= &rgb_4;
 	fbi->rgb[RGB_8]		= &rgb_8;
 	fbi->rgb[RGB_16]	= &def_rgb_16;
 
@@ -1746,21 +1429,25 @@ static struct sa1100fb_info * __init sa1100fb_init_fbinfo(void)
 					  fbi->max_bpp / 8;
 
 	init_waitqueue_head(&fbi->ctrlr_wait);
-	INIT_WORK(&fbi->task, sa1100fb_task, fbi);
-	init_MUTEX(&fbi->ctrlr_sem);
+	INIT_WORK(&fbi->task, sa1100fb_task);
+	mutex_init(&fbi->ctrlr_lock);
 
 	return fbi;
 }
 
-static int __init sa1100fb_probe(struct device *dev)
+static int __devinit sa1100fb_probe(struct platform_device *pdev)
 {
 	struct sa1100fb_info *fbi;
-	int ret;
+	int ret, irq;
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return -EINVAL;
 
 	if (!request_mem_region(0xb0100000, 0x10000, "LCD"))
 		return -EBUSY;
 
-	fbi = sa1100fb_init_fbinfo();
+	fbi = sa1100fb_init_fbinfo(&pdev->dev);
 	ret = -ENOMEM;
 	if (!fbi)
 		goto failed;
@@ -1770,7 +1457,7 @@ static int __init sa1100fb_probe(struct device *dev)
 	if (ret)
 		goto failed;
 
-	ret = request_irq(IRQ_LCD, sa1100fb_handle_irq, SA_INTERRUPT,
+	ret = request_irq(irq, sa1100fb_handle_irq, IRQF_DISABLED,
 			  "LCD", fbi);
 	if (ret) {
 		printk(KERN_ERR "sa1100fb: request_irq failed: %d\n", ret);
@@ -1782,27 +1469,17 @@ static int __init sa1100fb_probe(struct device *dev)
 		ASSABET_BCR_clear(ASSABET_BCR_LCD_ON);
 #endif
 
-#ifdef CONFIG_SA1100_FREEBIRD
-#error Please move this into __sa1100fb_lcd_power
-	if (machine_is_freebird()) {
-		BCR_set(BCR_FREEBIRD_LCD_DISP);
-		mdelay(20);
-		BCR_set(BCR_FREEBIRD_LCD_PWR);
-		mdelay(20);
-	}
-#endif
-
 	/*
 	 * This makes sure that our colour bitfield
 	 * descriptors are correctly initialised.
 	 */
 	sa1100fb_check_var(&fbi->fb.var, &fbi->fb);
 
-	dev_set_drvdata(dev, fbi);
+	platform_set_drvdata(pdev, fbi);
 
 	ret = register_framebuffer(&fbi->fb);
 	if (ret < 0)
-		goto failed;
+		goto err_free_irq;
 
 #ifdef CONFIG_CPU_FREQ
 	fbi->freq_transition.notifier_call = sa1100fb_freq_transition;
@@ -1812,29 +1489,32 @@ static int __init sa1100fb_probe(struct device *dev)
 #endif
 
 	/* This driver cannot be unloaded at the moment */
-	MOD_INC_USE_COUNT;
-
 	return 0;
 
-failed:
-	dev_set_drvdata(dev, NULL);
-	if (fbi)
-		kfree(fbi);
+ err_free_irq:
+	free_irq(irq, fbi);
+ failed:
+	platform_set_drvdata(pdev, NULL);
+	kfree(fbi);
 	release_mem_region(0xb0100000, 0x10000);
 	return ret;
 }
 
-static struct device_driver sa1100fb_driver = {
-	.name		= "sa11x0-fb",
-	.bus		= &platform_bus_type,
+static struct platform_driver sa1100fb_driver = {
 	.probe		= sa1100fb_probe,
 	.suspend	= sa1100fb_suspend,
 	.resume		= sa1100fb_resume,
+	.driver		= {
+		.name	= "sa11x0-fb",
+	},
 };
 
 int __init sa1100fb_init(void)
 {
-	return driver_register(&sa1100fb_driver);
+	if (fb_get_options("sa1100fb", NULL))
+		return -ENODEV;
+
+	return platform_driver_register(&sa1100fb_driver);
 }
 
 int __init sa1100fb_setup(char *options)
@@ -1878,5 +1558,6 @@ int __init sa1100fb_setup(char *options)
 	return 0;
 }
 
+module_init(sa1100fb_init);
 MODULE_DESCRIPTION("StrongARM-1100/1110 framebuffer driver");
 MODULE_LICENSE("GPL");

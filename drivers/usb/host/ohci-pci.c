@@ -3,298 +3,359 @@
  *
  * (C) Copyright 1999 Roman Weissgaerber <weissg@vienna.at>
  * (C) Copyright 2000-2002 David Brownell <dbrownell@users.sourceforge.net>
- * 
+ *
  * [ Initialisation is based on Linus'  ]
  * [ uhci code and gregs ohci fragments ]
  * [ (C) Copyright 1999 Linus Torvalds  ]
  * [ (C) Copyright 1999 Gregory P. Smith]
- * 
+ *
  * PCI Bus Glue
  *
  * This file is licenced under the GPL.
  */
- 
-#ifdef CONFIG_PMAC_PBOOK
-#include <asm/machdep.h>
-#include <asm/pmac_feature.h>
-#include <asm/pci-bridge.h>
-#include <asm/prom.h>
-#ifndef CONFIG_PM
-#	define CONFIG_PM
-#endif
-#endif
 
 #ifndef CONFIG_PCI
 #error "This file is PCI bus glue.  CONFIG_PCI must be defined."
 #endif
 
+#include <linux/pci.h>
+#include <linux/io.h>
+
+
 /*-------------------------------------------------------------------------*/
 
-static int
-ohci_pci_reset (struct usb_hcd *hcd)
+static int broken_suspend(struct usb_hcd *hcd)
+{
+	device_init_wakeup(&hcd->self.root_hub->dev, 0);
+	return 0;
+}
+
+/* AMD 756, for most chips (early revs), corrupts register
+ * values on read ... so enable the vendor workaround.
+ */
+static int ohci_quirk_amd756(struct usb_hcd *hcd)
 {
 	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
 
-	ohci->regs = hcd->regs;
-	return hc_reset (ohci);
+	ohci->flags = OHCI_QUIRK_AMD756;
+	ohci_dbg (ohci, "AMD756 erratum 4 workaround\n");
+
+	/* also erratum 10 (suspend/resume issues) */
+	return broken_suspend(hcd);
 }
 
-static int __devinit
-ohci_pci_start (struct usb_hcd *hcd)
+/* Apple's OHCI driver has a lot of bizarre workarounds
+ * for this chip.  Evidently control and bulk lists
+ * can get confused.  (B&W G3 models, and ...)
+ */
+static int ohci_quirk_opti(struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+
+	ohci_dbg (ohci, "WARNING: OPTi workarounds unavailable\n");
+
+	return 0;
+}
+
+/* Check for NSC87560. We have to look at the bridge (fn1) to
+ * identify the USB (fn2). This quirk might apply to more or
+ * even all NSC stuff.
+ */
+static int ohci_quirk_ns(struct usb_hcd *hcd)
+{
+	struct pci_dev *pdev = to_pci_dev(hcd->self.controller);
+	struct pci_dev	*b;
+
+	b  = pci_get_slot (pdev->bus, PCI_DEVFN (PCI_SLOT (pdev->devfn), 1));
+	if (b && b->device == PCI_DEVICE_ID_NS_87560_LIO
+	    && b->vendor == PCI_VENDOR_ID_NS) {
+		struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+
+		ohci->flags |= OHCI_QUIRK_SUPERIO;
+		ohci_dbg (ohci, "Using NSC SuperIO setup\n");
+	}
+	pci_dev_put(b);
+
+	return 0;
+}
+
+/* Check for Compaq's ZFMicro chipset, which needs short
+ * delays before control or bulk queues get re-activated
+ * in finish_unlinks()
+ */
+static int ohci_quirk_zfmicro(struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+
+	ohci->flags |= OHCI_QUIRK_ZFMICRO;
+	ohci_dbg(ohci, "enabled Compaq ZFMicro chipset quirks\n");
+
+	return 0;
+}
+
+/* Check for Toshiba SCC OHCI which has big endian registers
+ * and little endian in memory data structures
+ */
+static int ohci_quirk_toshiba_scc(struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+
+	/* That chip is only present in the southbridge of some
+	 * cell based platforms which are supposed to select
+	 * CONFIG_USB_OHCI_BIG_ENDIAN_MMIO. We verify here if
+	 * that was the case though.
+	 */
+#ifdef CONFIG_USB_OHCI_BIG_ENDIAN_MMIO
+	ohci->flags |= OHCI_QUIRK_BE_MMIO;
+	ohci_dbg (ohci, "enabled big endian Toshiba quirk\n");
+	return 0;
+#else
+	ohci_err (ohci, "unsupported big endian Toshiba quirk\n");
+	return -ENXIO;
+#endif
+}
+
+/* Check for NEC chip and apply quirk for allegedly lost interrupts.
+ */
+
+static void ohci_quirk_nec_worker(struct work_struct *work)
+{
+	struct ohci_hcd *ohci = container_of(work, struct ohci_hcd, nec_work);
+	int status;
+
+	status = ohci_init(ohci);
+	if (status != 0) {
+		ohci_err(ohci, "Restarting NEC controller failed in %s, %d\n",
+			 "ohci_init", status);
+		return;
+	}
+
+	status = ohci_restart(ohci);
+	if (status != 0)
+		ohci_err(ohci, "Restarting NEC controller failed in %s, %d\n",
+			 "ohci_restart", status);
+}
+
+static int ohci_quirk_nec(struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+
+	ohci->flags |= OHCI_QUIRK_NEC;
+	INIT_WORK(&ohci->nec_work, ohci_quirk_nec_worker);
+	ohci_dbg (ohci, "enabled NEC chipset lost interrupt quirk\n");
+
+	return 0;
+}
+
+static int ohci_quirk_amd700(struct usb_hcd *hcd)
+{
+	struct ohci_hcd *ohci = hcd_to_ohci(hcd);
+	struct pci_dev *amd_smbus_dev;
+	u8 rev;
+
+	if (usb_amd_find_chipset_info())
+		ohci->flags |= OHCI_QUIRK_AMD_PLL;
+
+	amd_smbus_dev = pci_get_device(PCI_VENDOR_ID_ATI,
+			PCI_DEVICE_ID_ATI_SBX00_SMBUS, NULL);
+	if (!amd_smbus_dev)
+		return 0;
+
+	rev = amd_smbus_dev->revision;
+
+	/* SB800 needs pre-fetch fix */
+	if ((rev >= 0x40) && (rev <= 0x4f)) {
+		ohci->flags |= OHCI_QUIRK_AMD_PREFETCH;
+		ohci_dbg(ohci, "enabled AMD prefetch quirk\n");
+	}
+
+	pci_dev_put(amd_smbus_dev);
+	amd_smbus_dev = NULL;
+
+	return 0;
+}
+
+/* nVidia controllers continue to drive Reset signalling on the bus
+ * even after system shutdown, wasting power.  This flag tells the
+ * shutdown routine to leave the controller OPERATIONAL instead of RESET.
+ */
+static int ohci_quirk_nvidia_shutdown(struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci(hcd);
+
+	ohci->flags |= OHCI_QUIRK_SHUTDOWN;
+	ohci_dbg(ohci, "enabled nVidia shutdown quirk\n");
+
+	return 0;
+}
+
+static void sb800_prefetch(struct ohci_hcd *ohci, int on)
+{
+	struct pci_dev *pdev;
+	u16 misc;
+
+	pdev = to_pci_dev(ohci_to_hcd(ohci)->self.controller);
+	pci_read_config_word(pdev, 0x50, &misc);
+	if (on == 0)
+		pci_write_config_word(pdev, 0x50, misc & 0xfcff);
+	else
+		pci_write_config_word(pdev, 0x50, misc | 0x0300);
+}
+
+/* List of quirks for OHCI */
+static const struct pci_device_id ohci_pci_quirks[] = {
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_AMD, 0x740c),
+		.driver_data = (unsigned long)ohci_quirk_amd756,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_OPTI, 0xc861),
+		.driver_data = (unsigned long)ohci_quirk_opti,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_NS, PCI_ANY_ID),
+		.driver_data = (unsigned long)ohci_quirk_ns,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_COMPAQ, 0xa0f8),
+		.driver_data = (unsigned long)ohci_quirk_zfmicro,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_TOSHIBA_2, 0x01b6),
+		.driver_data = (unsigned long)ohci_quirk_toshiba_scc,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_USB),
+		.driver_data = (unsigned long)ohci_quirk_nec,
+	},
+	{
+		/* Toshiba portege 4000 */
+		.vendor		= PCI_VENDOR_ID_AL,
+		.device		= 0x5237,
+		.subvendor	= PCI_VENDOR_ID_TOSHIBA,
+		.subdevice	= 0x0004,
+		.driver_data	= (unsigned long) broken_suspend,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_ITE, 0x8152),
+		.driver_data = (unsigned long) broken_suspend,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_ATI, 0x4397),
+		.driver_data = (unsigned long)ohci_quirk_amd700,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_ATI, 0x4398),
+		.driver_data = (unsigned long)ohci_quirk_amd700,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_ATI, 0x4399),
+		.driver_data = (unsigned long)ohci_quirk_amd700,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID),
+		.driver_data = (unsigned long) ohci_quirk_nvidia_shutdown,
+	},
+
+	/* FIXME for some of the early AMD 760 southbridges, OHCI
+	 * won't work at all.  blacklist them.
+	 */
+
+	{},
+};
+
+static int ohci_pci_reset (struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+	int ret = 0;
+
+	if (hcd->self.controller) {
+		struct pci_dev *pdev = to_pci_dev(hcd->self.controller);
+		const struct pci_device_id *quirk_id;
+
+		quirk_id = pci_match_id(ohci_pci_quirks, pdev);
+		if (quirk_id != NULL) {
+			int (*quirk)(struct usb_hcd *ohci);
+			quirk = (void *)quirk_id->driver_data;
+			ret = quirk(hcd);
+		}
+	}
+	if (ret == 0) {
+		ohci_hcd_init (ohci);
+		return ohci_init (ohci);
+	}
+	return ret;
+}
+
+
+static int __devinit ohci_pci_start (struct usb_hcd *hcd)
 {
 	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
 	int		ret;
 
-	if (hcd->pdev) {
-		ohci->hcca = pci_alloc_consistent (hcd->pdev,
-				sizeof *ohci->hcca, &ohci->hcca_dma);
-		if (!ohci->hcca)
-			return -ENOMEM;
+#ifdef CONFIG_PM /* avoid warnings about unused pdev */
+	if (hcd->self.controller) {
+		struct pci_dev *pdev = to_pci_dev(hcd->self.controller);
 
-		/* AMD 756, for most chips (early revs), corrupts register
-		 * values on read ... so enable the vendor workaround.
+		/* RWC may not be set for add-in PCI cards, since boot
+		 * firmware probably ignored them.  This transfers PCI
+		 * PM wakeup capabilities.
 		 */
-		if (hcd->pdev->vendor == PCI_VENDOR_ID_AMD
-				&& hcd->pdev->device == 0x740c) {
-			ohci->flags = OHCI_QUIRK_AMD756;
-			ohci_info (ohci, "AMD756 erratum 4 workaround\n");
-		}
-
-		/* FIXME for some of the early AMD 760 southbridges, OHCI
-		 * won't work at all.  blacklist them.
-		 */
-
-		/* Apple's OHCI driver has a lot of bizarre workarounds
-		 * for this chip.  Evidently control and bulk lists
-		 * can get confused.  (B&W G3 models, and ...)
-		 */
-		else if (hcd->pdev->vendor == PCI_VENDOR_ID_OPTI
-				&& hcd->pdev->device == 0xc861) {
-			ohci_info (ohci,
-				"WARNING: OPTi workarounds unavailable\n");
-		}
-
-		/* Check for NSC87560. We have to look at the bridge (fn1) to
-		 * identify the USB (fn2). This quirk might apply to more or
-		 * even all NSC stuff.
-		 */
-		else if (hcd->pdev->vendor == PCI_VENDOR_ID_NS) {
-			struct pci_dev	*b, *hc;
-
-			hc = hcd->pdev;
-			b  = pci_find_slot (hc->bus->number,
-					PCI_DEVFN (PCI_SLOT (hc->devfn), 1));
-			if (b && b->device == PCI_DEVICE_ID_NS_87560_LIO
-					&& b->vendor == PCI_VENDOR_ID_NS) {
-				ohci->flags |= OHCI_QUIRK_SUPERIO;
-				ohci_info (ohci, "Using NSC SuperIO setup\n");
-			}
-		}
-	
+		if (device_can_wakeup(&pdev->dev))
+			ohci->hc_control |= OHCI_CTRL_RWC;
 	}
+#endif /* CONFIG_PM */
 
-        memset (ohci->hcca, 0, sizeof (struct ohci_hcca));
-	if ((ret = ohci_mem_init (ohci)) < 0) {
-		ohci_stop (hcd);
-		return ret;
-	}
-
-	if (hc_start (ohci) < 0) {
+	ret = ohci_run (ohci);
+	if (ret < 0) {
 		ohci_err (ohci, "can't start\n");
 		ohci_stop (hcd);
-		return -EBUSY;
 	}
-	create_debug_files (ohci);
-
-#ifdef	DEBUG
-	ohci_dump (ohci, 1);
-#endif
-	return 0;
+	return ret;
 }
 
 #ifdef	CONFIG_PM
 
-static int ohci_pci_suspend (struct usb_hcd *hcd, u32 state)
+static int ohci_pci_suspend(struct usb_hcd *hcd, bool do_wakeup)
 {
-	struct ohci_hcd		*ohci = hcd_to_ohci (hcd);
-	u16			cmd;
-	u32			tmp;
+	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+	unsigned long	flags;
+	int		rc = 0;
 
-	if ((ohci->hc_control & OHCI_CTRL_HCFS) != OHCI_USB_OPER) {
-		ohci_dbg (ohci, "can't suspend (state is %s)\n",
-			hcfs2string (ohci->hc_control & OHCI_CTRL_HCFS));
-		return -EIO;
-	}
-
-	/* act as if usb suspend can always be used */
-	ohci_dbg (ohci, "suspend to %d\n", state);
-	
-	/* First stop processing */
-  	spin_lock_irq (&ohci->lock);
-	ohci->hc_control &=
-		~(OHCI_CTRL_PLE|OHCI_CTRL_CLE|OHCI_CTRL_BLE|OHCI_CTRL_IE);
-	writel (ohci->hc_control, &ohci->regs->control);
-	writel (OHCI_INTR_SF, &ohci->regs->intrstatus);
-	(void) readl (&ohci->regs->intrstatus);
-  	spin_unlock_irq (&ohci->lock);
-
-	/* Wait a frame or two */
-	mdelay (1);
-	if (!readl (&ohci->regs->intrstatus) & OHCI_INTR_SF)
-		mdelay (1);
-		
-#ifdef CONFIG_PMAC_PBOOK
-	if (_machine == _MACH_Pmac)
-		disable_irq (hcd->pdev->irq);
- 	/* else, 2.4 assumes shared irqs -- don't disable */
-#endif
-
-	/* Enable remote wakeup */
-	writel (readl (&ohci->regs->intrenable) | OHCI_INTR_RD,
-		&ohci->regs->intrenable);
-
-	/* Suspend chip and let things settle down a bit */
-  	spin_lock_irq (&ohci->lock);
- 	ohci->hc_control = OHCI_USB_SUSPEND;
- 	writel (ohci->hc_control, &ohci->regs->control);
-	(void) readl (&ohci->regs->control);
-  	spin_unlock_irq (&ohci->lock);
-
-	set_current_state (TASK_UNINTERRUPTIBLE);
-	schedule_timeout (HZ/2);
-
-	tmp = readl (&ohci->regs->control) | OHCI_CTRL_HCFS;
-	switch (tmp) {
-		case OHCI_USB_RESET:
-		case OHCI_USB_RESUME:
-		case OHCI_USB_OPER:
-			ohci_err (ohci, "can't suspend; hcfs %d\n", tmp);
-			break;
-		case OHCI_USB_SUSPEND:
-			ohci_dbg (ohci, "suspended\n");
-			break;
-	}
-
-	/* In some rare situations, Apple's OHCI have happily trashed
-	 * memory during sleep. We disable its bus master bit during
-	 * suspend
+	/* Root hub was already suspended. Disable irq emission and
+	 * mark HW unaccessible, bail out if RH has been resumed. Use
+	 * the spinlock to properly synchronize with possible pending
+	 * RH suspend or resume activity.
+	 *
+	 * This is still racy as hcd->state is manipulated outside of
+	 * any locks =P But that will be a different fix.
 	 */
-	pci_read_config_word (hcd->pdev, PCI_COMMAND, &cmd);
-	cmd &= ~PCI_COMMAND_MASTER;
-	pci_write_config_word (hcd->pdev, PCI_COMMAND, cmd);
-#ifdef CONFIG_PMAC_PBOOK
-	{
-	   	struct device_node	*of_node;
- 
-		/* Disable USB PAD & cell clock */
-		of_node = pci_device_to_OF_node (hcd->pdev);
-		if (of_node)
-			pmac_call_feature(PMAC_FTR_USB_ENABLE, of_node, 0, 0);
+	spin_lock_irqsave (&ohci->lock, flags);
+	if (hcd->state != HC_STATE_SUSPENDED) {
+		rc = -EINVAL;
+		goto bail;
 	}
-#endif
-	return 0;
+	ohci_writel(ohci, OHCI_INTR_MIE, &ohci->regs->intrdisable);
+	(void)ohci_readl(ohci, &ohci->regs->intrdisable);
+
+	clear_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+ bail:
+	spin_unlock_irqrestore (&ohci->lock, flags);
+
+	return rc;
 }
 
 
-static int ohci_pci_resume (struct usb_hcd *hcd)
+static int ohci_pci_resume(struct usb_hcd *hcd, bool hibernated)
 {
-	struct ohci_hcd		*ohci = hcd_to_ohci (hcd);
-	int			temp;
-	int			retval = 0;
+	set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
 
-#ifdef CONFIG_PMAC_PBOOK
-	{
-		struct device_node *of_node;
+	/* Make sure resume from hibernation re-enumerates everything */
+	if (hibernated)
+		ohci_usb_reset(hcd_to_ohci(hcd));
 
-		/* Re-enable USB PAD & cell clock */
-		of_node = pci_device_to_OF_node (hcd->pdev);
-		if (of_node)
-			pmac_call_feature (PMAC_FTR_USB_ENABLE, of_node, 0, 1);
-	}
-#endif
-	/* did we suspend, or were we powered off? */
-	ohci->hc_control = readl (&ohci->regs->control);
-	temp = ohci->hc_control & OHCI_CTRL_HCFS;
-
-#ifdef DEBUG
-	/* the registers may look crazy here */
-	ohci_dump_status (ohci, 0, 0);
-#endif
-
-	/* Re-enable bus mastering */
-	pci_set_master (ohci->hcd.pdev);
-	
-	switch (temp) {
-
-	case OHCI_USB_RESET:	// lost power
-restart:
-		ohci_info (ohci, "USB restart\n");
-		retval = hc_restart (ohci);
-		break;
-
-	case OHCI_USB_SUSPEND:	// host wakeup
-	case OHCI_USB_RESUME:	// remote wakeup
-		ohci_info (ohci, "USB continue from %s wakeup\n",
-			 (temp == OHCI_USB_SUSPEND)
-				? "host" : "remote");
-
-		/* we "should" only need RESUME if we're SUSPENDed ... */
-		ohci->hc_control = OHCI_USB_RESUME;
-		writel (ohci->hc_control, &ohci->regs->control);
-		(void) readl (&ohci->regs->control);
-		/* Some controllers (lucent) need extra-long delays */
-		mdelay (35); /* no schedule here ! */
-
-		temp = readl (&ohci->regs->control);
-		temp = ohci->hc_control & OHCI_CTRL_HCFS;
-		if (temp != OHCI_USB_RESUME) {
-			ohci_err (ohci, "controller won't resume\n");
-			/* maybe we can reset */
-			goto restart;
-		}
-
-		/* Then re-enable operations */
-		writel (OHCI_USB_OPER, &ohci->regs->control);
-		(void) readl (&ohci->regs->control);
-		mdelay (3);
-
-		spin_lock_irq (&ohci->lock);
-		ohci->hc_control = OHCI_CONTROL_INIT | OHCI_USB_OPER;
-		if (!ohci->ed_rm_list) {
-			if (ohci->ed_controltail)
-				ohci->hc_control |= OHCI_CTRL_CLE;
-			if (ohci->ed_bulktail)
-				ohci->hc_control |= OHCI_CTRL_BLE;
-		}
-		hcd->state = USB_STATE_RUNNING;
-		writel (ohci->hc_control, &ohci->regs->control);
-
-		/* trigger a start-frame interrupt (why?) */
-		writel (OHCI_INTR_SF, &ohci->regs->intrstatus);
-		writel (OHCI_INTR_SF, &ohci->regs->intrenable);
-
-		writel (OHCI_INTR_WDH, &ohci->regs->intrdisable);	
-		(void) readl (&ohci->regs->intrdisable);
-		spin_unlock_irq (&ohci->lock);
-
-#ifdef CONFIG_PMAC_PBOOK
-		if (_machine == _MACH_Pmac)
-			enable_irq (hcd->pdev->irq);
-#endif
-
-		/* Check for a pending done list */
-		if (ohci->hcca->done_head)
-			dl_done_list (ohci, dl_reverse_done_list (ohci), NULL);
-		writel (OHCI_INTR_WDH, &ohci->regs->intrenable); 
-
-		/* assume there are TDs on the bulk and control lists */
-		writel (OHCI_BLF | OHCI_CLF, &ohci->regs->cmdstatus);
-		break;
-
-	default:
-		ohci_warn (ohci, "odd PCI resume\n");
-	}
-	return retval;
+	ohci_finish_controller_resume(hcd);
+	return 0;
 }
 
 #endif	/* CONFIG_PM */
@@ -304,6 +365,8 @@ restart:
 
 static const struct hc_driver ohci_pci_hc_driver = {
 	.description =		hcd_name,
+	.product_desc =		"OHCI Host Controller",
+	.hcd_priv_size =	sizeof(struct ohci_hcd),
 
 	/*
 	 * generic hardware linkage
@@ -316,17 +379,13 @@ static const struct hc_driver ohci_pci_hc_driver = {
 	 */
 	.reset =		ohci_pci_reset,
 	.start =		ohci_pci_start,
-#ifdef	CONFIG_PM
-	.suspend =		ohci_pci_suspend,
-	.resume =		ohci_pci_resume,
-#endif
 	.stop =			ohci_stop,
+	.shutdown =		ohci_shutdown,
 
-	/*
-	 * memory lifecycle (except per-request)
-	 */
-	.hcd_alloc =		ohci_hcd_alloc,
-	.hcd_free =		ohci_hcd_free,
+#ifdef	CONFIG_PM
+	.pci_suspend =		ohci_pci_suspend,
+	.pci_resume =		ohci_pci_resume,
+#endif
 
 	/*
 	 * managing i/o requests and associated device resources
@@ -345,6 +404,11 @@ static const struct hc_driver ohci_pci_hc_driver = {
 	 */
 	.hub_status_data =	ohci_hub_status_data,
 	.hub_control =		ohci_hub_control,
+#ifdef	CONFIG_PM
+	.bus_suspend =		ohci_bus_suspend,
+	.bus_resume =		ohci_bus_resume,
+#endif
+	.start_port_reset =	ohci_start_port_reset,
 };
 
 /*-------------------------------------------------------------------------*/
@@ -352,7 +416,7 @@ static const struct hc_driver ohci_pci_hc_driver = {
 
 static const struct pci_device_id pci_ids [] = { {
 	/* handle any USB OHCI controller */
-	PCI_DEVICE_CLASS((PCI_CLASS_SERIAL_USB << 8) | 0x10, ~0),
+	PCI_DEVICE_CLASS(PCI_CLASS_SERIAL_USB_OHCI, ~0),
 	.driver_data =	(unsigned long) &ohci_pci_hc_driver,
 	}, { /* end: all zeroes */ }
 };
@@ -365,30 +429,11 @@ static struct pci_driver ohci_pci_driver = {
 
 	.probe =	usb_hcd_pci_probe,
 	.remove =	usb_hcd_pci_remove,
+	.shutdown =	usb_hcd_pci_shutdown,
 
-#ifdef	CONFIG_PM
-	.suspend =	usb_hcd_pci_suspend,
-	.resume =	usb_hcd_pci_resume,
+#ifdef CONFIG_PM_SLEEP
+	.driver =	{
+		.pm =	&usb_hcd_pci_pm_ops
+	},
 #endif
 };
-
- 
-static int __init ohci_hcd_pci_init (void) 
-{
-	printk (KERN_DEBUG "%s: " DRIVER_INFO " (PCI)\n", hcd_name);
-	if (usb_disabled())
-		return -ENODEV;
-
-	printk (KERN_DEBUG "%s: block sizes: ed %Zd td %Zd\n", hcd_name,
-		sizeof (struct ed), sizeof (struct td));
-	return pci_module_init (&ohci_pci_driver);
-}
-module_init (ohci_hcd_pci_init);
-
-/*-------------------------------------------------------------------------*/
-
-static void __exit ohci_hcd_pci_cleanup (void) 
-{	
-	pci_unregister_driver (&ohci_pci_driver);
-}
-module_exit (ohci_hcd_pci_cleanup);

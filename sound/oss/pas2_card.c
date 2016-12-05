@@ -1,10 +1,9 @@
 /*
- * sound/pas2_card.c
+ * sound/oss/pas2_card.c
  *
  * Detection routine for the Pro Audio Spectrum cards.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
@@ -40,7 +39,7 @@ int      	pas_translate_code = 0;
 static int      pas_intr_mask;
 static int      pas_irq;
 static int      pas_sb_base;
-spinlock_t	pas_lock=SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(pas_lock);
 #ifndef CONFIG_PAS_JOYSTICK
 static int	joystick;
 #else
@@ -89,7 +88,7 @@ void pas_write(unsigned char data, int ioaddr)
 
 /******************* Begin of the Interrupt Handler ********************/
 
-static irqreturn_t pasintr(int irq, void *dev_id, struct pt_regs *dummy)
+static irqreturn_t pasintr(int irq, void *dev_id)
 {
 	int             status;
 
@@ -157,9 +156,7 @@ static int __init config_pas_hw(struct address_info *hw_config)
 						 * 0x80
 						 */ , 0xB88);
 
-	pas_write(0x80
-		  | joystick?0x40:0
-		  ,0xF388);
+	pas_write(0x80 | (joystick ? 0x40 : 0), 0xF388);
 
 	if (pas_irq < 0 || pas_irq > 15)
 	{
@@ -240,8 +237,6 @@ static int __init config_pas_hw(struct address_info *hw_config)
 	mix_write(0x80 | 5, 0x078B);
 	mix_write(5, 0x078B);
 
-#if !defined(DISABLE_SB_EMULATION)
-
 	{
 		struct address_info *sb_config;
 
@@ -279,9 +274,6 @@ static int __init config_pas_hw(struct address_info *hw_config)
 		else
 			pas_write(0x00, 0xF788);
 	}
-#else
-	pas_write(0x00, 0xF788);
-#endif
 
 	if (!ok)
 		printk(KERN_WARNING "PAS16: Driver not enabled\n");
@@ -349,11 +341,6 @@ static void __init attach_pas_card(struct address_info *hw_config)
 		if (config_pas_hw(hw_config))
 		{
 			pas_pcm_init(hw_config);
-
-#if !defined(MODULE) && !defined(DISABLE_SB_EMULATION)
-			sb_dsp_disable_midi(pas_sb_base);	/* No MIDI capability */
-#endif
-
 			pas_midi_init();
 			pas_init_mixer();
 		}
@@ -393,19 +380,19 @@ static int __initdata sb_irq	= -1;
 static int __initdata sb_dma	= -1;
 static int __initdata sb_dma16	= -1;
 
-MODULE_PARM(io,"i");
-MODULE_PARM(irq,"i");
-MODULE_PARM(dma,"i");
-MODULE_PARM(dma16,"i");
+module_param(io, int, 0);
+module_param(irq, int, 0);
+module_param(dma, int, 0);
+module_param(dma16, int, 0);
 
-MODULE_PARM(sb_io,"i");
-MODULE_PARM(sb_irq,"i");
-MODULE_PARM(sb_dma,"i");
-MODULE_PARM(sb_dma16,"i");
+module_param(sb_io, int, 0);
+module_param(sb_irq, int, 0);
+module_param(sb_dma, int, 0);
+module_param(sb_dma16, int, 0);
 
-MODULE_PARM(joystick,"i");
-MODULE_PARM(symphony,"i");
-MODULE_PARM(broken_bus_clock,"i");
+module_param(joystick, bool, 0);
+module_param(symphony, bool, 0);
+module_param(broken_bus_clock, bool, 0);
 
 MODULE_LICENSE("GPL");
 

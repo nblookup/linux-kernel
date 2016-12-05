@@ -8,14 +8,14 @@
  *                      Universite Pierre et Marie Curie (Paris VI)
  *  from
  *  linux/fs/minix/truncate.c   Copyright (C) 1991, 1992  Linus Torvalds
- * 
+ *
  *  ext3fs fsync primitive
  *
  *  Big-endian to little-endian byte-swapping/bitmaps by
  *        David S. Miller (davem@caip.rutgers.edu), 1995
- * 
+ *
  *  Removed unnecessary code duplication for little endian machines
- *  and excessive __inline__s. 
+ *  and excessive __inline__s.
  *        Andi Kleen, 1997
  *
  * Major simplications and cleanup - we only need to do the metadata, because
@@ -23,7 +23,10 @@
  */
 
 #include <linux/time.h>
+#include <linux/blkdev.h>
 #include <linux/fs.h>
+#include <linux/sched.h>
+#include <linux/writeback.h>
 #include <linux/jbd.h>
 #include <linux/ext3_fs.h>
 #include <linux/ext3_jbd.h>
@@ -38,29 +41,26 @@
  *
  * What we do is just kick off a commit and wait on it.  This will snapshot the
  * inode to disk.
- *
- * Note that there is a serious optimisation we can make here: if the current
- * inode is not part of j_running_transaction or j_committing_transaction
- * then we have nothing to do.  That would require implementation of t_ilist,
- * which isn't too hard.
  */
 
-int ext3_sync_file(struct file * file, struct dentry *dentry, int datasync)
+int ext3_sync_file(struct file *file, int datasync)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = file->f_mapping->host;
+	struct ext3_inode_info *ei = EXT3_I(inode);
+	journal_t *journal = EXT3_SB(inode->i_sb)->s_journal;
+	int ret, needs_barrier = 0;
+	tid_t commit_tid;
 
-	J_ASSERT(ext3_journal_current_handle() == 0);
+	if (inode->i_sb->s_flags & MS_RDONLY)
+		return 0;
+
+	J_ASSERT(ext3_journal_current_handle() == NULL);
 
 	/*
-	 * data=writeback:
+	 * data=writeback,ordered:
 	 *  The caller's filemap_fdatawrite()/wait will sync the data.
-	 *  ext3_force_commit() will sync the metadata
-	 *
-	 * data=ordered:
-	 *  The caller's filemap_fdatawrite() will write the data and
-	 *  ext3_force_commit() will wait on the buffers.  Then the caller's
-	 *  filemap_fdatawait() will wait on the pages (but all IO is complete)
-	 *  Not pretty, but it works.
+	 *  Metadata is in the journal, we wait for a proper transaction
+	 *  to commit here.
 	 *
 	 * data=journal:
 	 *  filemap_fdatawrite won't do anything (the buffers are clean).
@@ -70,5 +70,26 @@ int ext3_sync_file(struct file * file, struct dentry *dentry, int datasync)
 	 *  (they were dirtied by commit).  But that's OK - the blocks are
 	 *  safe in-journal, which is all fsync() needs to ensure.
 	 */
-	return ext3_force_commit(inode->i_sb);
+	if (ext3_should_journal_data(inode))
+		return ext3_force_commit(inode->i_sb);
+
+	if (datasync)
+		commit_tid = atomic_read(&ei->i_datasync_tid);
+	else
+		commit_tid = atomic_read(&ei->i_sync_tid);
+
+	if (test_opt(inode->i_sb, BARRIER) &&
+	    !journal_trans_will_send_data_barrier(journal, commit_tid))
+		needs_barrier = 1;
+	log_start_commit(journal, commit_tid);
+	ret = log_wait_commit(journal, commit_tid);
+
+	/*
+	 * In case we didn't commit a transaction, we have to flush
+	 * disk caches manually so that data really is on persistent
+	 * storage
+	 */
+	if (needs_barrier)
+		blkdev_issue_flush(inode->i_sb->s_bdev, GFP_KERNEL, NULL);
+	return ret;
 }

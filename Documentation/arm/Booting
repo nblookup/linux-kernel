@@ -50,7 +50,7 @@ As an alternative, the boot loader can pass the relevant 'console='
 option to the kernel via the tagged lists specifying the port, and
 serial format options as described in
 
-       linux/Documentation/kernel-parameters.txt.
+       Documentation/kernel-parameters.txt.
 
 
 3. Detect the machine type
@@ -117,6 +117,10 @@ called there.  Note that the kernel uses 16K of RAM below the image
 to store page tables.  The recommended placement is 32KiB into RAM.
 
 In either case, the following conditions must be met:
+
+- Quiesce all DMA capable devices so that memory does not get
+  corrupted by bogus network packets or disk data. This will save
+  you many hours of debug.
 
 - CPU register settings
   r0 = 0,

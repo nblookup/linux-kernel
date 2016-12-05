@@ -7,7 +7,7 @@
  * under the terms of version 2 of the GNU General Public License
  * as published by the Free Software Foundation.
  *
- * For information see http://hq.pm.waw.pl/hdlc/
+ * For information see <http://www.kernel.org/pub/linux/utils/net/hdlc/>
  *
  * Note: integrated CSU/DSU/DDS are not supported by this driver
  *
@@ -18,6 +18,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/capability.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
@@ -53,7 +54,7 @@ static const char* devname = "RISCom/N2";
 #define NEED_SCA_MSCI_INTR
 #define MAX_TX_BUFFERS 10
 
-static char *hw = NULL;	/* pointer to hw=xxx command line string */
+static char *hw;	/* pointer to hw=xxx command line string */
 
 /* RISCom/N2 Board Registers */
 
@@ -92,7 +93,7 @@ static char *hw = NULL;	/* pointer to hw=xxx command line string */
 
 
 typedef struct port_s {
-	hdlc_device hdlc;	/* HDLC device struct - must be first */
+	struct net_device *dev;
 	struct card_s *card;
 	spinlock_t lock;	/* TX lock */
 	sync_serial_settings settings;
@@ -111,7 +112,7 @@ typedef struct port_s {
 
 
 typedef struct card_s {
-	u8 *winbase;		/* ISA window base address */
+	u8 __iomem *winbase;		/* ISA window base address */
 	u32 phy_winbase;	/* ISA physical base address */
 	u32 ram_size;		/* number of bytes */
 	u16 io;			/* IO Base address */
@@ -145,7 +146,6 @@ static card_t **new_card = &first_card;
 					 &(card)->ports[port] : NULL)
 
 
-
 static __inline__ u8 sca_get_page(card_t *card)
 {
 	return inb(card->io + N2_PSR) & PSR_PAGEBITS;
@@ -159,14 +159,7 @@ static __inline__ void openwin(card_t *card, u8 page)
 }
 
 
-static __inline__ void close_windows(card_t *card)
-{
-	outb(inb(card->io + N2_PCR) & ~PCR_ENWIN, card->io + N2_PCR);
-}
-
-
-#include "hd6457x.c"
-
+#include "hd64570.c"
 
 
 static void n2_set_iface(port_t *port)
@@ -215,13 +208,12 @@ static void n2_set_iface(port_t *port)
 
 static int n2_open(struct net_device *dev)
 {
-	hdlc_device *hdlc = dev_to_hdlc(dev);
-	port_t *port = hdlc_to_port(hdlc);
+	port_t *port = dev_to_port(dev);
 	int io = port->card->io;
 	u8 mcr = inb(io + N2_MCR) | (port->phy_node ? TX422_PORT1:TX422_PORT0);
 	int result;
 
-	result = hdlc_open(hdlc);
+	result = hdlc_open(dev);
 	if (result)
 		return result;
 
@@ -230,7 +222,7 @@ static int n2_open(struct net_device *dev)
 
 	outb(inb(io + N2_PCR) | PCR_ENWIN, io + N2_PCR); /* open window */
 	outb(inb(io + N2_PSR) | PSR_DMAEN, io + N2_PSR); /* enable dma */
-	sca_open(hdlc);
+	sca_open(dev);
 	n2_set_iface(port);
 	return 0;
 }
@@ -239,15 +231,14 @@ static int n2_open(struct net_device *dev)
 
 static int n2_close(struct net_device *dev)
 {
-	hdlc_device *hdlc = dev_to_hdlc(dev);
-	port_t *port = hdlc_to_port(hdlc);
+	port_t *port = dev_to_port(dev);
 	int io = port->card->io;
 	u8 mcr = inb(io+N2_MCR) | (port->phy_node ? TX422_PORT1 : TX422_PORT0);
 
-	sca_close(hdlc);
+	sca_close(dev);
 	mcr |= port->phy_node ? DTR_PORT1 : DTR_PORT0; /* set DTR OFF */
 	outb(mcr, io + N2_MCR);
-	hdlc_close(hdlc);
+	hdlc_close(dev);
 	return 0;
 }
 
@@ -256,13 +247,13 @@ static int n2_close(struct net_device *dev)
 static int n2_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	const size_t size = sizeof(sync_serial_settings);
-	sync_serial_settings new_line, *line = ifr->ifr_settings.ifs_ifsu.sync;
-	hdlc_device *hdlc = dev_to_hdlc(dev);
-	port_t *port = hdlc_to_port(hdlc);
+	sync_serial_settings new_line;
+	sync_serial_settings __user *line = ifr->ifr_settings.ifs_ifsu.sync;
+	port_t *port = dev_to_port(dev);
 
 #ifdef DEBUG_RINGS
 	if (cmd == SIOCDEVPRIVATE) {
-		sca_dump_rings(hdlc);
+		sca_dump_rings(dev);
 		return 0;
 	}
 #endif
@@ -291,7 +282,7 @@ static int n2_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		    new_line.clock_type != CLOCK_TXFROMRX &&
 		    new_line.clock_type != CLOCK_INT &&
 		    new_line.clock_type != CLOCK_TXINT)
-		return -EINVAL;	/* No such clock setting */
+			return -EINVAL;	/* No such clock setting */
 
 		if (new_line.loopback != 0 && new_line.loopback != 1)
 			return -EINVAL;
@@ -312,8 +303,10 @@ static void n2_destroy_card(card_t *card)
 	int cnt;
 
 	for (cnt = 0; cnt < 2; cnt++)
-		if (card->ports[cnt].card)
-			unregister_hdlc_device(&card->ports[cnt].hdlc);
+		if (card->ports[cnt].card) {
+			struct net_device *dev = port_to_dev(&card->ports[cnt]);
+			unregister_hdlc_device(dev);
+		}
 
 	if (card->irq)
 		free_irq(card->irq, card);
@@ -325,10 +318,20 @@ static void n2_destroy_card(card_t *card)
 
 	if (card->io)
 		release_region(card->io, N2_IOPORTS);
+	if (card->ports[0].dev)
+		free_netdev(card->ports[0].dev);
+	if (card->ports[1].dev)
+		free_netdev(card->ports[1].dev);
 	kfree(card);
 }
 
-
+static const struct net_device_ops n2_ops = {
+	.ndo_open       = n2_open,
+	.ndo_stop       = n2_close,
+	.ndo_change_mtu = hdlc_change_mtu,
+	.ndo_start_xmit = hdlc_start_xmit,
+	.ndo_do_ioctl   = n2_ioctl,
+};
 
 static int __init n2_run(unsigned long io, unsigned long irq,
 			 unsigned long winbase, long valid0, long valid1)
@@ -352,12 +355,19 @@ static int __init n2_run(unsigned long io, unsigned long irq,
 		return -ENODEV;
 	}
 
-	card = kmalloc(sizeof(card_t), GFP_KERNEL);
+	card = kzalloc(sizeof(card_t), GFP_KERNEL);
 	if (card == NULL) {
 		printk(KERN_ERR "n2: unable to allocate memory\n");
 		return -ENOBUFS;
 	}
-	memset(card, 0, sizeof(card_t));
+
+	card->ports[0].dev = alloc_hdlcdev(&card->ports[0]);
+	card->ports[1].dev = alloc_hdlcdev(&card->ports[1]);
+	if (!card->ports[0].dev || !card->ports[1].dev) {
+		printk(KERN_ERR "n2: unable to allocate memory\n");
+		n2_destroy_card(card);
+		return -ENOMEM;
+	}
 
 	if (!request_region(io, N2_IOPORTS, devname)) {
 		printk(KERN_ERR "n2: I/O port region in use\n");
@@ -366,20 +376,25 @@ static int __init n2_run(unsigned long io, unsigned long irq,
 	}
 	card->io = io;
 
-	if (request_irq(irq, &sca_intr, 0, devname, card)) {
+	if (request_irq(irq, sca_intr, 0, devname, card)) {
 		printk(KERN_ERR "n2: could not allocate IRQ\n");
 		n2_destroy_card(card);
-		return(-EBUSY);
+		return -EBUSY;
 	}
 	card->irq = irq;
 
 	if (!request_mem_region(winbase, USE_WINDOWSIZE, devname)) {
 		printk(KERN_ERR "n2: could not request RAM window\n");
 		n2_destroy_card(card);
-		return(-EBUSY);
+		return -EBUSY;
 	}
 	card->phy_winbase = winbase;
 	card->winbase = ioremap(winbase, USE_WINDOWSIZE);
+	if (!card->winbase) {
+		printk(KERN_ERR "n2: ioremap() failed\n");
+		n2_destroy_card(card);
+		return -EFAULT;
+	}
 
 	outb(0, io + N2_PCR);
 	outb(winbase >> 12, io + N2_BAR);
@@ -435,7 +450,8 @@ static int __init n2_run(unsigned long io, unsigned long irq,
 	sca_init(card, 0);
 	for (cnt = 0; cnt < 2; cnt++) {
 		port_t *port = &card->ports[cnt];
-		struct net_device *dev = hdlc_to_dev(&port->hdlc);
+		struct net_device *dev = port_to_dev(port);
+		hdlc_device *hdlc = dev_to_hdlc(dev);
 
 		if ((cnt == 0 && !valid0) || (cnt == 1 && !valid1))
 			continue;
@@ -447,29 +463,27 @@ static int __init n2_run(unsigned long io, unsigned long irq,
 			port->log_node = 1;
 
 		spin_lock_init(&port->lock);
-		SET_MODULE_OWNER(dev);
 		dev->irq = irq;
 		dev->mem_start = winbase;
 		dev->mem_end = winbase + USE_WINDOWSIZE - 1;
 		dev->tx_queue_len = 50;
-		dev->do_ioctl = n2_ioctl;
-		dev->open = n2_open;
-		dev->stop = n2_close;
-		port->hdlc.attach = sca_attach;
-		port->hdlc.xmit = sca_xmit;
+		dev->netdev_ops = &n2_ops;
+		hdlc->attach = sca_attach;
+		hdlc->xmit = sca_xmit;
 		port->settings.clock_type = CLOCK_EXT;
+		port->card = card;
 
-		if (register_hdlc_device(&port->hdlc)) {
+		if (register_hdlc_device(dev)) {
 			printk(KERN_WARNING "n2: unable to register hdlc "
 			       "device\n");
+			port->card = NULL;
 			n2_destroy_card(card);
 			return -ENOBUFS;
 		}
-		port->card = card;
-		sca_init_sync_port(port); /* Set up SCA memory */
+		sca_init_port(port); /* Set up SCA memory */
 
 		printk(KERN_INFO "%s: RISCom/N2 node %d\n",
-		       hdlc_to_name(&port->hdlc), port->phy_node);
+		       dev->name, port->phy_node);
 	}
 
 	*new_card = card;
@@ -486,7 +500,7 @@ static int __init n2_init(void)
 #ifdef MODULE
 		printk(KERN_INFO "n2: no card initialized\n");
 #endif
-		return -ENOSYS;	/* no parameters specified, abort */
+		return -EINVAL;	/* no parameters specified, abort */
 	}
 
 	printk(KERN_INFO "%s\n", version);
@@ -524,11 +538,11 @@ static int __init n2_init(void)
 			n2_run(io, irq, ram, valid[0], valid[1]);
 
 		if (*hw == '\x0')
-			return first_card ? 0 : -ENOSYS;
+			return first_card ? 0 : -EINVAL;
 	}while(*hw++ == ':');
 
 	printk(KERN_ERR "n2: invalid hardware parameters\n");
-	return first_card ? 0 : -ENOSYS;
+	return first_card ? 0 : -EINVAL;
 }
 
 
@@ -550,4 +564,5 @@ module_exit(n2_cleanup);
 MODULE_AUTHOR("Krzysztof Halasa <khc@pm.waw.pl>");
 MODULE_DESCRIPTION("RISCom/N2 serial port driver");
 MODULE_LICENSE("GPL v2");
-module_param(hw, charp, 0444);	/* hw=io,irq,ram,ports:io,irq,... */
+module_param(hw, charp, 0444);
+MODULE_PARM_DESC(hw, "io,irq,ram,ports:io,irq,...");

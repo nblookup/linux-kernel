@@ -5,14 +5,14 @@
  *
  *		Global definitions for the ANSI FDDI interface.
  *
- * Version:	@(#)if_fddi.h	1.0.1	09/16/96
+ * Version:	@(#)if_fddi.h	1.0.2	Sep 29 2004
  *
  * Author:	Lawrence V. Stefani, <stefani@lkg.dec.com>
  *
  *		if_fddi.h is based on previous if_ether.h and if_tr.h work by
  *			Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *			Donald Becker, <becker@super.org>
- *			Alan Cox, <alan@redhat.com>
+ *			Alan Cox, <alan@lxorguk.ukuu.org.uk>
  *			Steve Whitehouse, <gw7rrm@eeshack3.swan.ac.uk>
  *			Peter De Schrijver, <stud11@cc4.kuleuven.ac.be>
  *
@@ -23,6 +23,8 @@
  */
 #ifndef _LINUX_IF_FDDI_H
 #define _LINUX_IF_FDDI_H
+
+#include <linux/types.h>
 
 /*
  *  Define max and min legal sizes.  The frame sizes do not include
@@ -61,36 +63,32 @@
 #define FDDI_UI_CMD			0x03
 
 /* Define 802.2 Type 1 header */
-struct fddi_8022_1_hdr
-	{
+struct fddi_8022_1_hdr {
 	__u8	dsap;					/* destination service access point */
 	__u8	ssap;					/* source service access point */
 	__u8	ctrl;					/* control byte #1 */
-	} __attribute__ ((packed));
+} __attribute__((packed));
 
 /* Define 802.2 Type 2 header */
-struct fddi_8022_2_hdr
-	{
+struct fddi_8022_2_hdr {
 	__u8	dsap;					/* destination service access point */
 	__u8	ssap;					/* source service access point */
 	__u8	ctrl_1;					/* control byte #1 */
 	__u8	ctrl_2;					/* control byte #2 */
-	} __attribute__ ((packed));
+} __attribute__((packed));
 
 /* Define 802.2 SNAP header */
 #define FDDI_K_OUI_LEN	3
-struct fddi_snap_hdr
-	{
+struct fddi_snap_hdr {
 	__u8	dsap;					/* always 0xAA */
 	__u8	ssap;					/* always 0xAA */
 	__u8	ctrl;					/* always 0x03 */
 	__u8	oui[FDDI_K_OUI_LEN];	/* organizational universal id */
-	__u16	ethertype;				/* packet type ID field */
-	} __attribute__ ((packed));
+	__be16	ethertype;				/* packet type ID field */
+} __attribute__((packed));
 
 /* Define FDDI LLC frame header */
-struct fddihdr
-	{
+struct fddihdr {
 	__u8	fc;						/* frame control */
 	__u8	daddr[FDDI_K_ALEN];		/* destination address */
 	__u8	saddr[FDDI_K_ALEN];		/* source address */
@@ -100,41 +98,18 @@ struct fddihdr
 		struct fddi_8022_2_hdr		llc_8022_2;
 		struct fddi_snap_hdr		llc_snap;
 		} hdr;
-	} __attribute__ ((packed));
+} __attribute__((packed));
+
+#ifdef __KERNEL__
+#include <linux/netdevice.h>
 
 /* Define FDDI statistics structure */
-struct fddi_statistics
-	{
-	__u32	rx_packets;				/* total packets received */
-	__u32	tx_packets;				/* total packets transmitted */
-	__u32	rx_bytes;				/* total bytes received	*/
-	__u32	tx_bytes;				/* total bytes transmitted */
-	__u32	rx_errors;				/* bad packets received	*/
-	__u32	tx_errors;				/* packet transmit problems	*/
-	__u32	rx_dropped;				/* no space in linux buffers */
-	__u32	tx_dropped;				/* no space available in linux */
-	__u32	multicast;				/* multicast packets received */
-	__u32	transmit_collision;		/* always 0 for FDDI */
+struct fddi_statistics {
 
-	/* detailed rx_errors */
-	__u32	rx_length_errors;
-	__u32	rx_over_errors;		/* receiver ring buff overflow	*/
-	__u32	rx_crc_errors;		/* recved pkt with crc error	*/
-	__u32	rx_frame_errors;	/* recv'd frame alignment error */
-	__u32	rx_fifo_errors;		/* recv'r fifo overrun		*/
-	__u32	rx_missed_errors;	/* receiver missed packet	*/
+	/* Generic statistics. */
 
-	/* detailed tx_errors */
-	__u32	tx_aborted_errors;
-	__u32	tx_carrier_errors;
-	__u32	tx_fifo_errors;
-	__u32	tx_heartbeat_errors;
-	__u32	tx_window_errors;
-	
-	/* for cslip etc */
-	__u32	rx_compressed;
-	__u32	tx_compressed;
-   
+	struct net_device_stats gen;
+
 	/* Detailed FDDI statistics.  Adopted from RFC 1512 */
 
 	__u8	smt_station_id[8];
@@ -218,6 +193,7 @@ struct fddi_statistics
 	__u32	port_pc_withhold[2];
 	__u32	port_ler_flag[2];
 	__u32	port_hardware_present[2];
-	};
+};
+#endif /* __KERNEL__ */
 
 #endif	/* _LINUX_IF_FDDI_H */

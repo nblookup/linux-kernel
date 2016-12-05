@@ -270,14 +270,16 @@ static unsigned char snd_opl4_volume_table[128] = {
 /*
  * Initializes all voices.
  */
-void snd_opl4_synth_reset(opl4_t *opl4)
+void snd_opl4_synth_reset(struct snd_opl4 *opl4)
 {
+	unsigned long flags;
 	int i;
 
+	spin_lock_irqsave(&opl4->reg_lock, flags);
 	for (i = 0; i < OPL4_MAX_VOICES; i++)
 		snd_opl4_write(opl4, OPL4_REG_MISC + i, OPL4_DAMP_BIT);
+	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 
-	spin_lock_init(&opl4->voices_lock);
 	INIT_LIST_HEAD(&opl4->off_voices);
 	INIT_LIST_HEAD(&opl4->on_voices);
 	memset(opl4->voices, 0, sizeof(opl4->voices));
@@ -292,75 +294,79 @@ void snd_opl4_synth_reset(opl4_t *opl4)
 /*
  * Shuts down all voices.
  */
-void snd_opl4_synth_shutdown(opl4_t *opl4)
+void snd_opl4_synth_shutdown(struct snd_opl4 *opl4)
 {
+	unsigned long flags;
 	int i;
 
+	spin_lock_irqsave(&opl4->reg_lock, flags);
 	for (i = 0; i < OPL4_MAX_VOICES; i++)
 		snd_opl4_write(opl4, OPL4_REG_MISC + i,
 			       opl4->voices[i].reg_misc & ~OPL4_KEY_ON_BIT);
+	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 }
 
 /*
  * Executes the callback for all voices playing the specified note.
  */
-static void snd_opl4_do_for_note(opl4_t *opl4, int note, snd_midi_channel_t *chan,
-				 void (*func)(opl4_t *opl4, opl4_voice_t *voice))
+static void snd_opl4_do_for_note(struct snd_opl4 *opl4, int note, struct snd_midi_channel *chan,
+				 void (*func)(struct snd_opl4 *opl4, struct opl4_voice *voice))
 {
 	int i;
 	unsigned long flags;
-	opl4_voice_t *voice;
+	struct opl4_voice *voice;
 
-	spin_lock_irqsave(&opl4->voices_lock, flags);
+	spin_lock_irqsave(&opl4->reg_lock, flags);
 	for (i = 0; i < OPL4_MAX_VOICES; i++) {
 		voice = &opl4->voices[i];
 		if (voice->chan == chan && voice->note == note) {
 			func(opl4, voice);
 		}
 	}
-	spin_unlock_irqrestore(&opl4->voices_lock, flags);
+	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 }
 
 /*
  * Executes the callback for all voices of to the specified channel.
  */
-static void snd_opl4_do_for_channel(opl4_t *opl4, snd_midi_channel_t *chan,
-				    void (*func)(opl4_t *opl4, opl4_voice_t *voice))
+static void snd_opl4_do_for_channel(struct snd_opl4 *opl4,
+				    struct snd_midi_channel *chan,
+				    void (*func)(struct snd_opl4 *opl4, struct opl4_voice *voice))
 {
 	int i;
 	unsigned long flags;
-	opl4_voice_t *voice;
+	struct opl4_voice *voice;
 
-	spin_lock_irqsave(&opl4->voices_lock, flags);
+	spin_lock_irqsave(&opl4->reg_lock, flags);
 	for (i = 0; i < OPL4_MAX_VOICES; i++) {
 		voice = &opl4->voices[i];
 		if (voice->chan == chan) {
 			func(opl4, voice);
 		}
 	}
-	spin_unlock_irqrestore(&opl4->voices_lock, flags);
+	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 }
 
 /*
  * Executes the callback for all active voices.
  */
-static void snd_opl4_do_for_all(opl4_t *opl4,
-				void (*func)(opl4_t *opl4, opl4_voice_t *voice))
+static void snd_opl4_do_for_all(struct snd_opl4 *opl4,
+				void (*func)(struct snd_opl4 *opl4, struct opl4_voice *voice))
 {
 	int i;
 	unsigned long flags;
-	opl4_voice_t *voice;
+	struct opl4_voice *voice;
 
-	spin_lock_irqsave(&opl4->voices_lock, flags);
+	spin_lock_irqsave(&opl4->reg_lock, flags);
 	for (i = 0; i < OPL4_MAX_VOICES; i++) {
 		voice = &opl4->voices[i];
 		if (voice->chan)
 			func(opl4, voice);
 	}
-	spin_unlock_irqrestore(&opl4->voices_lock, flags);
+	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 }
 
-static void snd_opl4_update_volume(opl4_t *opl4, opl4_voice_t *voice)
+static void snd_opl4_update_volume(struct snd_opl4 *opl4, struct opl4_voice *voice)
 {
 	int att;
 
@@ -379,7 +385,7 @@ static void snd_opl4_update_volume(opl4_t *opl4, opl4_voice_t *voice)
 	voice->level_direct = 0;
 }
 
-static void snd_opl4_update_pan(opl4_t *opl4, opl4_voice_t *voice)
+static void snd_opl4_update_pan(struct snd_opl4 *opl4, struct opl4_voice *voice)
 {
 	int pan = voice->sound->panpot;
 
@@ -394,7 +400,8 @@ static void snd_opl4_update_pan(opl4_t *opl4, opl4_voice_t *voice)
 	snd_opl4_write(opl4, OPL4_REG_MISC + voice->number, voice->reg_misc);
 }
 
-static void snd_opl4_update_vibrato_depth(opl4_t *opl4, opl4_voice_t *voice)
+static void snd_opl4_update_vibrato_depth(struct snd_opl4 *opl4,
+					  struct opl4_voice *voice)
 {
 	int depth;
 
@@ -409,9 +416,10 @@ static void snd_opl4_update_vibrato_depth(opl4_t *opl4, opl4_voice_t *voice)
 		       voice->reg_lfo_vibrato);
 }
 
-static void snd_opl4_update_pitch(opl4_t *opl4, opl4_voice_t *voice)
+static void snd_opl4_update_pitch(struct snd_opl4 *opl4,
+				  struct opl4_voice *voice)
 {
-	snd_midi_channel_t *chan = voice->chan;
+	struct snd_midi_channel *chan = voice->chan;
 	int note, pitch, octave;
 
 	note = chan->drum_channel ? 60 : voice->note;
@@ -439,7 +447,8 @@ static void snd_opl4_update_pitch(opl4_t *opl4, opl4_voice_t *voice)
 	snd_opl4_write(opl4, OPL4_REG_F_NUMBER + voice->number, voice->reg_f_number);
 }
 
-static void snd_opl4_update_tone_parameters(opl4_t *opl4, opl4_voice_t *voice)
+static void snd_opl4_update_tone_parameters(struct snd_opl4 *opl4,
+					    struct opl4_voice *voice)
 {
 	snd_opl4_write(opl4, OPL4_REG_ATTACK_DECAY1 + voice->number,
 		       voice->sound->reg_attack_decay1);
@@ -452,17 +461,17 @@ static void snd_opl4_update_tone_parameters(opl4_t *opl4, opl4_voice_t *voice)
 }
 
 /* allocate one voice */
-static opl4_voice_t *snd_opl4_get_voice(opl4_t *opl4)
+static struct opl4_voice *snd_opl4_get_voice(struct snd_opl4 *opl4)
 {
 	/* first, try to get the oldest key-off voice */
 	if (!list_empty(&opl4->off_voices))
-		return list_entry(opl4->off_voices.next, opl4_voice_t, list);
+		return list_entry(opl4->off_voices.next, struct opl4_voice, list);
 	/* then get the oldest key-on voice */
-	snd_assert(!list_empty(&opl4->on_voices), );
-	return list_entry(opl4->on_voices.next, opl4_voice_t, list);
+	snd_BUG_ON(list_empty(&opl4->on_voices));
+	return list_entry(opl4->on_voices.next, struct opl4_voice, list);
 }
 
-static void snd_opl4_wait_for_wave_headers(opl4_t *opl4)
+static void snd_opl4_wait_for_wave_headers(struct snd_opl4 *opl4)
 {
 	int timeout = 200;
 
@@ -470,12 +479,12 @@ static void snd_opl4_wait_for_wave_headers(opl4_t *opl4)
 		udelay(10);
 }
 
-void snd_opl4_note_on(void *private_data, int note, int vel, snd_midi_channel_t *chan)
+void snd_opl4_note_on(void *private_data, int note, int vel, struct snd_midi_channel *chan)
 {
-	opl4_t *opl4 = snd_magic_cast(opl4_t, private_data, return);
-	const opl4_region_ptr_t *regions;
-	opl4_voice_t *voice[2];
-	const opl4_sound_t *sound[2];
+	struct snd_opl4 *opl4 = private_data;
+	const struct opl4_region_ptr *regions;
+	struct opl4_voice *voice[2];
+	const struct opl4_sound *sound[2];
 	int voices = 0, i;
 	unsigned long flags;
 
@@ -492,7 +501,7 @@ void snd_opl4_note_on(void *private_data, int note, int vel, snd_midi_channel_t 
 	}
 
 	/* allocate and initialize the needed voices */
-	spin_lock_irqsave(&opl4->voices_lock, flags);
+	spin_lock_irqsave(&opl4->reg_lock, flags);
 	for (i = 0; i < voices; i++) {
 		voice[i] = snd_opl4_get_voice(opl4);
 		list_del(&voice[i]->list);
@@ -502,7 +511,6 @@ void snd_opl4_note_on(void *private_data, int note, int vel, snd_midi_channel_t 
 		voice[i]->velocity = vel & 0x7f;
 		voice[i]->sound = sound[i];
 	}
-	spin_unlock_irqrestore(&opl4->voices_lock, flags);
 
 	/* set tone number (triggers header loading) */
 	for (i = 0; i < voices; i++) {
@@ -522,11 +530,13 @@ void snd_opl4_note_on(void *private_data, int note, int vel, snd_midi_channel_t 
 		voice[i]->level_direct = OPL4_LEVEL_DIRECT_BIT;
 		snd_opl4_update_volume(opl4, voice[i]);
 	}
+	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 
 	/* wait for completion of loading */
 	snd_opl4_wait_for_wave_headers(opl4);
 
 	/* set remaining parameters */
+	spin_lock_irqsave(&opl4->reg_lock, flags);
 	for (i = 0; i < voices; i++) {
 		snd_opl4_update_tone_parameters(opl4, voice[i]);
 		voice[i]->reg_lfo_vibrato = voice[i]->sound->reg_lfo_vibrato;
@@ -540,9 +550,10 @@ void snd_opl4_note_on(void *private_data, int note, int vel, snd_midi_channel_t 
 		snd_opl4_write(opl4, OPL4_REG_MISC + voice[i]->number,
 			       voice[i]->reg_misc);
 	}
+	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 }
 
-static void snd_opl4_voice_off(opl4_t *opl4, opl4_voice_t *voice)
+static void snd_opl4_voice_off(struct snd_opl4 *opl4, struct opl4_voice *voice)
 {
 	list_del(&voice->list);
 	list_add_tail(&voice->list, &opl4->off_voices);
@@ -551,14 +562,14 @@ static void snd_opl4_voice_off(opl4_t *opl4, opl4_voice_t *voice)
 	snd_opl4_write(opl4, OPL4_REG_MISC + voice->number, voice->reg_misc);
 }
 
-void snd_opl4_note_off(void *private_data, int note, int vel, snd_midi_channel_t *chan)
+void snd_opl4_note_off(void *private_data, int note, int vel, struct snd_midi_channel *chan)
 {
-	opl4_t *opl4 = snd_magic_cast(opl4_t, private_data, return);
+	struct snd_opl4 *opl4 = private_data;
 
 	snd_opl4_do_for_note(opl4, note, chan, snd_opl4_voice_off);
 }
 
-static void snd_opl4_terminate_voice(opl4_t *opl4, opl4_voice_t *voice)
+static void snd_opl4_terminate_voice(struct snd_opl4 *opl4, struct opl4_voice *voice)
 {
 	list_del(&voice->list);
 	list_add_tail(&voice->list, &opl4->off_voices);
@@ -567,16 +578,16 @@ static void snd_opl4_terminate_voice(opl4_t *opl4, opl4_voice_t *voice)
 	snd_opl4_write(opl4, OPL4_REG_MISC + voice->number, voice->reg_misc);
 }
 
-void snd_opl4_terminate_note(void *private_data, int note, snd_midi_channel_t *chan)
+void snd_opl4_terminate_note(void *private_data, int note, struct snd_midi_channel *chan)
 {
-	opl4_t *opl4 = snd_magic_cast(opl4_t, private_data, return);
+	struct snd_opl4 *opl4 = private_data;
 
 	snd_opl4_do_for_note(opl4, note, chan, snd_opl4_terminate_voice);
 }
 
-void snd_opl4_control(void *private_data, int type, snd_midi_channel_t *chan)
+void snd_opl4_control(void *private_data, int type, struct snd_midi_channel *chan)
 {
-	opl4_t *opl4 = snd_magic_cast(opl4_t, private_data, return);
+	struct snd_opl4 *opl4 = private_data;
 
 	switch (type) {
 	case MIDI_CTL_MSB_MODWHEEL:
@@ -614,9 +625,9 @@ void snd_opl4_control(void *private_data, int type, snd_midi_channel_t *chan)
 }
 
 void snd_opl4_sysex(void *private_data, unsigned char *buf, int len,
-		    int parsed, snd_midi_channel_set_t *chset)
+		    int parsed, struct snd_midi_channel_set *chset)
 {
-	opl4_t *opl4 = snd_magic_cast(opl4_t, private_data, return);
+	struct snd_opl4 *opl4 = private_data;
 
 	if (parsed == SNDRV_MIDI_SYSEX_GS_MASTER_VOLUME)
 		snd_opl4_do_for_all(opl4, snd_opl4_update_volume);

@@ -7,11 +7,12 @@ struct mii_phy;
 struct mii_phy_ops
 {
 	int		(*init)(struct mii_phy *phy);
-	int		(*suspend)(struct mii_phy *phy, int wol_options);
+	int		(*suspend)(struct mii_phy *phy);
 	int		(*setup_aneg)(struct mii_phy *phy, u32 advertise);
 	int		(*setup_forced)(struct mii_phy *phy, int speed, int fd);
 	int		(*poll_link)(struct mii_phy *phy);
 	int		(*read_link)(struct mii_phy *phy);
+	int		(*enable_fiber)(struct mii_phy *phy, int autoneg);
 };
 
 /* Structure used to statically define an mii/gii based PHY */
@@ -25,11 +26,19 @@ struct mii_phy_def
 	const struct mii_phy_ops*	ops;
 };
 
+enum {
+	BCM54XX_COPPER,
+	BCM54XX_FIBER,
+	BCM54XX_GBIC,
+	BCM54XX_SGMII,
+	BCM54XX_UNKNOWN,
+};
+
 /* An instance of a PHY, partially borrowed from mii_if_info */
 struct mii_phy
 {
 	struct mii_phy_def*	def;
-	int			advertising;
+	u32			advertising;
 	int			mii_id;
 
 	/* 1: autoneg enabled, 0: disabled */
@@ -43,9 +52,10 @@ struct mii_phy
 	int			pause;
 
 	/* Provided by host chip */
-	struct net_device*	dev;
+	struct net_device	*dev;
 	int (*mdio_read) (struct net_device *dev, int mii_id, int reg);
 	void (*mdio_write) (struct net_device *dev, int mii_id, int reg, int val);
+	void			*platform_data;
 };
 
 /* Pass in a struct mii_phy with dev, mdio_read and mdio_write
@@ -80,7 +90,11 @@ extern int mii_phy_probe(struct mii_phy *phy, int mii_id);
 #define MII_BCM5221_SHDOW_AUX_STAT2		0x1b
 #define MII_BCM5221_SHDOW_AUX_STAT2_APD		0x0020
 #define MII_BCM5221_SHDOW_AUX_MODE4		0x1a
+#define MII_BCM5221_SHDOW_AUX_MODE4_IDDQMODE	0x0001
 #define MII_BCM5221_SHDOW_AUX_MODE4_CLKLOPWR	0x0004
+
+/* MII BCM5241 Additional registers */
+#define MII_BCM5241_SHDOW_AUX_MODE4_STANDBYPWR	0x0008
 
 /* MII BCM5400 1000-BASET Control register */
 #define MII_BCM5400_GB_CONTROL			0x09
@@ -93,7 +107,7 @@ extern int mii_phy_probe(struct mii_phy *phy, int mii_id);
 /* MII BCM5400 AUXSTATUS register */
 #define MII_BCM5400_AUXSTATUS                   0x19
 #define MII_BCM5400_AUXSTATUS_LINKMODE_MASK     0x0700
-#define MII_BCM5400_AUXSTATUS_LINKMODE_SHIFT    8  
+#define MII_BCM5400_AUXSTATUS_LINKMODE_SHIFT    8
 
 /* 1000BT control (Marvell & BCM54xx at least) */
 #define MII_1000BASETCONTROL			0x09
@@ -112,5 +126,7 @@ extern int mii_phy_probe(struct mii_phy *phy, int mii_id);
 #define MII_M1011_PHY_SPEC_STATUS_SPD_MASK	0xc000
 #define MII_M1011_PHY_SPEC_STATUS_FULLDUPLEX	0x2000
 #define MII_M1011_PHY_SPEC_STATUS_RESOLVED	0x0800
+#define MII_M1011_PHY_SPEC_STATUS_TX_PAUSE	0x0008
+#define MII_M1011_PHY_SPEC_STATUS_RX_PAUSE	0x0004
 
 #endif /* __SUNGEM_PHY_H__ */

@@ -4,6 +4,7 @@
  *  Copyright (C) 1999,2000 ARM Limited
  *  Copyright (C) 2000 Deep Blue Solutions Ltd.
  *  Copyright (C) 2001 Altera Corporation
+ *  hacked for non-paged-MM by Hyok S. Choi, 2003.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,12 +27,11 @@
  *  CONFIG_CPU_ARM922_CPU_IDLE -> nohlt
  */
 #include <linux/linkage.h>
-#include <linux/config.h>
 #include <linux/init.h>
 #include <asm/assembler.h>
+#include <asm/hwcap.h>
+#include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
-#include <asm/procinfo.h>
-#include <asm/hardware.h>
 #include <asm/page.h>
 #include <asm/ptrace.h>
 #include "proc-macros.S"
@@ -54,7 +54,7 @@
 /*
  * This is the size at which it becomes more efficient to
  * clean the whole cache, rather than using the individual
- * cache line maintainence instructions.  (I think this should
+ * cache line maintenance instructions.  (I think this should
  * be 32768).
  */
 #define CACHE_DLIMIT	8192
@@ -71,19 +71,11 @@ ENTRY(cpu_arm922_proc_init)
  * cpu_arm922_proc_fin()
  */
 ENTRY(cpu_arm922_proc_fin)
-	stmfd	sp!, {lr}
-	mov	ip, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
-	msr	cpsr_c, ip
-#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
-	bl	arm922_flush_kern_cache_all
-#else
-	bl	v4wt_flush_kern_cache_all
-#endif
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x1000			@ ...i............
 	bic	r0, r0, #0x000e			@ ............wca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	ldmfd	sp!, {pc}
+	mov	pc, lr
 
 /*
  * cpu_arm922_reset(loc)
@@ -99,7 +91,9 @@ ENTRY(cpu_arm922_reset)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c7, 0		@ invalidate I,D caches
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+#ifdef CONFIG_MMU
 	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
+#endif
 	mrc	p15, 0, ip, c1, c0, 0		@ ctrl register
 	bic	ip, ip, #0x000f			@ ............wcam
 	bic	ip, ip, #0x1100			@ ...i...s........
@@ -116,6 +110,17 @@ ENTRY(cpu_arm922_do_idle)
 
 
 #ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+
+/*
+ *	flush_icache_all()
+ *
+ *	Unconditionally clean and invalidate the entire icache.
+ */
+ENTRY(arm922_flush_icache_all)
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
+	mov	pc, lr
+ENDPROC(arm922_flush_icache_all)
 
 /*
  *	flush_user_cache_all()
@@ -184,6 +189,19 @@ ENTRY(arm922_flush_user_cache_range)
  *	- end	- virtual end address
  */
 ENTRY(arm922_coherent_kern_range)
+	/* FALLTHROUGH */
+
+/*
+ *	coherent_user_range(start, end)
+ *
+ *	Ensure coherency between the Icache and the Dcache in the
+ *	region described by start, end.  If you have non-snooping
+ *	Harvard caches, you need to implement this function.
+ *
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ */
+ENTRY(arm922_coherent_user_range)
 	bic	r0, r0, #CACHE_DLINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c5, 1		@ invalidate I entry
@@ -194,15 +212,16 @@ ENTRY(arm922_coherent_kern_range)
 	mov	pc, lr
 
 /*
- *	flush_kern_dcache_page(void *page)
+ *	flush_kern_dcache_area(void *addr, size_t size)
  *
  *	Ensure no D cache aliasing occurs, either with itself or
  *	the I cache
  *
- *	- addr	- page aligned address
+ *	- addr	- kernel address
+ *	- size	- region size
  */
-ENTRY(arm922_flush_kern_dcache_page)
-	add	r1, r0, #PAGE_SZ
+ENTRY(arm922_flush_kern_dcache_area)
+	add	r1, r0, r1
 1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
 	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
@@ -225,7 +244,7 @@ ENTRY(arm922_flush_kern_dcache_page)
  *
  * (same as v4wb)
  */
-ENTRY(arm922_dma_inv_range)
+arm922_dma_inv_range:
 	tst	r0, #CACHE_DLINESIZE - 1
 	bic	r0, r0, #CACHE_DLINESIZE - 1
 	mcrne	p15, 0, r0, c7, c10, 1		@ clean D entry
@@ -248,7 +267,7 @@ ENTRY(arm922_dma_inv_range)
  *
  * (same as v4wb)
  */
-ENTRY(arm922_dma_clean_range)
+arm922_dma_clean_range:
 	bic	r0, r0, #CACHE_DLINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	add	r0, r0, #CACHE_DLINESIZE
@@ -274,14 +293,40 @@ ENTRY(arm922_dma_flush_range)
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
+/*
+ *	dma_map_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(arm922_dma_map_area)
+	add	r1, r1, r0
+	cmp	r2, #DMA_TO_DEVICE
+	beq	arm922_dma_clean_range
+	bcs	arm922_dma_inv_range
+	b	arm922_dma_flush_range
+ENDPROC(arm922_dma_map_area)
+
+/*
+ *	dma_unmap_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(arm922_dma_unmap_area)
+	mov	pc, lr
+ENDPROC(arm922_dma_unmap_area)
+
 ENTRY(arm922_cache_fns)
+	.long	arm922_flush_icache_all
 	.long	arm922_flush_kern_cache_all
 	.long	arm922_flush_user_cache_all
 	.long	arm922_flush_user_cache_range
 	.long	arm922_coherent_kern_range
-	.long	arm922_flush_kern_dcache_page
-	.long	arm922_dma_inv_range
-	.long	arm922_dma_clean_range
+	.long	arm922_coherent_user_range
+	.long	arm922_flush_kern_dcache_area
+	.long	arm922_dma_map_area
+	.long	arm922_dma_unmap_area
 	.long	arm922_dma_flush_range
 
 #endif
@@ -307,6 +352,7 @@ ENTRY(cpu_arm922_dcache_clean_area)
  */
 	.align	5
 ENTRY(cpu_arm922_switch_mm)
+#ifdef CONFIG_MMU
 	mov	ip, #0
 #ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
@@ -327,77 +373,51 @@ ENTRY(cpu_arm922_switch_mm)
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
 	mcr	p15, 0, r0, c2, c0, 0		@ load page table pointer
 	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
+#endif
 	mov	pc, lr
 
 /*
- * cpu_arm922_set_pte(ptep, pte)
+ * cpu_arm922_set_pte_ext(ptep, pte, ext)
  *
  * Set a PTE and flush it out
  */
 	.align	5
-ENTRY(cpu_arm922_set_pte)
-	str	r1, [r0], #-2048		@ linux version
-
-	eor	r1, r1, #L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_WRITE | L_PTE_DIRTY
-
-	bic	r2, r1, #PTE_SMALL_AP_MASK
-	bic	r2, r2, #PTE_TYPE_MASK
-	orr	r2, r2, #PTE_TYPE_SMALL
-
-	tst	r1, #L_PTE_USER			@ User?
-	orrne	r2, r2, #PTE_SMALL_AP_URO_SRW
-
-	tst	r1, #L_PTE_WRITE | L_PTE_DIRTY	@ Write and Dirty?
-	orreq	r2, r2, #PTE_SMALL_AP_UNO_SRW
-
-	tst	r1, #L_PTE_PRESENT | L_PTE_YOUNG	@ Present and Young?
-	movne	r2, #0
-
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
-	eor	r3, r2, #0x0a			@ C & small page?
-	tst	r3, #0x0b
-	biceq	r2, r2, #4
-#endif
-	str	r2, [r0]			@ hardware version
+ENTRY(cpu_arm922_set_pte_ext)
+#ifdef CONFIG_MMU
+	armv3_set_pte_ext
 	mov	r0, r0
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+#endif /* CONFIG_MMU */
 	mov	pc, lr
 
-	__INIT
+	__CPUINIT
 
 	.type	__arm922_setup, #function
 __arm922_setup:
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c7		@ invalidate I,D caches on v4
 	mcr	p15, 0, r0, c7, c10, 4		@ drain write buffer on v4
+#ifdef CONFIG_MMU
 	mcr	p15, 0, r0, c8, c7		@ invalidate I,D TLBs on v4
-	mcr	p15, 0, r4, c2, c0		@ load page table pointer
-	mov	r0, #0x1f			@ Domains 0, 1 = client
-	mcr	p15, 0, r0, c3, c0		@ load domain access register
+#endif
+	adr	r5, arm922_crval
+	ldmia	r5, {r5, r6}
 	mrc	p15, 0, r0, c1, c0		@ get control register v4
-/*
- * Clear out 'unwanted' bits (then put them in if we need them)
- */
-						@   VI ZFRS BLDP WCAM
-	bic	r0, r0, #0x0e00
-	bic	r0, r0, #0x0002
-	bic	r0, r0, #0x000c
-	bic	r0, r0, #0x1000			@ ...0 000. .... 000.
-/*
- * Turn on what we want
- */
-	orr	r0, r0, #0x0031
-	orr	r0, r0, #0x2100			@ ..1. ...1 ..11 ...1
-
-#ifndef CONFIG_CPU_DCACHE_DISABLE
-	orr	r0, r0, #0x0004			@ .... .... .... .1..
-#endif
-#ifndef CONFIG_CPU_ICACHE_DISABLE
-	orr	r0, r0, #0x1000			@ ...1 .... .... ....
-#endif
+	bic	r0, r0, r5
+	orr	r0, r0, r6
 	mov	pc, lr
 	.size	__arm922_setup, . - __arm922_setup
+
+	/*
+	 *  R
+	 * .RVI ZFRS BLDP WCAM
+	 * ..11 0001 ..11 0101
+	 * 
+	 */
+	.type	arm922_crval, #object
+arm922_crval:
+	crval	clear=0x00003f3f, mmuset=0x00003135, ucset=0x00001130
 
 	__INITDATA
 
@@ -408,13 +428,17 @@ __arm922_setup:
 	.type	arm922_processor_functions, #object
 arm922_processor_functions:
 	.word	v4t_early_abort
+	.word	legacy_pabort
 	.word	cpu_arm922_proc_init
 	.word	cpu_arm922_proc_fin
 	.word	cpu_arm922_reset
 	.word   cpu_arm922_do_idle
 	.word	cpu_arm922_dcache_clean_area
 	.word	cpu_arm922_switch_mm
-	.word	cpu_arm922_set_pte
+	.word	cpu_arm922_set_pte_ext
+	.word	0
+	.word	0
+	.word	0
 	.size	arm922_processor_functions, . - arm922_processor_functions
 
 	.section ".rodata"
@@ -431,30 +455,27 @@ cpu_elf_name:
 
 	.type	cpu_arm922_name, #object
 cpu_arm922_name:
-	.ascii	"ARM922T"
-#ifndef CONFIG_CPU_ICACHE_DISABLE
-	.ascii	"i"
-#endif
-#ifndef CONFIG_CPU_DCACHE_DISABLE
-	.ascii	"d"
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
-	.ascii	"(wt)"
-#else
-	.ascii	"(wb)"
-#endif
-#endif
-	.ascii	"\0"
+	.asciz	"ARM922T"
 	.size	cpu_arm922_name, . - cpu_arm922_name
 
 	.align
 
-	.section ".proc.info", #alloc, #execinstr
+	.section ".proc.info.init", #alloc, #execinstr
 
 	.type	__arm922_proc_info,#object
 __arm922_proc_info:
 	.long	0x41009220
 	.long	0xff00fff0
-	.long	0x00000c1e			@ mmuflags
+	.long   PMD_TYPE_SECT | \
+		PMD_SECT_BUFFERABLE | \
+		PMD_SECT_CACHEABLE | \
+		PMD_BIT4 | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
+	.long   PMD_TYPE_SECT | \
+		PMD_BIT4 | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
 	b	__arm922_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name

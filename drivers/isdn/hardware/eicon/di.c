@@ -42,10 +42,7 @@
 /*------------------------------------------------------------------*/
 void pr_out(ADAPTER * a);
 byte pr_dpc(ADAPTER * a);
-void scom_out(ADAPTER * a);
-byte scom_dpc(ADAPTER * a);
 static byte pr_ready(ADAPTER * a);
-static byte scom_ready(ADAPTER * a);
 static byte isdn_rc(ADAPTER *, byte, byte, byte, word, dword, dword);
 static byte isdn_ind(ADAPTER *, byte, byte, byte, PBUFFER *, byte, word);
 /* -----------------------------------------------------------------
@@ -59,11 +56,11 @@ static byte isdn_ind(ADAPTER *, byte, byte, byte, PBUFFER *, byte, word);
    ----------------------------------------------------------------- */
 #if defined(XDI_USE_XLOG)
 #define XDI_A_NR(_x_) ((byte)(((ISDN_ADAPTER *)(_x_->io))->ANum))
+static void xdi_xlog (byte *msg, word code, int length);
+static byte xdi_xlog_sec = 0;
 #else
 #define XDI_A_NR(_x_) ((byte)0)
 #endif
-byte xdi_xlog_sec = 0;
-void xdi_xlog (byte *msg, word code, int length);
 static void xdi_xlog_rc_event (byte Adapter,
                                byte Id, byte Ch, byte Rc, byte cb, byte type);
 static void xdi_xlog_request (byte Adapter, byte Id,
@@ -81,7 +78,7 @@ static void xdi_xlog_ind (byte Adapter,
 void pr_out(ADAPTER * a)
 {
   byte e_no;
-  ENTITY  * this = 0;
+  ENTITY  * this = NULL;
   BUFFERS  *X;
   word length;
   word i;
@@ -136,7 +133,7 @@ void pr_out(ADAPTER * a)
     i = this->XCurrent;
     X = PTR_X(a,this);
     while(i<this->XNum && length<270) {
-      clength = MIN((word)(270-length),X[i].PLength-this->XOffset);
+      clength = min((word)(270-length),(word)(X[i].PLength-this->XOffset));
       a->ram_out_buffer(a,
                         &ReqOut->XBuffer.P[length],
                         PTR_P(a,this,&X[i].P[this->XOffset]),
@@ -176,16 +173,16 @@ void pr_out(ADAPTER * a)
         xdi_xlog_request (XDI_A_NR(a), this->Id, this->ReqCh, this->MInd,
                           a->IdTypeTable[this->No]);
         a->ram_out(a, &ReqOut->Req, this->MInd);
-        more = TRUE;
+        more = true;
       }
       else {
         xdi_xlog_request (XDI_A_NR(a), this->Id, this->ReqCh, this->Req,
                           a->IdTypeTable[this->No]);
         this->More |=XMOREF;
         a->ram_out(a, &ReqOut->Req, this->Req);
-        more = FALSE;
+        more = false;
         if (a->FlowControlIdTable[this->ReqCh] == this->Id)
-          a->FlowControlSkipTable[this->ReqCh] = TRUE;
+          a->FlowControlSkipTable[this->ReqCh] = true;
         /*
            Note that remove request was sent to the card
            */
@@ -288,7 +285,7 @@ byte pr_dpc(ADAPTER * a)
                 a->ram_in(a, &RcIn->RcId),
                 a->ram_in(a, &RcIn->RcCh),
                 a->ram_inw(a, &RcIn->Reference),
-                tmp[0],  /* type of extended informtion */
+                tmp[0],  /* type of extended information */
                 tmp[1]); /* extended information        */
         a->ram_out(a, &RcIn->Rc, 0);
       }
@@ -314,7 +311,7 @@ byte pr_dpc(ADAPTER * a)
         /* are marked RNR                                           */
       if(RNRId && RNRId==a->ram_in(a, &IndIn->IndId)) {
         a->ram_out(a, &IndIn->Ind, 0);
-        a->ram_out(a, &IndIn->RNR, TRUE);
+        a->ram_out(a, &IndIn->RNR, true);
       }
       else {
         Ind = a->ram_in(a, &IndIn->Ind);
@@ -334,7 +331,7 @@ byte pr_dpc(ADAPTER * a)
             dtrc(dprintf("RNR"));
             a->ram_out(a, &IndIn->Ind, 0);
             RNRId = a->ram_in(a, &IndIn->IndId);
-            a->ram_out(a, &IndIn->RNR, TRUE);
+            a->ram_out(a, &IndIn->RNR, true);
           }
         }
       }
@@ -343,193 +340,7 @@ byte pr_dpc(ADAPTER * a)
     }
     a->ram_out(a, &PR_RAM->IndOutput, 0);
   }
-  return FALSE;
-}
-byte pr_test_int(ADAPTER * a)
-{
-  return a->ram_in(a,(void *)0x3ffc);
-}
-void pr_clear_int(ADAPTER * a)
-{
-  a->ram_out(a,(void *)0x3ffc,0);
-}
-/*------------------------------------------------------------------*/
-/* output function                                                  */
-/*------------------------------------------------------------------*/
-void scom_out(ADAPTER * a)
-{
-  byte e_no;
-  ENTITY  * this;
-  BUFFERS  * X;
-  word length;
-  word i;
-  word clength;
-  byte more;
-  byte Id;
-  dtrc(dprintf("scom_out"));
-        /* check if the adapter is ready to accept an request:      */
-  e_no = look_req(a);
-  if(!e_no)
-  {
-    dtrc(dprintf("no_req"));
-    return;
-  }
-  if(!scom_ready(a))
-  {
-    dtrc(dprintf("not_ready"));
-    return;
-  }
-  this = entity_ptr(a,e_no);
-  dtrc(dprintf("out:Req=%x,Id=%x,Ch=%x",this->Req,this->Id,this->ReqCh));
-  next_req(a);
-        /* now copy the data from the current data buffer into the  */
-        /* adapters request buffer                                  */
-  length = 0;
-  i = this->XCurrent;
-  X = PTR_X(a, this);
-  while(i<this->XNum && length<270) {
-    clength = MIN((word)(270-length),X[i].PLength-this->XOffset);
-    a->ram_out_buffer(a,
-                      &RAM->XBuffer.P[length],
-                      PTR_P(a,this,&X[i].P[this->XOffset]),
-                      clength);
-    length +=clength;
-    this->XOffset +=clength;
-    if(this->XOffset==X[i].PLength) {
-      this->XCurrent = (byte)++i;
-      this->XOffset = 0;
-    }
-  }
-  a->ram_outw(a, &RAM->XBuffer.length, length);
-  a->ram_out(a, &RAM->ReqId, this->Id);
-  a->ram_out(a, &RAM->ReqCh, this->ReqCh);
-        /* if it's a specific request (no ASSIGN) ...                */
-  if(this->Id &0x1f) {
-        /* if buffers are left in the list of data buffers do       */
-        /* chaining (LL_MDATA, N_MDATA)                             */
-    this->More++;
-    if(i<this->XNum && this->MInd) {
-      a->ram_out(a, &RAM->Req, this->MInd);
-      more = TRUE;
-    }
-    else {
-      this->More |=XMOREF;
-      a->ram_out(a, &RAM->Req, this->Req);
-      more = FALSE;
-      if (a->FlowControlIdTable[this->ReqCh] == this->Id)
-        a->FlowControlSkipTable[this->ReqCh] = TRUE;
-      /*
-         Note that remove request was sent to the card
-         */
-      if (this->Req == REMOVE) {
-        a->misc_flags_table[e_no] |= DIVA_MISC_FLAGS_REMOVE_PENDING;
-      }
-    }
-    if(more) {
-      req_queue(a,this->No);
-    }
-  }
-        /* else it's a ASSIGN                                       */
-  else {
-        /* save the request code used for buffer chaining           */
-    this->MInd = 0;
-    if (this->Id==BLLC_ID) this->MInd = LL_MDATA;
-    if (this->Id==NL_ID   ||
-        this->Id==TASK_ID ||
-        this->Id==MAN_ID
-      ) this->MInd = N_MDATA;
-        /* send the ASSIGN                                          */
-    this->More |=XMOREF;
-    a->ram_out(a, &RAM->Req, this->Req);
-        /* save the reference of the ASSIGN                         */
-    assign_queue(a, this->No, 0);
-  }
-        /* if it is a 'unreturncoded' UREMOVE request, remove the  */
-        /* Id from our table after sending the request             */
-  if(this->Req==UREMOVE && this->Id) {
-    Id = this->Id;
-    e_no = a->IdTable[Id];
-    free_entity(a, e_no);
-    for (i = 0; i < 256; i++)
-    {
-      if (a->FlowControlIdTable[i] == Id)
-        a->FlowControlIdTable[i] = 0;
-    }
-    a->IdTable[Id] = 0;
-    this->Id = 0;
-  }
-}
-static byte scom_ready(ADAPTER * a)
-{
-  if(a->ram_in(a, &RAM->Req)) {
-    if(!a->ReadyInt) {
-      a->ram_inc(a, &RAM->ReadyInt);
-      a->ReadyInt++;
-    }
-    return 0;
-  }
-  return 1;
-}
-/*------------------------------------------------------------------*/
-/* isdn interrupt handler                                           */
-/*------------------------------------------------------------------*/
-byte scom_dpc(ADAPTER * a)
-{
-  byte c;
-        /* if a return code is available ...                        */
-  if(a->ram_in(a, &RAM->Rc)) {
-        /* call return code handler, if it is not our return code   */
-        /* the handler returns 2, if it's the return code to an     */
-        /* ASSIGN the handler returns 1                             */
-    c = isdn_rc(a,
-                a->ram_in(a, &RAM->Rc),
-                a->ram_in(a, &RAM->RcId),
-                a->ram_in(a, &RAM->RcCh),
-                0,
-                /*
-                  Scom Card does not provide extended information
-                  */
-                0, 0);
-    switch(c) {
-    case 0:
-      a->ram_out(a, &RAM->Rc, 0);
-      break;
-    case 1:
-      a->ram_out(a, &RAM->Req, 0);
-      a->ram_out(a, &RAM->Rc, 0);
-      break;
-    case 2:
-      return TRUE;
-    }
-        /* call output function                                     */
-    scom_out(a);
-  }
-  else {
-        /* if an indications is available ...                       */
-    if(a->ram_in(a, &RAM->Ind)) {
-        /* call indication handler, a return value of 2 means chain */
-        /* a return value of 1 means RNR                            */
-      c = isdn_ind(a,
-                   a->ram_in(a, &RAM->Ind),
-                   a->ram_in(a, &RAM->IndId),
-                   a->ram_in(a, &RAM->IndCh),
-                   &RAM->RBuffer,
-                   a->ram_in(a, &RAM->MInd),
-                   a->ram_inw(a, &RAM->MLength));
-      switch(c) {
-      case 0:
-        a->ram_out(a, &RAM->Ind, 0);
-        break;
-      case 1:
-        dtrc(dprintf("RNR"));
-        a->ram_out(a, &RAM->RNR, TRUE);
-        break;
-      case 2:
-        return TRUE;
-      }
-    }
-  }
-  return FALSE;
+  return false;
 }
 byte scom_test_int(ADAPTER * a)
 {
@@ -539,21 +350,16 @@ void scom_clear_int(ADAPTER * a)
 {
   a->ram_out(a,(void *)0x3fe,0);
 }
-void quadro_clear_int(ADAPTER * a)
-{
-  a->ram_out(a,(void *)0x3fe,0);
-  a->ram_out(a,(void *)0x401,0);
-}
 /*------------------------------------------------------------------*/
 /* return code handler                                              */
 /*------------------------------------------------------------------*/
-byte isdn_rc(ADAPTER * a,
-             byte Rc,
-             byte Id,
-             byte Ch,
-             word Ref,
-             dword extended_info_type,
-             dword extended_info)
+static byte isdn_rc(ADAPTER *a,
+		    byte Rc,
+		    byte Id,
+		    byte Ch,
+		    word Ref,
+		    dword extended_info_type,
+		    dword extended_info)
 {
   ENTITY  * this;
   byte e_no;
@@ -593,7 +399,7 @@ byte isdn_rc(ADAPTER * a,
           return (0);
         }
         if (extended_info_type == DIVA_RC_TYPE_REMOVE_COMPLETE)
-          a->RcExtensionSupported = TRUE;
+          a->RcExtensionSupported = true;
       }
       a->misc_flags_table[e_no] &= ~DIVA_MISC_FLAGS_REMOVE_PENDING;
       a->misc_flags_table[e_no] &= ~DIVA_MISC_FLAGS_NO_RC_CANCELLING;
@@ -622,7 +428,7 @@ byte isdn_rc(ADAPTER * a,
     }
     if (Rc==OK_FC) {
       a->FlowControlIdTable[Ch] = Id;
-      a->FlowControlSkipTable[Ch] = FALSE;
+      a->FlowControlSkipTable[Ch] = false;
       this->Rc = Rc;
       this->More &= ~(XBUSY | XMOREC);
       this->complete=0xff;
@@ -749,19 +555,19 @@ byte isdn_rc(ADAPTER * a,
 /*------------------------------------------------------------------*/
 /* indication handler                                               */
 /*------------------------------------------------------------------*/
-byte isdn_ind(ADAPTER * a,
-              byte Ind,
-              byte Id,
-              byte Ch,
-              PBUFFER * RBuffer,
-              byte MInd,
-              word MLength)
+static byte isdn_ind(ADAPTER *a,
+		     byte Ind,
+		     byte Id,
+		     byte Ch,
+		     PBUFFER *RBuffer,
+		     byte MInd,
+		     word MLength)
 {
   ENTITY  * this;
   word clength;
   word offset;
   BUFFERS  *R;
-  byte* cma = 0;
+  byte* cma = NULL;
 #ifdef USE_EXTENDED_DEBUGS
   {
     DBG_TRC(("<A%d Id=0x%x Ind=0x%x", ((ISDN_ADAPTER *)a->io)->ANum, Id, Ind))
@@ -814,9 +620,9 @@ byte isdn_ind(ADAPTER * a,
                                                      Id,
                                                      cma,
                                                      sizeof(a->stream_buffer),
-                                                     &final, 0, 0);
+                                                     &final, NULL, NULL);
         }
-        IoAdapter->RBuffer.length = MIN(MLength, 270);
+        IoAdapter->RBuffer.length = min(MLength, (word)270);
         if (IoAdapter->RBuffer.length != MLength) {
           this->complete = 0;
         } else {
@@ -870,9 +676,9 @@ byte isdn_ind(ADAPTER * a,
         this->RCurrent++;
       }
       if (cma) {
-        clength = MIN(MLength, R[this->RCurrent].PLength-this->ROffset);
+        clength = min(MLength, (word)(R[this->RCurrent].PLength-this->ROffset));
       } else {
-        clength = MIN(a->ram_inw(a, &RBuffer->length)-offset,
+        clength = min(a->ram_inw(a, &RBuffer->length)-offset,
                       R[this->RCurrent].PLength-this->ROffset);
       }
       if(R[this->RCurrent].P) {
@@ -914,15 +720,15 @@ byte isdn_ind(ADAPTER * a,
   }
   return 2;
 }
+#if defined(XDI_USE_XLOG)
 /* -----------------------------------------------------------
    This function works in the same way as xlog on the
    active board
    ----------------------------------------------------------- */
-void xdi_xlog (byte *msg, word code, int length) {
-#if defined(XDI_USE_XLOG)
+static void xdi_xlog (byte *msg, word code, int length) {
   xdi_dbg_xlog ("\x00\x02", msg, code, length);
-#endif
 }
+#endif
 /* -----------------------------------------------------------
     This function writes the information about the Return Code
     processing in the trace buffer. Trace ID is 221.
@@ -952,10 +758,10 @@ static void xdi_xlog_rc_event (byte Adapter,
                                byte Id, byte Ch, byte Rc, byte cb, byte type) {
 #if defined(XDI_USE_XLOG)
   word LogInfo[4];
-  WRITE_WORD(&LogInfo[0], ((word)Adapter | (word)(xdi_xlog_sec++ << 8)));
-  WRITE_WORD(&LogInfo[1], ((word)Id | (word)(Ch << 8)));
-  WRITE_WORD(&LogInfo[2], ((word)Rc | (word)(type << 8)));
-  WRITE_WORD(&LogInfo[3], cb);
+  PUT_WORD(&LogInfo[0], ((word)Adapter | (word)(xdi_xlog_sec++ << 8)));
+  PUT_WORD(&LogInfo[1], ((word)Id | (word)(Ch << 8)));
+  PUT_WORD(&LogInfo[2], ((word)Rc | (word)(type << 8)));
+  PUT_WORD(&LogInfo[3], cb);
   xdi_xlog ((byte*)&LogInfo[0], 221, sizeof(LogInfo));
 #endif
 }
@@ -976,9 +782,9 @@ static void xdi_xlog_request (byte Adapter, byte Id,
                               byte Ch, byte Req, byte type) {
 #if defined(XDI_USE_XLOG)
   word LogInfo[3];
-  WRITE_WORD(&LogInfo[0], ((word)Adapter | (word)(xdi_xlog_sec++ << 8)));
-  WRITE_WORD(&LogInfo[1], ((word)Id | (word)(Ch << 8)));
-  WRITE_WORD(&LogInfo[2], ((word)Req | (word)(type << 8)));
+  PUT_WORD(&LogInfo[0], ((word)Adapter | (word)(xdi_xlog_sec++ << 8)));
+  PUT_WORD(&LogInfo[1], ((word)Id | (word)(Ch << 8)));
+  PUT_WORD(&LogInfo[2], ((word)Req | (word)(type << 8)));
   xdi_xlog ((byte*)&LogInfo[0], 220, sizeof(LogInfo));
 #endif
 }
@@ -1000,7 +806,7 @@ static void xdi_xlog_request (byte Adapter, byte Id,
           DELIVERY - indication entered isdn_rc function
           RNR=...  - application had returned RNR=... after the
                      look ahead callback
-          RNum=0   - aplication had not returned any buffer to copy
+          RNum=0   - application had not returned any buffer to copy
                      this indication and will copy it self
           COMPLETE - XDI had copied the data to the buffers provided
                      bu the application and is about to issue the
@@ -1020,10 +826,10 @@ static void xdi_xlog_ind (byte Adapter,
                           byte type) {
 #if defined(XDI_USE_XLOG)
   word LogInfo[4];
-  WRITE_WORD(&LogInfo[0], ((word)Adapter | (word)(xdi_xlog_sec++ << 8)));
-  WRITE_WORD(&LogInfo[1], ((word)Id | (word)(Ch << 8)));
-  WRITE_WORD(&LogInfo[2], ((word)Ind | (word)(type << 8)));
-  WRITE_WORD(&LogInfo[3], ((word)rnr | (word)(rnr_valid << 8)));
+  PUT_WORD(&LogInfo[0], ((word)Adapter | (word)(xdi_xlog_sec++ << 8)));
+  PUT_WORD(&LogInfo[1], ((word)Id | (word)(Ch << 8)));
+  PUT_WORD(&LogInfo[2], ((word)Ind | (word)(type << 8)));
+  PUT_WORD(&LogInfo[3], ((word)rnr | (word)(rnr_valid << 8)));
   xdi_xlog ((byte*)&LogInfo[0], 222, sizeof(LogInfo));
 #endif
 }

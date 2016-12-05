@@ -30,8 +30,9 @@
 
 #include <linux/types.h>
 #include <linux/pci.h>
+#include <linux/pci_hotplug.h>
 
-/* PICMG 2.12 R2.0 HS CSR bits: */
+/* PICMG 2.1 R2.0 HS CSR bits: */
 #define HS_CSR_INS	0x0080
 #define HS_CSR_EXT	0x0040
 #define HS_CSR_PI	0x0030
@@ -40,9 +41,7 @@
 #define HS_CSR_EIM	0x0002
 #define HS_CSR_DHA	0x0001
 
-#define SLOT_MAGIC	0x67267322
 struct slot {
-	u32 magic;
 	u8 number;
 	unsigned int devfn;
 	struct pci_bus *bus;
@@ -71,6 +70,11 @@ struct cpci_hp_controller {
 	struct cpci_hp_controller_ops *ops;
 };
 
+static inline const char *slot_name(struct slot *slot)
+{
+	return hotplug_slot_name(slot->hotplug_slot);
+}
+
 extern int cpci_hp_register_controller(struct cpci_hp_controller *controller);
 extern int cpci_hp_unregister_controller(struct cpci_hp_controller *controller);
 extern int cpci_hp_register_bus(struct pci_bus *bus, u8 first, u8 last);
@@ -86,7 +90,6 @@ extern u8 cpci_get_attention_status(struct slot *slot);
 extern u8 cpci_get_latch_status(struct slot *slot);
 extern u8 cpci_get_adapter_status(struct slot *slot);
 extern u16 cpci_get_hs_csr(struct slot * slot);
-extern u16 cpci_set_hs_csr(struct slot * slot, u16 hs_csr);
 extern int cpci_set_attention_status(struct slot *slot, int status);
 extern int cpci_check_and_clear_ins(struct slot * slot);
 extern int cpci_check_ext(struct slot * slot);

@@ -7,11 +7,12 @@
  * Tx39XX R4k style caches added. HK
  * Copyright (C) 1998, 1999, 2000 Harald Koerfgen
  * Copyright (C) 1998 Gleb Raiko & Vladimir Roganov
- * Copyright (C) 2001  Maciej W. Rozycki
+ * Copyright (C) 2001, 2004, 2007  Maciej W. Rozycki
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/smp.h>
 #include <linux/mm.h>
 
 #include <asm/page.h>
@@ -23,15 +24,10 @@
 #include <asm/bootinfo.h>
 #include <asm/cpu.h>
 
-void r3k_clear_page(void * page);
-void r3k_copy_page(void * to, void * from);
-
 static unsigned long icache_size, dcache_size;		/* Size in bytes */
 static unsigned long icache_lsize, dcache_lsize;	/* Size in bytes */
 
-#undef DEBUG_CACHE
-
-unsigned long __init r3k_cache_size(unsigned long ca_flags)
+unsigned long __cpuinit r3k_cache_size(unsigned long ca_flags)
 {
 	unsigned long flags, status, dummy, size;
 	volatile unsigned long *p;
@@ -66,7 +62,7 @@ unsigned long __init r3k_cache_size(unsigned long ca_flags)
 	return size * sizeof(*p);
 }
 
-unsigned long __init r3k_cache_lsize(unsigned long ca_flags)
+unsigned long __cpuinit r3k_cache_lsize(unsigned long ca_flags)
 {
 	unsigned long flags, status, lsize, i;
 	volatile unsigned long *p;
@@ -95,7 +91,7 @@ unsigned long __init r3k_cache_lsize(unsigned long ca_flags)
 	return lsize * sizeof(*p);
 }
 
-static void __init r3k_probe_cache(void)
+static void __cpuinit r3k_probe_cache(void)
 {
 	dcache_size = r3k_cache_size(ST0_ISC);
 	if (dcache_size)
@@ -124,7 +120,7 @@ static void r3k_flush_icache_range(unsigned long start, unsigned long end)
 	write_c0_status((ST0_ISC|ST0_SWC|flags)&~ST0_IEC);
 
 	for (i = 0; i < size; i += 0x080) {
-		asm ( 	"sb\t$0, 0x000(%0)\n\t"
+		asm( 	"sb\t$0, 0x000(%0)\n\t"
 			"sb\t$0, 0x004(%0)\n\t"
 			"sb\t$0, 0x008(%0)\n\t"
 			"sb\t$0, 0x00c(%0)\n\t"
@@ -132,7 +128,7 @@ static void r3k_flush_icache_range(unsigned long start, unsigned long end)
 			"sb\t$0, 0x014(%0)\n\t"
 			"sb\t$0, 0x018(%0)\n\t"
 			"sb\t$0, 0x01c(%0)\n\t"
-		 	"sb\t$0, 0x020(%0)\n\t"
+			"sb\t$0, 0x020(%0)\n\t"
 			"sb\t$0, 0x024(%0)\n\t"
 			"sb\t$0, 0x028(%0)\n\t"
 			"sb\t$0, 0x02c(%0)\n\t"
@@ -148,7 +144,7 @@ static void r3k_flush_icache_range(unsigned long start, unsigned long end)
 			"sb\t$0, 0x054(%0)\n\t"
 			"sb\t$0, 0x058(%0)\n\t"
 			"sb\t$0, 0x05c(%0)\n\t"
-		 	"sb\t$0, 0x060(%0)\n\t"
+			"sb\t$0, 0x060(%0)\n\t"
 			"sb\t$0, 0x064(%0)\n\t"
 			"sb\t$0, 0x068(%0)\n\t"
 			"sb\t$0, 0x06c(%0)\n\t"
@@ -181,35 +177,35 @@ static void r3k_flush_dcache_range(unsigned long start, unsigned long end)
 	write_c0_status((ST0_ISC|flags)&~ST0_IEC);
 
 	for (i = 0; i < size; i += 0x080) {
-		asm ( 	"sb\t$0, 0x000(%0)\n\t"
+		asm( 	"sb\t$0, 0x000(%0)\n\t"
 			"sb\t$0, 0x004(%0)\n\t"
 			"sb\t$0, 0x008(%0)\n\t"
 			"sb\t$0, 0x00c(%0)\n\t"
-		 	"sb\t$0, 0x010(%0)\n\t"
+			"sb\t$0, 0x010(%0)\n\t"
 			"sb\t$0, 0x014(%0)\n\t"
 			"sb\t$0, 0x018(%0)\n\t"
 			"sb\t$0, 0x01c(%0)\n\t"
-		 	"sb\t$0, 0x020(%0)\n\t"
+			"sb\t$0, 0x020(%0)\n\t"
 			"sb\t$0, 0x024(%0)\n\t"
 			"sb\t$0, 0x028(%0)\n\t"
 			"sb\t$0, 0x02c(%0)\n\t"
-		 	"sb\t$0, 0x030(%0)\n\t"
+			"sb\t$0, 0x030(%0)\n\t"
 			"sb\t$0, 0x034(%0)\n\t"
 			"sb\t$0, 0x038(%0)\n\t"
 			"sb\t$0, 0x03c(%0)\n\t"
-		 	"sb\t$0, 0x040(%0)\n\t"
+			"sb\t$0, 0x040(%0)\n\t"
 			"sb\t$0, 0x044(%0)\n\t"
 			"sb\t$0, 0x048(%0)\n\t"
 			"sb\t$0, 0x04c(%0)\n\t"
-		 	"sb\t$0, 0x050(%0)\n\t"
+			"sb\t$0, 0x050(%0)\n\t"
 			"sb\t$0, 0x054(%0)\n\t"
 			"sb\t$0, 0x058(%0)\n\t"
 			"sb\t$0, 0x05c(%0)\n\t"
-		 	"sb\t$0, 0x060(%0)\n\t"
+			"sb\t$0, 0x060(%0)\n\t"
 			"sb\t$0, 0x064(%0)\n\t"
 			"sb\t$0, 0x068(%0)\n\t"
 			"sb\t$0, 0x06c(%0)\n\t"
-		 	"sb\t$0, 0x070(%0)\n\t"
+			"sb\t$0, 0x070(%0)\n\t"
 			"sb\t$0, 0x074(%0)\n\t"
 			"sb\t$0, 0x078(%0)\n\t"
 			"sb\t$0, 0x07c(%0)\n\t"
@@ -220,30 +216,13 @@ static void r3k_flush_dcache_range(unsigned long start, unsigned long end)
 	write_c0_status(flags);
 }
 
-static inline unsigned long get_phys_page (unsigned long addr,
-					   struct mm_struct *mm)
-{
-	pgd_t *pgd;
-	pmd_t *pmd;
-	pte_t *pte;
-	unsigned long physpage;
-
-	pgd = pgd_offset(mm, addr);
-	pmd = pmd_offset(pgd, addr);
-	pte = pte_offset(pmd, addr);
-
-	if ((physpage = pte_val(*pte)) & _PAGE_VALID)
-		return KSEG0ADDR(physpage & PAGE_MASK);
-
-	return 0;
-}
-
 static inline void r3k_flush_cache_all(void)
 {
 }
 
 static inline void r3k___flush_cache_all(void)
 {
+	r3k_flush_dcache_range(KSEG0, KSEG0 + dcache_size);
 	r3k_flush_icache_range(KSEG0, KSEG0 + icache_size);
 }
 
@@ -252,12 +231,43 @@ static void r3k_flush_cache_mm(struct mm_struct *mm)
 }
 
 static void r3k_flush_cache_range(struct vm_area_struct *vma,
-	unsigned long start, unsigned long end)
+				  unsigned long start, unsigned long end)
 {
 }
 
 static void r3k_flush_cache_page(struct vm_area_struct *vma,
-	unsigned long page)
+				 unsigned long addr, unsigned long pfn)
+{
+	unsigned long kaddr = KSEG0ADDR(pfn << PAGE_SHIFT);
+	int exec = vma->vm_flags & VM_EXEC;
+	struct mm_struct *mm = vma->vm_mm;
+	pgd_t *pgdp;
+	pud_t *pudp;
+	pmd_t *pmdp;
+	pte_t *ptep;
+
+	pr_debug("cpage[%08lx,%08lx]\n",
+		 cpu_context(smp_processor_id(), mm), addr);
+
+	/* No ASID => no such page in the cache.  */
+	if (cpu_context(smp_processor_id(), mm) == 0)
+		return;
+
+	pgdp = pgd_offset(mm, addr);
+	pudp = pud_offset(pgdp, addr);
+	pmdp = pmd_offset(pudp, addr);
+	ptep = pte_offset(pmdp, addr);
+
+	/* Invalid => no such page in the cache.  */
+	if (!(pte_val(*ptep) & _PAGE_PRESENT))
+		return;
+
+	r3k_flush_dcache_range(kaddr, kaddr + PAGE_SIZE);
+	if (exec)
+		r3k_flush_icache_range(kaddr, kaddr + PAGE_SIZE);
+}
+
+static void local_r3k_flush_data_cache_page(void *addr)
 {
 }
 
@@ -265,46 +275,24 @@ static void r3k_flush_data_cache_page(unsigned long addr)
 {
 }
 
-static void r3k_flush_icache_page(struct vm_area_struct *vma, struct page *page)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	unsigned long physpage;
-
-	if (cpu_context(smp_processor_id(), mm) == 0)
-		return;
-
-	if (!(vma->vm_flags & VM_EXEC))
-		return;
-
-#ifdef DEBUG_CACHE
-	printk("cpage[%d,%08lx]", cpu_context(smp_processor_id(), mm), page);
-#endif
-
-	physpage = (unsigned long) page_address(page);
-	if (physpage)
-		r3k_flush_icache_range(physpage, physpage + PAGE_SIZE);
-}
-
 static void r3k_flush_cache_sigtramp(unsigned long addr)
 {
 	unsigned long flags;
 
-#ifdef DEBUG_CACHE
-	printk("csigtramp[%08lx]", addr);
-#endif
+	pr_debug("csigtramp[%08lx]\n", addr);
 
 	flags = read_c0_status();
 
 	write_c0_status(flags&~ST0_IEC);
 
 	/* Fill the TLB to avoid an exception with caches isolated. */
-	asm ( 	"lw\t$0, 0x000(%0)\n\t"
+	asm( 	"lw\t$0, 0x000(%0)\n\t"
 		"lw\t$0, 0x004(%0)\n\t"
 		: : "r" (addr) );
 
 	write_c0_status((ST0_ISC|ST0_SWC|flags)&~ST0_IEC);
 
-	asm ( 	"sb\t$0, 0x000(%0)\n\t"
+	asm( 	"sb\t$0, 0x000(%0)\n\t"
 		"sb\t$0, 0x004(%0)\n\t"
 		: : "r" (addr) );
 
@@ -313,14 +301,17 @@ static void r3k_flush_cache_sigtramp(unsigned long addr)
 
 static void r3k_dma_cache_wback_inv(unsigned long start, unsigned long size)
 {
+	/* Catch bad driver code */
+	BUG_ON(size == 0);
+
 	iob();
 	r3k_flush_dcache_range(start, start + size);
 }
 
-void __init ld_mmu_r23000(void)
+void __cpuinit r3k_cache_init(void)
 {
-	_clear_page = r3k_clear_page;
-	_copy_page = r3k_copy_page;
+	extern void build_clear_page(void);
+	extern void build_copy_page(void);
 
 	r3k_probe_cache();
 
@@ -329,16 +320,22 @@ void __init ld_mmu_r23000(void)
 	flush_cache_mm = r3k_flush_cache_mm;
 	flush_cache_range = r3k_flush_cache_range;
 	flush_cache_page = r3k_flush_cache_page;
-	flush_icache_page = r3k_flush_icache_page;
 	flush_icache_range = r3k_flush_icache_range;
+	local_flush_icache_range = r3k_flush_icache_range;
 
 	flush_cache_sigtramp = r3k_flush_cache_sigtramp;
+	local_flush_data_cache_page = local_r3k_flush_data_cache_page;
 	flush_data_cache_page = r3k_flush_data_cache_page;
 
 	_dma_cache_wback_inv = r3k_dma_cache_wback_inv;
+	_dma_cache_wback = r3k_dma_cache_wback_inv;
+	_dma_cache_inv = r3k_dma_cache_wback_inv;
 
 	printk("Primary instruction cache %ldkB, linesize %ld bytes.\n",
 		icache_size >> 10, icache_lsize);
 	printk("Primary data cache %ldkB, linesize %ld bytes.\n",
 		dcache_size >> 10, dcache_lsize);
+
+	build_clear_page();
+	build_copy_page();
 }

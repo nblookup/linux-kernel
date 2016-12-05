@@ -38,21 +38,6 @@ static const char version[] = "de600.c: $Revision: 1.41-2.5 $,  Bjorn Ekwall (bj
 /* Add more time here if your adapter won't work OK: */
 #define DE600_SLOW_DOWN	udelay(delay_time)
 
- /*
- * If you still have trouble reading/writing to the adapter,
- * modify the following "#define": (see <asm/io.h> for more info)
-#define REALLY_SLOW_IO
- */
-#define SLOW_IO_BY_JUMPING /* Looks "better" than dummy write to port 0x80 :-) */
-
-/* use 0 for production, 1 for verification, >2 for debug */
-#ifdef DE600_DEBUG
-#define PRINTK(x) if (de600_debug >= 2) printk x
-#else
-#define DE600_DEBUG 0
-#define PRINTK(x) /**/
-#endif
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -74,16 +59,12 @@ static const char version[] = "de600.c: $Revision: 1.41-2.5 $,  Bjorn Ekwall (bj
 
 #include "de600.h"
 
-static unsigned int de600_debug = DE600_DEBUG;
-MODULE_PARM(de600_debug, "i");
-MODULE_PARM_DESC(de600_debug, "DE-600 debug level (0-2)");
-
 static unsigned int check_lost = 1;
-MODULE_PARM(check_lost, "i");
+module_param(check_lost, bool, 0);
 MODULE_PARM_DESC(check_lost, "If set then check for unplugged de600");
 
 static unsigned int delay_time = 10;
-MODULE_PARM(delay_time, "i");
+module_param(delay_time, int, 0);
 MODULE_PARM_DESC(delay_time, "DE-600 deley on I/O in microseconds");
 
 
@@ -99,7 +80,7 @@ static volatile int		tx_fifo_in;
 static volatile int		tx_fifo_out;
 static volatile int		free_tx_pages = TX_PAGES;
 static int			was_down;
-static spinlock_t		de600_lock;
+static DEFINE_SPINLOCK(de600_lock);
 
 static inline u8 de600_read_status(struct net_device *dev)
 {
@@ -161,11 +142,6 @@ static int de600_close(struct net_device *dev)
 	return 0;
 }
 
-static struct net_device_stats *get_stats(struct net_device *dev)
-{
-	return (struct net_device_stats *)(dev->priv);
-}
-
 static inline void trigger_interrupt(struct net_device *dev)
 {
 	de600_put_command(FLIP_IRQ);
@@ -179,7 +155,7 @@ static inline void trigger_interrupt(struct net_device *dev)
  * Copy a buffer to the adapter transmit page memory.
  * Start sending.
  */
- 
+
 static int de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	unsigned long flags;
@@ -190,22 +166,22 @@ static int de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	int	i;
 
 	if (free_tx_pages <= 0) {	/* Do timeouts, to avoid hangs. */
-		tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
+		tickssofar = jiffies - dev_trans_start(dev);
+		if (tickssofar < HZ/20)
+			return NETDEV_TX_BUSY;
 		/* else */
 		printk(KERN_WARNING "%s: transmit timed out (%d), %s?\n", dev->name, tickssofar, "network cable problem");
 		/* Restart the adapter. */
 		spin_lock_irqsave(&de600_lock, flags);
 		if (adapter_init(dev)) {
 			spin_unlock_irqrestore(&de600_lock, flags);
-			return 1;
+			return NETDEV_TX_BUSY;
 		}
 		spin_unlock_irqrestore(&de600_lock, flags);
 	}
 
 	/* Start real output */
-	PRINTK(("de600_start_xmit:len=%d, page %d/%d\n", skb->len, tx_fifo_in, free_tx_pages));
+	pr_debug("de600_start_xmit:len=%d, page %d/%d\n", skb->len, tx_fifo_in, free_tx_pages);
 
 	if ((len = skb->len) < RUNT)
 		len = RUNT;
@@ -223,7 +199,7 @@ static int de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		if (was_down || (de600_read_byte(READ_DATA, dev) != 0xde)) {
 			if (adapter_init(dev)) {
 				spin_unlock_irqrestore(&de600_lock, flags);
-				return 1;
+				return NETDEV_TX_BUSY;
 			}
 		}
 	}
@@ -250,7 +226,7 @@ static int de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 	spin_unlock_irqrestore(&de600_lock, flags);
 	dev_kfree_skb(skb);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /*
@@ -258,26 +234,20 @@ static int de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * Handle the network interface interrupts.
  */
 
-static irqreturn_t de600_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t de600_interrupt(int irq, void *dev_id)
 {
 	struct net_device	*dev = dev_id;
 	u8		irq_status;
 	int		retrig = 0;
 	int		boguscount = 0;
 
-	/* This might just as well be deleted now, no crummy drivers present :-) */
-	if ((dev == NULL) || (DE600_IRQ != irq)) {
-		printk(KERN_ERR "%s: bogus interrupt %d\n", dev?dev->name:"DE-600", irq);
-		return IRQ_NONE;
-	}
-
 	spin_lock(&de600_lock);
-	
+
 	select_nic();
 	irq_status = de600_read_status(dev);
 
 	do {
-		PRINTK(("de600_interrupt (%02X)\n", irq_status));
+		pr_debug("de600_interrupt (%02X)\n", irq_status);
 
 		if (irq_status & RX_GOOD)
 			de600_rx_intr(dev);
@@ -321,7 +291,7 @@ static int de600_tx_intr(struct net_device *dev, int irq_status)
 	if (!(irq_status & TX_FAILED16)) {
 		tx_fifo_out = (tx_fifo_out + 1) % TX_PAGES;
 		++free_tx_pages;
-		((struct net_device_stats *)(dev->priv))->tx_packets++;
+		dev->stats.tx_packets++;
 		netif_wake_queue(dev);
 	}
 
@@ -372,7 +342,6 @@ static void de600_rx_intr(struct net_device *dev)
 	}
 	/* else */
 
-	skb->dev = dev;
 	skb_reserve(skb,2);	/* Align */
 
 	/* 'skb->data' points to the start of sk_buff data area. */
@@ -388,9 +357,8 @@ static void de600_rx_intr(struct net_device *dev)
 	netif_rx(skb);
 
 	/* update stats */
-	dev->last_rx = jiffies;
-	((struct net_device_stats *)(dev->priv))->rx_packets++; /* count all receives */
-	((struct net_device_stats *)(dev->priv))->rx_bytes += size; /* count all received bytes */
+	dev->stats.rx_packets++; /* count all receives */
+	dev->stats.rx_bytes += size; /* count all received bytes */
 
 	/*
 	 * If any worth-while packets have been received, netif_rx()
@@ -398,20 +366,39 @@ static void de600_rx_intr(struct net_device *dev)
 	 */
 }
 
-int __init de600_probe(struct net_device *dev)
+static const struct net_device_ops de600_netdev_ops = {
+	.ndo_open		= de600_open,
+	.ndo_stop		= de600_close,
+	.ndo_start_xmit		= de600_start_xmit,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
+
+static struct net_device * __init de600_probe(void)
 {
 	int	i;
-	static struct net_device_stats de600_netstats;
-	/*dev->priv = kmalloc(sizeof(struct net_device_stats), GFP_KERNEL);*/
+	struct net_device *dev;
+	int err;
 
-	SET_MODULE_OWNER(dev);
+	dev = alloc_etherdev(0);
+	if (!dev)
+		return ERR_PTR(-ENOMEM);
+
+
+	if (!request_region(DE600_IO, 3, "de600")) {
+		printk(KERN_WARNING "DE600: port 0x%x busy\n", DE600_IO);
+		err = -EBUSY;
+		goto out;
+	}
 
 	printk(KERN_INFO "%s: D-Link DE-600 pocket adapter", dev->name);
 	/* Alpha testers must have the version number to report bugs. */
-	if (de600_debug > 1)
-		printk(version);
+	pr_debug("%s", version);
 
 	/* probe for adapter */
+	err = -ENODEV;
 	rx_page = 0;
 	select_nic();
 	(void)de600_read_status(dev);
@@ -419,7 +406,7 @@ int __init de600_probe(struct net_device *dev)
 	de600_put_command(STOP_RESET);
 	if (de600_read_status(dev) & 0xf0) {
 		printk(": not at I/O %#3x.\n", DATA_PORT);
-		return -ENODEV;
+		goto out1;
 	}
 
 	/*
@@ -444,35 +431,28 @@ int __init de600_probe(struct net_device *dev)
 		dev->dev_addr[3] |= 0x70;
 	} else {
 		printk(" not identified in the printer port\n");
-		return -ENODEV;
+		goto out1;
 	}
 
-	if (!request_region(DE600_IO, 3, "de600")) {
-		printk(KERN_WARNING "DE600: port 0x%x busy\n", DE600_IO);
-		return -EBUSY;
-	}
+	printk(", Ethernet Address: %pM\n", dev->dev_addr);
 
-	printk(", Ethernet Address: %02X", dev->dev_addr[0]);
-	for (i = 1; i < ETH_ALEN; i++)
-		printk(":%02X",dev->dev_addr[i]);
-	printk("\n");
-
-	/* Initialize the device structure. */
-	dev->priv = &de600_netstats;
-
-	memset(dev->priv, 0, sizeof(struct net_device_stats));
-	dev->get_stats = get_stats;
-
-	dev->open = de600_open;
-	dev->stop = de600_close;
-	dev->hard_start_xmit = &de600_start_xmit;
-
-	ether_setup(dev);
+	dev->netdev_ops = &de600_netdev_ops;
 
 	dev->flags&=~IFF_MULTICAST;
 
 	select_prn();
-	return 0;
+
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+
+	return dev;
+
+out1:
+	release_region(DE600_IO, 3);
+out:
+	free_netdev(dev);
+	return ERR_PTR(err);
 }
 
 static int adapter_init(struct net_device *dev)
@@ -527,21 +507,21 @@ static int adapter_init(struct net_device *dev)
 	return 0; /* OK */
 }
 
-static struct net_device de600_dev;
+static struct net_device *de600_dev;
 
 static int __init de600_init(void)
 {
-	spin_lock_init(&de600_lock);
-	de600_dev.init = de600_probe;
-	if (register_netdev(&de600_dev) != 0)
-		return -EIO;
+	de600_dev = de600_probe();
+	if (IS_ERR(de600_dev))
+		return PTR_ERR(de600_dev);
 	return 0;
 }
 
 static void __exit de600_exit(void)
 {
-	unregister_netdev(&de600_dev);
+	unregister_netdev(de600_dev);
 	release_region(DE600_IO, 3);
+	free_netdev(de600_dev);
 }
 
 module_init(de600_init);

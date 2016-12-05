@@ -14,6 +14,7 @@
 
 #include "i810_regs.h"
 #include "i810.h"
+#include "i810_main.h"
 
 /*
  * FIFO and Watermark tables - based almost wholly on i810_wmark.c in 
@@ -26,7 +27,7 @@ struct wm_info {
    u32  wm;
 };
 
-struct wm_info i810_wm_8_100[] = {
+static struct wm_info i810_wm_8_100[] = {
 	{ 15, 0x0070c000 },  { 19, 0x0070c000 },  { 25, 0x22003000 },
 	{ 28, 0x22003000 },  { 31, 0x22003000 },  { 36, 0x22007000 },
 	{ 40, 0x22007000 },  { 45, 0x22007000 },  { 49, 0x22008000 },
@@ -40,7 +41,7 @@ struct wm_info i810_wm_8_100[] = {
 	{ 218, 0x2220f000 }, { 229, 0x22210000 }, { 234, 0x22210000 }, 
 };
 
-struct wm_info i810_wm_16_100[] = {
+static struct wm_info i810_wm_16_100[] = {
 	{ 15, 0x0070c000 },  { 19, 0x0020c000 },  { 25, 0x22006000 },
 	{ 28, 0x22006000 },  { 31, 0x22007000 },  { 36, 0x22007000 },
 	{ 40, 0x22007000 },  { 45, 0x22007000 },  { 49, 0x22009000 },
@@ -54,7 +55,7 @@ struct wm_info i810_wm_16_100[] = {
 	{ 218, 0x22416000 }, { 229, 0x22416000 },
 };
 
-struct wm_info i810_wm_24_100[] = {
+static struct wm_info i810_wm_24_100[] = {
 	{ 15, 0x0020c000 },  { 19, 0x0040c000 },  { 25, 0x22009000 },
 	{ 28, 0x22009000 },  { 31, 0x2200a000 },  { 36, 0x2210c000 },
 	{ 40, 0x2210c000 },  { 45, 0x2210c000 },  { 49, 0x22111000 },
@@ -67,7 +68,7 @@ struct wm_info i810_wm_24_100[] = {
 	{ 195, 0x44419000 }, { 202, 0x44419000 }, { 204, 0x44419000 },
 };
 
-struct wm_info i810_wm_8_133[] = {
+static struct wm_info i810_wm_8_133[] = {
 	{ 15, 0x0070c000 },  { 19, 0x0070c000 },  { 25, 0x22003000 },
 	{ 28, 0x22003000 },  { 31, 0x22003000 },  { 36, 0x22007000 },
 	{ 40, 0x22007000 },  { 45, 0x22007000 },  { 49, 0x22008000 },
@@ -81,7 +82,7 @@ struct wm_info i810_wm_8_133[] = {
 	{ 218, 0x2220f000 }, { 229, 0x22210000 }, { 234, 0x22210000 }, 
 };
 
-struct wm_info i810_wm_16_133[] = {
+static struct wm_info i810_wm_16_133[] = {
 	{ 15, 0x0020c000 },  { 19, 0x0020c000 },  { 25, 0x22006000 },
 	{ 28, 0x22006000 },  { 31, 0x22007000 },  { 36, 0x22007000 },
 	{ 40, 0x22007000 },  { 45, 0x22007000 },  { 49, 0x22009000 },
@@ -95,7 +96,7 @@ struct wm_info i810_wm_16_133[] = {
 	{ 218, 0x22416000 }, { 229, 0x22416000 },
 };
 
-struct wm_info i810_wm_24_133[] = {
+static struct wm_info i810_wm_24_133[] = {
 	{ 15, 0x0020c000 },  { 19, 0x00408000 },  { 25, 0x22009000 },
 	{ 28, 0x22009000 },  { 31, 0x2200a000 },  { 36, 0x2210c000 },
 	{ 40, 0x2210c000 },  { 45, 0x2210c000 },  { 49, 0x22111000 },
@@ -124,7 +125,8 @@ void i810fb_encode_registers(const struct fb_var_screeninfo *var,
 			     struct i810fb_par *par, u32 xres, u32 yres)
 {
 	int n, blank_s, blank_e;
-	u8 *mmio = par->mmio_start_virtual, msr = 0;
+	u8 __iomem *mmio = par->mmio_start_virtual;
+	u8 msr = 0;
 
 	/* Horizontal */
 	/* htotal */
@@ -222,7 +224,7 @@ void i810fb_fill_var_timings(struct fb_var_screeninfo *var) { }
 u32 i810_get_watermark(const struct fb_var_screeninfo *var,
 		       struct i810fb_par *par)
 {
-	struct wm_info *wmark = 0;
+	struct wm_info *wmark = NULL;
 	u32 i, size = 0, pixclock, wm_best = 0, min, diff;
 
 	if (par->mem_freq == 100) {

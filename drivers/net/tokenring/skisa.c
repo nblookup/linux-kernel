@@ -13,7 +13,7 @@
  *	- SysKonnect TR4/16(+) ISA	(SK-4190)
  *
  *  Maintainer(s):
- *    AF        Adam Fritzler           mid@auk.cx
+ *    AF        Adam Fritzler
  *    JF	Jochen Friedrich	jochen@scram.de
  *
  *  Modification History:
@@ -36,6 +36,7 @@ static const char version[] = "skisa.c: v1.03 09/12/2002 by Jochen Friedrich\n";
 #include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/trdevice.h>
+#include <linux/platform_device.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -56,7 +57,7 @@ static unsigned int portlist[] __initdata = {
 /* A zero-terminated list of IRQs to be probed. 
  * Used again after initial probe for sktr_chipset_init, called from sktr_open.
  */
-static unsigned short irqlist[] = {
+static const unsigned short irqlist[] = {
 	3, 5, 9, 10, 11, 12, 15,
 	0
 };
@@ -68,10 +69,8 @@ static int dmalist[] __initdata = {
 };
 
 static char isa_cardname[] = "SK NET TR 4/16 ISA\0";
-
-int sk_isa_probe(struct net_device *dev);
+static u64 dma_mask = ISA_MAX_ADDRESS;
 static int sk_isa_open(struct net_device *dev);
-static int sk_isa_close(struct net_device *dev);
 static void sk_isa_read_eeprom(struct net_device *dev);
 static unsigned short sk_isa_setnselout_pins(struct net_device *dev);
 
@@ -95,16 +94,13 @@ static void sk_isa_sifwritew(struct net_device *dev, unsigned short val, unsigne
 	outw(val, dev->base_addr + reg);
 }
 
-struct sk_isa_card {
-	struct net_device *dev;
-	struct sk_isa_card *next;
-};
 
-static struct sk_isa_card *sk_isa_card_list;
-
-static int __init sk_isa_probe1(int ioaddr)
+static int __init sk_isa_probe1(struct net_device *dev, int ioaddr)
 {
 	unsigned char old, chk1, chk2;
+
+	if (!request_region(ioaddr, SK_ISA_IO_EXTENT, isa_cardname))
+		return -ENODEV;
 
 	old = inb(ioaddr + SIFADR);	/* Get the old SIFADR value */
 
@@ -122,8 +118,10 @@ static int __init sk_isa_probe1(int ioaddr)
 		chk2 = inb(ioaddr + SIFADD);
 		chk2 ^= 0x0FE;
 
-		if(chk1 != chk2)
-			return (-1);	/* No adapter */
+		if(chk1 != chk2) {
+			release_region(ioaddr, SK_ISA_IO_EXTENT);
+			return -ENODEV;
+		}
 
 		chk1 -= 2;
 	} while(chk1 != 0);	/* Repeat 128 times (all byte values) */
@@ -131,72 +129,52 @@ static int __init sk_isa_probe1(int ioaddr)
     	/* Restore the SIFADR value */
 	outb(old, ioaddr + SIFADR);
 
-	return (0);
+	dev->base_addr = ioaddr;
+	return 0;
 }
 
-int __init sk_isa_probe(struct net_device *dev)
+static struct net_device_ops sk_isa_netdev_ops __read_mostly;
+
+static int __init setup_card(struct net_device *dev, struct device *pdev)
 {
-        static int versionprinted;
 	struct net_local *tp;
-	int i,j;
-	struct sk_isa_card *card;
+        static int versionprinted;
+	const unsigned *port;
+	int j, err = 0;
 
-#ifndef MODULE
-	netdev_boot_setup_check(dev);
-	tr_setup(dev);
-#endif
+	if (!dev)
+		return -ENOMEM;
 
-	SET_MODULE_OWNER(dev);
-	if (!dev->base_addr)
-	{
-		for(i = 0; portlist[i]; i++)
-		{
-			if (!request_region(portlist[i], SK_ISA_IO_EXTENT, isa_cardname))
-				continue;
-
-			if(sk_isa_probe1(portlist[i]))
-			{
-				release_region(dev->base_addr, SK_ISA_IO_EXTENT); 
-				continue;
-			}
-
-			dev->base_addr = portlist[i];
-			break;
+	if (dev->base_addr)	/* probe specific location */
+		err = sk_isa_probe1(dev, dev->base_addr);
+	else {
+		for (port = portlist; *port; port++) {
+			err = sk_isa_probe1(dev, *port);
+			if (!err)
+				break;
 		}
-		if(!dev->base_addr)
-			return -1;
 	}
-	else
-	{
-		if (!request_region(dev->base_addr, SK_ISA_IO_EXTENT, isa_cardname))
-			return -1;
-
-		if(sk_isa_probe1(dev->base_addr))
-		{
-			release_region(dev->base_addr, SK_ISA_IO_EXTENT); 
-			return -1;
-  		}
-	} 
+	if (err)
+		goto out5;
 
 	/* At this point we have found a valid card. */
 
 	if (versionprinted++ == 0)
 		printk(KERN_DEBUG "%s", version);
 
-	if (tmsdev_init(dev, ISA_MAX_ADDRESS, NULL))
+	err = -EIO;
+	pdev->dma_mask = &dma_mask;
+	if (tmsdev_init(dev, pdev))
 		goto out4;
 
 	dev->base_addr &= ~3; 
 		
 	sk_isa_read_eeprom(dev);
 
-	printk(KERN_DEBUG "%s:    Ring Station Address: ", dev->name);
-	printk("%2.2x", dev->dev_addr[0]);
-	for (j = 1; j < 6; j++)
-		printk(":%2.2x", dev->dev_addr[j]);
-	printk("\n");
+	printk(KERN_DEBUG "skisa.c:    Ring Station Address: %pM\n",
+	       dev->dev_addr);
 		
-	tp = (struct net_local *)dev->priv;
+	tp = netdev_priv(dev);
 	tp->setnselout = sk_isa_setnselout_pins;
 		
 	tp->sifreadb = sk_isa_sifreadb;
@@ -208,8 +186,7 @@ int __init sk_isa_probe(struct net_device *dev)
 
 	tp->tmspriv = NULL;
 
-	dev->open = sk_isa_open;
-	dev->stop = sk_isa_close;
+	dev->netdev_ops = &sk_isa_netdev_ops;
 
 	if (dev->irq == 0)
 	{
@@ -223,7 +200,7 @@ int __init sk_isa_probe(struct net_device *dev)
 		
                 if(irqlist[j] == 0)
                 {
-                        printk(KERN_INFO "%s: AutoSelect no IRQ available\n", dev->name);
+                        printk(KERN_INFO "skisa.c: AutoSelect no IRQ available\n");
 			goto out3;
 		}
 	}
@@ -234,15 +211,15 @@ int __init sk_isa_probe(struct net_device *dev)
 				break;
 		if (irqlist[j] == 0)
 		{
-			printk(KERN_INFO "%s: Illegal IRQ %d specified\n",
-				dev->name, dev->irq);
+			printk(KERN_INFO "skisa.c: Illegal IRQ %d specified\n",
+				dev->irq);
 			goto out3;
 		}
 		if (request_irq(dev->irq, tms380tr_interrupt, 0, 
 			isa_cardname, dev))
 		{
-                        printk(KERN_INFO "%s: Selected IRQ %d not available\n", 
-				dev->name, dev->irq);
+                        printk(KERN_INFO "skisa.c: Selected IRQ %d not available\n",
+				dev->irq);
 			goto out3;
 		}
 	}
@@ -258,7 +235,7 @@ int __init sk_isa_probe(struct net_device *dev)
 
 		if(dmalist[j] == 0)
 		{
-			printk(KERN_INFO "%s: AutoSelect no DMA available\n", dev->name);
+			printk(KERN_INFO "skisa.c: AutoSelect no DMA available\n");
 			goto out2;
 		}
 	}
@@ -269,28 +246,25 @@ int __init sk_isa_probe(struct net_device *dev)
 				break;
 		if (dmalist[j] == 0)
 		{
-                        printk(KERN_INFO "%s: Illegal DMA %d specified\n", 
-				dev->name, dev->dma);
+                        printk(KERN_INFO "skisa.c: Illegal DMA %d specified\n",
+				dev->dma);
 			goto out2;
 		}
 		if (request_dma(dev->dma, isa_cardname))
 		{
-                        printk(KERN_INFO "%s: Selected DMA %d not available\n", 
-				dev->name, dev->dma);
+                        printk(KERN_INFO "skisa.c: Selected DMA %d not available\n",
+				dev->dma);
 			goto out2;
 		}
 	}
 
+	err = register_netdev(dev);
+	if (err)
+		goto out;
+
 	printk(KERN_DEBUG "%s:    IO: %#4lx  IRQ: %d  DMA: %d\n",
 	       dev->name, dev->base_addr, dev->irq, dev->dma);
-		
-	/* Enlist in the card list */
-	card = kmalloc(sizeof(struct sk_isa_card), GFP_KERNEL);
-	if (!card)
-		goto out;
-	card->next = sk_isa_card_list;
-	sk_isa_card_list = card;
-	card->dev = dev;
+
 	return 0;
 out:
 	free_dma(dev->dma);
@@ -299,8 +273,9 @@ out2:
 out3:
 	tmsdev_term(dev);
 out4:
-	release_region(dev->base_addr, SK_ISA_IO_EXTENT); 
-	return -1;
+	release_region(dev->base_addr, SK_ISA_IO_EXTENT);
+out5:
+	return err;
 }
 
 /*
@@ -326,14 +301,14 @@ static void sk_isa_read_eeprom(struct net_device *dev)
 		dev->dev_addr[i] = sk_isa_sifreadw(dev, SIFINC) >> 8;
 }
 
-unsigned short sk_isa_setnselout_pins(struct net_device *dev)
+static unsigned short sk_isa_setnselout_pins(struct net_device *dev)
 {
 	return 0;
 }
 
 static int sk_isa_open(struct net_device *dev)
 {  
-	struct net_local *tp = (struct net_local *)dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	unsigned short val = 0;
 	unsigned short oldval;
 	int i;
@@ -359,17 +334,8 @@ static int sk_isa_open(struct net_device *dev)
 	val &= oldval;
 	sk_isa_sifwriteb(dev, val, POSREG);
 
-	tms380tr_open(dev);
-	return 0;
+	return tms380tr_open(dev);
 }
-
-static int sk_isa_close(struct net_device *dev)
-{
-	tms380tr_close(dev);
-	return 0;
-}
-
-#ifdef MODULE
 
 #define ISATR_MAX_ADAPTERS 3
 
@@ -379,92 +345,89 @@ static int dma[ISATR_MAX_ADAPTERS];
 
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(io, "1-" __MODULE_STRING(ISATR_MAX_ADAPTERS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(ISATR_MAX_ADAPTERS) "i");
-MODULE_PARM(dma, "1-" __MODULE_STRING(ISATR_MAX_ADAPTERS) "i");
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(dma, int, NULL, 0);
 
-static int __init setup_card(unsigned long io, unsigned irq, unsigned char dma)
+static struct platform_device *sk_isa_dev[ISATR_MAX_ADAPTERS];
+
+static struct platform_driver sk_isa_driver = {
+	.driver		= {
+		.name	= "skisa",
+	},
+};
+
+static int __init sk_isa_init(void)
 {
-	int res = -ENOMEM;
-	struct sk_isa_card *this_card;
-	struct net_device *dev = alloc_trdev(0);
+	struct net_device *dev;
+	struct platform_device *pdev;
+	int i, num = 0, err = 0;
 
-	if (dev) {
-		dev->base_addr = io;
-		dev->irq       = irq;
-		dev->dma       = dma;
-		res = -ENODEV;
-		if (sk_isa_probe(dev) == 0) {
-			res = register_netdev(dev);
-			if (!res)
-				return 0;
-			release_region(dev->base_addr, SK_ISA_IO_EXTENT);
-			free_irq(dev->irq, dev);
-			free_dma(dev->dma);
-			tmsdev_term(dev);
-			this_card = sk_isa_card_list;
-			sk_isa_card_list = this_card->next;
-			kfree(this_card);
+	sk_isa_netdev_ops = tms380tr_netdev_ops;
+	sk_isa_netdev_ops.ndo_open = sk_isa_open;
+	sk_isa_netdev_ops.ndo_stop = tms380tr_close;
+
+	err = platform_driver_register(&sk_isa_driver);
+	if (err)
+		return err;
+
+	for (i = 0; i < ISATR_MAX_ADAPTERS ; i++) {
+		dev = alloc_trdev(sizeof(struct net_local));
+		if (!dev)
+			continue;
+
+		dev->base_addr = io[i];
+		dev->irq = irq[i];
+		dev->dma = dma[i];
+		pdev = platform_device_register_simple("skisa",
+			i, NULL, 0);
+		if (IS_ERR(pdev)) {
+			free_netdev(dev);
+			continue;
 		}
-		kfree(dev);
-	}
-	return res;
-}
-
-int init_module(void)
-{
-	int i, num;
-
-	num = 0;
-	if (io[0]) { /* Only probe addresses from command line */
-		for (i = 0; i < ISATR_MAX_ADAPTERS ; i++) {
-			if (io[i] && setup_card(io[i], irq[i], dma[i]) == 0)
-				num++;
-		}
-	} else {
-		for(i = 0; num < ISATR_MAX_ADAPTERS && portlist[i]; i++) {
-			if (setup_card(portlist[i], irq[num], dma[num]) == 0)
-				num++;
+		err = setup_card(dev, &pdev->dev);
+		if (!err) {
+			sk_isa_dev[i] = pdev;
+			platform_set_drvdata(sk_isa_dev[i], dev);
+			++num;
+		} else {
+			platform_device_unregister(pdev);
+			free_netdev(dev);
 		}
 	}
+
 	printk(KERN_NOTICE "skisa.c: %d cards found.\n", num);
 	/* Probe for cards. */
 	if (num == 0) {
 		printk(KERN_NOTICE "skisa.c: No cards found.\n");
-		return (-ENODEV);
+		platform_driver_unregister(&sk_isa_driver);
+		return -ENODEV;
 	}
-	return (0);
+	return 0;
 }
 
-void cleanup_module(void)
+static void __exit sk_isa_cleanup(void)
 {
 	struct net_device *dev;
-	struct sk_isa_card *this_card;
+	int i;
 
-	while (sk_isa_card_list) {
-		dev = sk_isa_card_list->dev;
-		
+	for (i = 0; i < ISATR_MAX_ADAPTERS ; i++) {
+		struct platform_device *pdev = sk_isa_dev[i];
+
+		if (!pdev)
+			continue;
+		dev = platform_get_drvdata(pdev);
 		unregister_netdev(dev);
 		release_region(dev->base_addr, SK_ISA_IO_EXTENT);
 		free_irq(dev->irq, dev);
 		free_dma(dev->dma);
 		tmsdev_term(dev);
 		free_netdev(dev);
-		this_card = sk_isa_card_list;
-		sk_isa_card_list = this_card->next;
-		kfree(this_card);
+		platform_set_drvdata(pdev, NULL);
+		platform_device_unregister(pdev);
 	}
+	platform_driver_unregister(&sk_isa_driver);
 }
-#endif /* MODULE */
 
-
-/*
- * Local variables:
- *  compile-command: "gcc -DMODVERSIONS  -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer -I/usr/src/linux/drivers/net/tokenring/ -c skisa.c"
- *  alt-compile-command: "gcc -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer -I/usr/src/linux/drivers/net/tokenring/ -c skisa.c"
- *  c-set-style "K&R"
- *  c-indent-level: 8
- *  c-basic-offset: 8
- *  tab-width: 8
- * End:
- */
+module_init(sk_isa_init);
+module_exit(sk_isa_cleanup);

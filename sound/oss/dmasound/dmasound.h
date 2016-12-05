@@ -1,6 +1,6 @@
 #ifndef _dmasound_h_
 /*
- *  linux/drivers/sound/dmasound/dmasound.h
+ *  linux/sound/oss/dmasound/dmasound.h
  *
  *
  *  Minor numbers for the sound driver.
@@ -13,7 +13,6 @@
 #define _dmasound_h_
 
 #include <linux/types.h>
-#include <linux/config.h>
 
 #define SND_NDEVS	256	/* Number of supported devices */
 #define SND_DEV_CTL	0	/* Control port /dev/mixer */
@@ -44,12 +43,12 @@
 #define le2be16dbl(x)	(((x)<<8 & 0xff00ff00) | ((x)>>8 & 0x00ff00ff))
 
 #define IOCTL_IN(arg, ret) \
-	do { int error = get_user(ret, (int *)(arg)); \
+	do { int error = get_user(ret, (int __user *)(arg)); \
 		if (error) return error; \
 	} while (0)
-#define IOCTL_OUT(arg, ret)	ioctl_return((int *)(arg), ret)
+#define IOCTL_OUT(arg, ret)	ioctl_return((int __user *)(arg), ret)
 
-static inline int ioctl_return(int *addr, int value)
+static inline int ioctl_return(int __user *addr, int value)
 {
 	return value < 0 ? value : put_user(value, addr);
 }
@@ -60,7 +59,6 @@ static inline int ioctl_return(int *addr, int value)
      */
 
 #undef HAS_8BIT_TABLES
-#undef HAS_RECORD
 
 #if defined(CONFIG_DMASOUND_ATARI) || defined(CONFIG_DMASOUND_ATARI_MODULE) ||\
     defined(CONFIG_DMASOUND_PAULA) || defined(CONFIG_DMASOUND_PAULA_MODULE) ||\
@@ -83,10 +81,6 @@ static inline int ioctl_return(int *addr, int value)
 
 #define DEFAULT_N_BUFFERS 4
 #define DEFAULT_BUFF_SIZE (1<<15)
-
-#if defined(CONFIG_DMASOUND_PMAC) || defined(CONFIG_DMASOUND_PMAC_MODULE)
-#define HAS_RECORD
-#endif
 
     /*
      *  Initialization
@@ -116,7 +110,7 @@ typedef struct {
     const char *name;
     const char *name2;
     struct module *owner;
-    void *(*dma_alloc)(unsigned int, int);
+    void *(*dma_alloc)(unsigned int, gfp_t);
     void (*dma_free)(void *, unsigned int);
     int (*irqinit)(void);
 #ifdef MODULE
@@ -135,7 +129,7 @@ typedef struct {
     int (*mixer_ioctl)(u_int, u_long);	/* optional */
     int (*write_sq_setup)(void);	/* optional */
     int (*read_sq_setup)(void);		/* optional */
-    int (*sq_open)(mode_t);		/* optional */
+    int (*sq_open)(fmode_t);		/* optional */
     int (*state_info)(char *, size_t);	/* optional */
     void (*abort_read)(void);		/* optional */
     int min_dsp_speed;
@@ -153,14 +147,14 @@ typedef struct {
      */
 
 typedef struct {
-    ssize_t (*ct_ulaw)(const u_char *, size_t, u_char *, ssize_t *, ssize_t);
-    ssize_t (*ct_alaw)(const u_char *, size_t, u_char *, ssize_t *, ssize_t);
-    ssize_t (*ct_s8)(const u_char *, size_t, u_char *, ssize_t *, ssize_t);
-    ssize_t (*ct_u8)(const u_char *, size_t, u_char *, ssize_t *, ssize_t);
-    ssize_t (*ct_s16be)(const u_char *, size_t, u_char *, ssize_t *, ssize_t);
-    ssize_t (*ct_u16be)(const u_char *, size_t, u_char *, ssize_t *, ssize_t);
-    ssize_t (*ct_s16le)(const u_char *, size_t, u_char *, ssize_t *, ssize_t);
-    ssize_t (*ct_u16le)(const u_char *, size_t, u_char *, ssize_t *, ssize_t);
+    ssize_t (*ct_ulaw)(const u_char __user *, size_t, u_char *, ssize_t *, ssize_t);
+    ssize_t (*ct_alaw)(const u_char __user *, size_t, u_char *, ssize_t *, ssize_t);
+    ssize_t (*ct_s8)(const u_char __user *, size_t, u_char *, ssize_t *, ssize_t);
+    ssize_t (*ct_u8)(const u_char __user *, size_t, u_char *, ssize_t *, ssize_t);
+    ssize_t (*ct_s16be)(const u_char __user *, size_t, u_char *, ssize_t *, ssize_t);
+    ssize_t (*ct_u16be)(const u_char __user *, size_t, u_char *, ssize_t *, ssize_t);
+    ssize_t (*ct_s16le)(const u_char __user *, size_t, u_char *, ssize_t *, ssize_t);
+    ssize_t (*ct_u16le)(const u_char __user *, size_t, u_char *, ssize_t *, ssize_t);
 } TRANS;
 
 struct sound_settings {
@@ -169,9 +163,6 @@ struct sound_settings {
     SETTINGS soft;	/* software settings */
     SETTINGS dsp;	/* /dev/dsp default settings */
     TRANS *trans_write;	/* supported translations */
-#ifdef HAS_RECORD
-    TRANS *trans_read;	/* supported translations */
-#endif
     int volume_left;	/* volume (range is machine dependent) */
     int volume_right;
     int bass;		/* tone (range is machine dependent) */
@@ -244,7 +235,7 @@ struct sound_queue {
      */
     int active;
     wait_queue_head_t action_queue, open_queue, sync_queue;
-    int open_mode;
+    int non_blocking;
     int busy, syncing, xruns, died;
 };
 
@@ -254,11 +245,6 @@ struct sound_queue {
 extern struct sound_queue dmasound_write_sq;
 #define write_sq	dmasound_write_sq
 
-#ifdef HAS_RECORD
-extern struct sound_queue dmasound_read_sq;
-#define read_sq		dmasound_read_sq
-#endif
-
 extern int dmasound_catchRadius;
 #define catchRadius	dmasound_catchRadius
 
@@ -267,10 +253,10 @@ extern int dmasound_catchRadius;
 */
 #define BS_VAL 1
 
-static inline void wait_ms(unsigned int ms)
-{
-	current->state = TASK_UNINTERRUPTIBLE;
-	schedule_timeout(1 + ms * HZ / 1000);
-}
+#define SW_INPUT_VOLUME_SCALE	4
+#define SW_INPUT_VOLUME_DEFAULT	(128 / SW_INPUT_VOLUME_SCALE)
+
+extern int expand_read_bal;	/* Balance factor for reading */
+extern uint software_input_volume; /* software implemented recording volume! */
 
 #endif /* _dmasound_h_ */

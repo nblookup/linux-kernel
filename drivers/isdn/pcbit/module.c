@@ -11,7 +11,6 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
@@ -22,17 +21,15 @@
 MODULE_DESCRIPTION("ISDN4Linux: Driver for PCBIT-T card");
 MODULE_AUTHOR("Pedro Roque Marques");
 MODULE_LICENSE("GPL");
-MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_PCBIT_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_PCBIT_CARDS) "i");
 
-static int mem[MAX_PCBIT_CARDS] = {0, };
-static int irq[MAX_PCBIT_CARDS] = {0, };
+static int mem[MAX_PCBIT_CARDS];
+static int irq[MAX_PCBIT_CARDS];
+
+module_param_array(mem, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
 
 static int num_boards;
-struct pcbit_dev * dev_pcbit[MAX_PCBIT_CARDS] = {0, };
-
-extern void pcbit_terminate(int board);
-extern int pcbit_init_dev(int board, int mem_base, int irq);
+struct pcbit_dev * dev_pcbit[MAX_PCBIT_CARDS];
 
 static int __init pcbit_init(void)
 {

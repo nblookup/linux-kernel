@@ -1,29 +1,32 @@
 /*******************************************************************************
 
-  
-  Copyright(c) 1999 - 2003 Intel Corporation. All rights reserved.
-  
-  This program is free software; you can redistribute it and/or modify it 
-  under the terms of the GNU General Public License as published by the Free 
-  Software Foundation; either version 2 of the License, or (at your option) 
-  any later version.
-  
-  This program is distributed in the hope that it will be useful, but WITHOUT 
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or 
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for 
+  Intel PRO/10GbE Linux driver
+  Copyright(c) 1999 - 2008 Intel Corporation.
+
+  This program is free software; you can redistribute it and/or modify it
+  under the terms and conditions of the GNU General Public License,
+  version 2, as published by the Free Software Foundation.
+
+  This program is distributed in the hope it will be useful, but WITHOUT
+  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
   more details.
-  
+
   You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc., 59 
-  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-  
-  The full GNU General Public License is included in this distribution in the
-  file called LICENSE.
-  
+  this program; if not, write to the Free Software Foundation, Inc.,
+  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+
+  The full GNU General Public License is included in this distribution in
+  the file called "COPYING".
+
   Contact Information:
   Linux NICS <linux.nics@intel.com>
+  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
   Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
+
 *******************************************************************************/
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include "ixgb.h"
 
@@ -31,33 +34,24 @@
  * maximum number of ports that the driver can manage.
  */
 
-#define IXGB_MAX_NIC			 8
+#define IXGB_MAX_NIC 8
 
-#define OPTION_UNSET			-1
-#define OPTION_DISABLED			 0
-#define OPTION_ENABLED			 1
-
-/* Module Parameters are always initialized to -1, so that the driver
- * can tell the difference between no user specified value or the
- * user asking for the default value.
- * The true default values are loaded in when ixgb_check_options is called.
- *
- * This is a GCC extension to ANSI C.
- * See the item "Labeled Elements in Initializers" in the section
- * "Extensions to the C Language Family" of the GCC documentation.
- */
-
-#define IXGB_PARAM_INIT { [0 ... IXGB_MAX_NIC] = OPTION_UNSET }
+#define OPTION_UNSET	-1
+#define OPTION_DISABLED 0
+#define OPTION_ENABLED  1
 
 /* All parameters are treated the same, as an integer array of values.
  * This macro just reduces the need to repeat the same declaration code
  * over and over (plus this helps to avoid typo bugs).
  */
 
-#define IXGB_PARAM(X, S) \
-static const int __devinitdata X[IXGB_MAX_NIC + 1] = IXGB_PARAM_INIT; \
-MODULE_PARM(X, "1-" __MODULE_STRING(IXGB_MAX_NIC) "i"); \
-MODULE_PARM_DESC(X, S);
+#define IXGB_PARAM_INIT { [0 ... IXGB_MAX_NIC] = OPTION_UNSET }
+#define IXGB_PARAM(X, desc)					\
+	static int __devinitdata X[IXGB_MAX_NIC+1]		\
+		= IXGB_PARAM_INIT;				\
+	static unsigned int num_##X = 0;			\
+	module_param_array_named(X, X, int, &num_##X, 0);	\
+	MODULE_PARM_DESC(X, desc);
 
 /* Transmit Descriptor Count
  *
@@ -85,7 +79,7 @@ IXGB_PARAM(RxDescriptors, "Number of receive descriptors");
  *  - 2 - Tx only, generate PAUSE frames but ignore them on receive
  *  - 3 - Full Flow Control Support
  *
- * Default Value: Read flow control settings from the EEPROM
+ * Default Value: 2 - Tx only (silicon bug avoidance)
  */
 
 IXGB_PARAM(FlowControl, "Flow Control setting");
@@ -102,17 +96,14 @@ IXGB_PARAM(FlowControl, "Flow Control setting");
 
 IXGB_PARAM(XsumRX, "Disable or enable Receive Checksum offload");
 
-/* XsumTX - Transmit Checksum Offload Enable/Disable
+/* Transmit Interrupt Delay in units of 0.8192 microseconds
  *
- * Valid Range: 0, 1
- *  - 0 - disables all checksum offload
- *  - 1 - enables transmmit IP/TCP/UDP checksum offload
- *        on 82597 based NICs
+ * Valid Range: 0-65535
  *
- * Default Value: 1
+ * Default Value: 32
  */
 
-IXGB_PARAM(XsumTX, "Disable or enable Transmit Checksum offload");
+IXGB_PARAM(TxIntDelay, "Transmit Interrupt Delay");
 
 /* Receive Interrupt Delay in units of 0.8192 microseconds
  *
@@ -122,15 +113,6 @@ IXGB_PARAM(XsumTX, "Disable or enable Transmit Checksum offload");
  */
 
 IXGB_PARAM(RxIntDelay, "Receive Interrupt Delay");
-
-/* Receive Interrupt Moderation enable (uses RxIntDelay too)
- *
- * Valid Range: 0,1
- *
- * Default Value: 1
- */
-
-IXGB_PARAM(RAIDC, "Disable or enable Receive Interrupt Moderation");
 
 /* Receive Flow control high threshold (when we send a pause frame)
  * (FCRTH)
@@ -156,21 +138,12 @@ IXGB_PARAM(RxFCLowThresh, "Receive Flow Control Low Threshold");
 /* Flow control request timeout (how long to pause the link partner's tx)
  * (PAP 15:0)
  *
- * Valid Range: 1 - 65535 
+ * Valid Range: 1 - 65535
  *
- * Default Value:  256 (0x100)
+ * Default Value:  65535 (0xffff) (we'll send an xon if we recover)
  */
 
 IXGB_PARAM(FCReqTimeout, "Flow Control Request Timeout");
-
-/* Transmit Interrupt Delay in units of 0.8192 microseconds
- *
- * Valid Range: 0-65535
- *
- * Default Value: 32
- */
-
-IXGB_PARAM(TxIntDelay, "Transmit Interrupt Delay");
 
 /* Interrupt Delay Enable
  *
@@ -184,53 +157,50 @@ IXGB_PARAM(TxIntDelay, "Transmit Interrupt Delay");
 
 IXGB_PARAM(IntDelayEnable, "Transmit Interrupt Delay Enable");
 
-#define DEFAULT_TXD			    256
-#define MAX_TXD				   4096
-#define MIN_TXD				     64
-#define DEFAULT_RXD			   1024
-#define MAX_RXD				   4096
-#define MIN_RXD				     64
-#define DEFAULT_TIDV			     32
-#define MAX_TIDV		         0xFFFF
+
+#define DEFAULT_TIDV	   		     32
+#define MAX_TIDV			 0xFFFF
 #define MIN_TIDV			      0
-#define DEFAULT_RDTR			     72
+
+#define DEFAULT_RDTR		   	     72
 #define MAX_RDTR			 0xFFFF
 #define MIN_RDTR			      0
+
 #define XSUMRX_DEFAULT		 OPTION_ENABLED
-#define FLOW_CONTROL_FULL	   ixgb_fc_full
-#define FLOW_CONTROL_DEFAULT  FLOW_CONTROL_FULL
-#define DEFAULT_FCRTL	    		0x28000
+
+#define DEFAULT_FCRTL	  		0x28000
 #define DEFAULT_FCRTH			0x30000
 #define MIN_FCRTL			      0
 #define MAX_FCRTL			0x3FFE8
 #define MIN_FCRTH			      8
 #define MAX_FCRTH			0x3FFF0
-#define DEFAULT_FCPAUSE		 	  0x100
+
 #define MIN_FCPAUSE			      1
 #define MAX_FCPAUSE			 0xffff
+#define DEFAULT_FCPAUSE		  	 0xFFFF /* this may be too long */
 
 struct ixgb_option {
 	enum { enable_option, range_option, list_option } type;
-	char *name;
-	char *err;
+	const char *name;
+	const char *err;
 	int def;
 	union {
-		struct {	/* range option information */
+		struct {	/* range_option info */
 			int min;
 			int max;
 		} r;
-		struct {	/* list option information */
+		struct {	/* list_option info */
 			int nr;
-			struct ixgb_opt_list {
+			const struct ixgb_opt_list {
 				int i;
-				char *str;
+				const char *str;
 			} *p;
 		} l;
 	} arg;
 };
 
 static int __devinit
-ixgb_validate_option(int *value, struct ixgb_option *opt)
+ixgb_validate_option(unsigned int *value, const struct ixgb_option *opt)
 {
 	if (*value == OPTION_UNSET) {
 		*value = opt->def;
@@ -241,52 +211,47 @@ ixgb_validate_option(int *value, struct ixgb_option *opt)
 	case enable_option:
 		switch (*value) {
 		case OPTION_ENABLED:
-			printk(KERN_INFO "%s Enabled\n", opt->name);
+			pr_info("%s Enabled\n", opt->name);
 			return 0;
 		case OPTION_DISABLED:
-			printk(KERN_INFO "%s Disabled\n", opt->name);
+			pr_info("%s Disabled\n", opt->name);
 			return 0;
 		}
 		break;
 	case range_option:
 		if (*value >= opt->arg.r.min && *value <= opt->arg.r.max) {
-			printk(KERN_INFO "%s set to %i\n", opt->name, *value);
+			pr_info("%s set to %i\n", opt->name, *value);
 			return 0;
 		}
 		break;
-	case list_option:
-		{
-			int i;
-			struct ixgb_opt_list *ent;
+	case list_option: {
+		int i;
+		const struct ixgb_opt_list *ent;
 
-			for (i = 0; i < opt->arg.l.nr; i++) {
-				ent = &opt->arg.l.p[i];
-				if (*value == ent->i) {
-					if (ent->str[0] != '\0')
-						printk(KERN_INFO "%s",
-						       ent->str);
-					return 0;
-				}
+		for (i = 0; i < opt->arg.l.nr; i++) {
+			ent = &opt->arg.l.p[i];
+			if (*value == ent->i) {
+				if (ent->str[0] != '\0')
+					pr_info("%s\n", ent->str);
+				return 0;
 			}
 		}
+	}
 		break;
 	default:
 		BUG();
 	}
 
-	printk(KERN_INFO "Invalid %s specified (%i) %s\n", opt->name, *value,
-	       opt->err);
+	pr_info("Invalid %s specified (%i) %s\n", opt->name, *value, opt->err);
 	*value = opt->def;
 	return -1;
 }
-
-#define LIST_LEN(l) (sizeof(l) / sizeof(l[0]))
 
 /**
  * ixgb_check_options - Range Checking for Command Line Parameters
  * @adapter: board private structure
  *
- * This routine checks all command line paramters for valid user
+ * This routine checks all command line parameters for valid user
  * input.  If an invalid value is given, or if no user specified
  * value exists, a default value is used.  The final value is stored
  * in a variable in the adapter structure.
@@ -295,208 +260,210 @@ ixgb_validate_option(int *value, struct ixgb_option *opt)
 void __devinit
 ixgb_check_options(struct ixgb_adapter *adapter)
 {
-	int board = adapter->bd_number;
-
-	IXGB_DBG("ixgb_check_options\n");
-
-	if (board >= IXGB_MAX_NIC) {
-		printk(KERN_NOTICE "Warning: no configuration for board #%i\n",
-		       board);
-		printk(KERN_NOTICE "Using defaults for all values\n");
-		board = IXGB_MAX_NIC;
+	int bd = adapter->bd_number;
+	if (bd >= IXGB_MAX_NIC) {
+		pr_notice("Warning: no configuration for board #%i\n", bd);
+		pr_notice("Using defaults for all values\n");
 	}
 
-	{			/* Transmit Descriptor Count */
-		struct ixgb_option opt = {
+	{ /* Transmit Descriptor Count */
+		const struct ixgb_option opt = {
 			.type = range_option,
 			.name = "Transmit Descriptors",
-			.err = "using default of " __MODULE_STRING(DEFAULT_TXD),
-			.def = DEFAULT_TXD,
-			.arg = {.r = {.min = MIN_TXD,.max = MAX_TXD}}
+			.err  = "using default of " __MODULE_STRING(DEFAULT_TXD),
+			.def  = DEFAULT_TXD,
+			.arg  = { .r = { .min = MIN_TXD,
+					 .max = MAX_TXD}}
 		};
 		struct ixgb_desc_ring *tx_ring = &adapter->tx_ring;
 
-		tx_ring->count = TxDescriptors[board];
-		ixgb_validate_option(&tx_ring->count, &opt);
-		IXGB_ROUNDUP(tx_ring->count, IXGB_REQ_TX_DESCRIPTOR_MULTIPLE);
+		if (num_TxDescriptors > bd) {
+			tx_ring->count = TxDescriptors[bd];
+			ixgb_validate_option(&tx_ring->count, &opt);
+		} else {
+			tx_ring->count = opt.def;
+		}
+		tx_ring->count = ALIGN(tx_ring->count, IXGB_REQ_TX_DESCRIPTOR_MULTIPLE);
 	}
-
-	{			/* Receive Descriptor Count */
-		struct ixgb_option opt = {
+	{ /* Receive Descriptor Count */
+		const struct ixgb_option opt = {
 			.type = range_option,
 			.name = "Receive Descriptors",
-			.err = "using default of " __MODULE_STRING(DEFAULT_RXD),
-			.def = DEFAULT_RXD,
-			.arg = {.r = {.min = MIN_RXD,.max = MAX_RXD}}
+			.err  = "using default of " __MODULE_STRING(DEFAULT_RXD),
+			.def  = DEFAULT_RXD,
+			.arg  = { .r = { .min = MIN_RXD,
+					 .max = MAX_RXD}}
 		};
 		struct ixgb_desc_ring *rx_ring = &adapter->rx_ring;
 
-		rx_ring->count = RxDescriptors[board];
-		ixgb_validate_option(&rx_ring->count, &opt);
-		IXGB_ROUNDUP(rx_ring->count, IXGB_REQ_RX_DESCRIPTOR_MULTIPLE);
+		if (num_RxDescriptors > bd) {
+			rx_ring->count = RxDescriptors[bd];
+			ixgb_validate_option(&rx_ring->count, &opt);
+		} else {
+			rx_ring->count = opt.def;
+		}
+		rx_ring->count = ALIGN(rx_ring->count, IXGB_REQ_RX_DESCRIPTOR_MULTIPLE);
 	}
-
-	{			/* Receive Checksum Offload Enable */
-		struct ixgb_option opt = {
+	{ /* Receive Checksum Offload Enable */
+		const struct ixgb_option opt = {
 			.type = enable_option,
 			.name = "Receive Checksum Offload",
-			.err = "defaulting to Enabled",
-			.def = OPTION_ENABLED,
+			.err  = "defaulting to Enabled",
+			.def  = OPTION_ENABLED
 		};
-		int rx_csum = XsumRX[board];
 
-		ixgb_validate_option(&rx_csum, &opt);
-		adapter->rx_csum = rx_csum;
+		if (num_XsumRX > bd) {
+			unsigned int rx_csum = XsumRX[bd];
+			ixgb_validate_option(&rx_csum, &opt);
+			adapter->rx_csum = rx_csum;
+		} else {
+			adapter->rx_csum = opt.def;
+		}
 	}
+	{ /* Flow Control */
 
-	{			/* Transmit Checksum Offload Enable */
-		struct ixgb_option opt = {
-			.type = enable_option,
-			.name = "Transmit Checksum Offload",
-			.err = "defaulting to Enabled",
-			.def = OPTION_ENABLED,
-		};
-		int tx_csum = XsumTX[board];
-
-		ixgb_validate_option(&tx_csum, &opt);
-		adapter->tx_csum = tx_csum;
-	}
-
-	{			/* Flow Control */
-		struct ixgb_opt_list fc_list[] = {
-			{ixgb_fc_none, "Flow Control Disabled\n"},
-			{ixgb_fc_rx_pause, "Flow Control Receive Only\n"},
-			{ixgb_fc_tx_pause, "Flow Control Transmit Only\n"},
-			{ixgb_fc_full, "Flow Control Enabled\n"},
-			{ixgb_fc_default, "Flow Control Hardware Default\n"}
+		static const struct ixgb_opt_list fc_list[] = {
+		       { ixgb_fc_none, "Flow Control Disabled" },
+		       { ixgb_fc_rx_pause, "Flow Control Receive Only" },
+		       { ixgb_fc_tx_pause, "Flow Control Transmit Only" },
+		       { ixgb_fc_full, "Flow Control Enabled" },
+		       { ixgb_fc_default, "Flow Control Hardware Default" }
 		};
 
-		struct ixgb_option opt = {
+		static const struct ixgb_option opt = {
 			.type = list_option,
 			.name = "Flow Control",
-			.err = "reading default settings from EEPROM",
-			.def = ixgb_fc_full,
-			.arg = {.l = {.nr = LIST_LEN(fc_list),.p = fc_list}}
+			.err  = "reading default settings from EEPROM",
+			.def  = ixgb_fc_tx_pause,
+			.arg  = { .l = { .nr = ARRAY_SIZE(fc_list),
+					 .p = fc_list }}
 		};
 
-		int fc = FlowControl[board];
-
-		ixgb_validate_option(&fc, &opt);
-		adapter->hw.fc.type = fc;
+		if (num_FlowControl > bd) {
+			unsigned int fc = FlowControl[bd];
+			ixgb_validate_option(&fc, &opt);
+			adapter->hw.fc.type = fc;
+		} else {
+			adapter->hw.fc.type = opt.def;
+		}
 	}
-	{			/* Receive Flow Control High Threshold */
-		struct ixgb_option fcrth = {
+	{ /* Receive Flow Control High Threshold */
+		const struct ixgb_option opt = {
 			.type = range_option,
 			.name = "Rx Flow Control High Threshold",
-			.err =
-			    "using default of " __MODULE_STRING(DEFAULT_FCRTH),
-			.def = DEFAULT_FCRTH,
-			.arg = {.r = {.min = MIN_FCRTH,.max = MAX_FCRTH}}
+			.err  = "using default of " __MODULE_STRING(DEFAULT_FCRTH),
+			.def  = DEFAULT_FCRTH,
+			.arg  = { .r = { .min = MIN_FCRTH,
+					 .max = MAX_FCRTH}}
 		};
 
-		adapter->hw.fc.high_water = RxFCHighThresh[board];
-		ixgb_validate_option(&adapter->hw.fc.high_water, &fcrth);
-		if (!(adapter->hw.fc.type & ixgb_fc_rx_pause))
-			printk(KERN_INFO
-			       "Ignoring RxFCHighThresh when no RxFC\n");
+		if (num_RxFCHighThresh > bd) {
+			adapter->hw.fc.high_water = RxFCHighThresh[bd];
+			ixgb_validate_option(&adapter->hw.fc.high_water, &opt);
+		} else {
+			adapter->hw.fc.high_water = opt.def;
+		}
+		if (!(adapter->hw.fc.type & ixgb_fc_tx_pause) )
+			pr_info("Ignoring RxFCHighThresh when no RxFC\n");
 	}
-	{			/* Receive Flow Control Low Threshold */
-		struct ixgb_option fcrtl = {
+	{ /* Receive Flow Control Low Threshold */
+		const struct ixgb_option opt = {
 			.type = range_option,
 			.name = "Rx Flow Control Low Threshold",
-			.err =
-			    "using default of " __MODULE_STRING(DEFAULT_FCRTL),
-			.def = DEFAULT_FCRTL,
-			.arg = {.r = {.min = MIN_FCRTL,.max = MAX_FCRTL}}
+			.err  = "using default of " __MODULE_STRING(DEFAULT_FCRTL),
+			.def  = DEFAULT_FCRTL,
+			.arg  = { .r = { .min = MIN_FCRTL,
+					 .max = MAX_FCRTL}}
 		};
 
-		adapter->hw.fc.low_water = RxFCLowThresh[board];
-		ixgb_validate_option(&adapter->hw.fc.low_water, &fcrtl);
-		if (!(adapter->hw.fc.type & ixgb_fc_rx_pause))
-			printk(KERN_INFO
-			       "Ignoring RxFCLowThresh when no RxFC\n");
+		if (num_RxFCLowThresh > bd) {
+			adapter->hw.fc.low_water = RxFCLowThresh[bd];
+			ixgb_validate_option(&adapter->hw.fc.low_water, &opt);
+		} else {
+			adapter->hw.fc.low_water = opt.def;
+		}
+		if (!(adapter->hw.fc.type & ixgb_fc_tx_pause) )
+			pr_info("Ignoring RxFCLowThresh when no RxFC\n");
 	}
-	{			/* Flow Control Pause Time Request */
-		struct ixgb_option fcpap = {
+	{ /* Flow Control Pause Time Request*/
+		const struct ixgb_option opt = {
 			.type = range_option,
 			.name = "Flow Control Pause Time Request",
-			.err =
-			    "using default of "
-			    __MODULE_STRING(DEFAULT_FCPAUSE),
-			.def = DEFAULT_FCPAUSE,
-			.arg = {.r = {.min = MIN_FCPAUSE,.max = MAX_FCPAUSE}}
+			.err  = "using default of "__MODULE_STRING(DEFAULT_FCPAUSE),
+			.def  = DEFAULT_FCPAUSE,
+			.arg = { .r = { .min = MIN_FCPAUSE,
+					.max = MAX_FCPAUSE}}
 		};
 
-		int pause_time = FCReqTimeout[board];
-
-		ixgb_validate_option(&pause_time, &fcpap);
-		if (!(adapter->hw.fc.type & ixgb_fc_rx_pause))
-			printk(KERN_INFO
-			       "Ignoring FCReqTimeout when no RxFC\n");
-		adapter->hw.fc.pause_time = pause_time;
+		if (num_FCReqTimeout > bd) {
+			unsigned int pause_time = FCReqTimeout[bd];
+			ixgb_validate_option(&pause_time, &opt);
+			adapter->hw.fc.pause_time = pause_time;
+		} else {
+			adapter->hw.fc.pause_time = opt.def;
+		}
+		if (!(adapter->hw.fc.type & ixgb_fc_tx_pause) )
+			pr_info("Ignoring FCReqTimeout when no RxFC\n");
 	}
 	/* high low and spacing check for rx flow control thresholds */
-	if (adapter->hw.fc.type & ixgb_fc_rx_pause) {
+	if (adapter->hw.fc.type & ixgb_fc_tx_pause) {
 		/* high must be greater than low */
 		if (adapter->hw.fc.high_water < (adapter->hw.fc.low_water + 8)) {
 			/* set defaults */
-			printk(KERN_INFO
-			       "RxFCHighThresh must be >= (RxFCLowThresh + 8), "
-			       "Using Defaults\n");
+			pr_info("RxFCHighThresh must be >= (RxFCLowThresh + 8), Using Defaults\n");
 			adapter->hw.fc.high_water = DEFAULT_FCRTH;
-			adapter->hw.fc.low_water = DEFAULT_FCRTL;
+			adapter->hw.fc.low_water  = DEFAULT_FCRTL;
 		}
 	}
-	{			/* Receive Interrupt Delay */
-		struct ixgb_option opt = {
+	{ /* Receive Interrupt Delay */
+		const struct ixgb_option opt = {
 			.type = range_option,
 			.name = "Receive Interrupt Delay",
-			.err =
-			    "using default of " __MODULE_STRING(DEFAULT_RDTR),
-			.def = DEFAULT_RDTR,
-			.arg = {.r = {.min = MIN_RDTR,.max = MAX_RDTR}}
+			.err  = "using default of " __MODULE_STRING(DEFAULT_RDTR),
+			.def  = DEFAULT_RDTR,
+			.arg  = { .r = { .min = MIN_RDTR,
+					 .max = MAX_RDTR}}
 		};
 
-		adapter->rx_int_delay = RxIntDelay[board];
-		ixgb_validate_option(&adapter->rx_int_delay, &opt);
+		if (num_RxIntDelay > bd) {
+			adapter->rx_int_delay = RxIntDelay[bd];
+			ixgb_validate_option(&adapter->rx_int_delay, &opt);
+		} else {
+			adapter->rx_int_delay = opt.def;
+		}
 	}
-	{			/* Receive Interrupt Moderation */
-		struct ixgb_option opt = {
-			.type = enable_option,
-			.name = "Advanced Receive Interrupt Moderation",
-			.err = "defaulting to Enabled",
-			.def = OPTION_ENABLED,
-		};
-		int raidc = RAIDC[board];
-
-		ixgb_validate_option(&raidc, &opt);
-		adapter->raidc = raidc;
-	}
-
-	{			/* Transmit Interrupt Delay */
-		struct ixgb_option opt = {
+	{ /* Transmit Interrupt Delay */
+		const struct ixgb_option opt = {
 			.type = range_option,
 			.name = "Transmit Interrupt Delay",
-			.err =
-			    "using default of " __MODULE_STRING(DEFAULT_TIDV),
-			.def = DEFAULT_TIDV,
-			.arg = {.r = {.min = MIN_TIDV,.max = MAX_TIDV}}
+			.err  = "using default of " __MODULE_STRING(DEFAULT_TIDV),
+			.def  = DEFAULT_TIDV,
+			.arg  = { .r = { .min = MIN_TIDV,
+					 .max = MAX_TIDV}}
 		};
 
-		adapter->tx_int_delay = TxIntDelay[board];
-		ixgb_validate_option(&adapter->tx_int_delay, &opt);
+		if (num_TxIntDelay > bd) {
+			adapter->tx_int_delay = TxIntDelay[bd];
+			ixgb_validate_option(&adapter->tx_int_delay, &opt);
+		} else {
+			adapter->tx_int_delay = opt.def;
+		}
 	}
 
-	{			/* Transmit Interrupt Delay Enable */
-		struct ixgb_option opt = {
+	{ /* Transmit Interrupt Delay Enable */
+		const struct ixgb_option opt = {
 			.type = enable_option,
 			.name = "Tx Interrupt Delay Enable",
-			.err = "defaulting to Enabled",
-			.def = OPTION_ENABLED,
+			.err  = "defaulting to Enabled",
+			.def  = OPTION_ENABLED
 		};
-		int ide = IntDelayEnable[board];
 
-		ixgb_validate_option(&ide, &opt);
-		adapter->tx_int_delay_enable = ide;
+		if (num_IntDelayEnable > bd) {
+			unsigned int ide = IntDelayEnable[bd];
+			ixgb_validate_option(&ide, &opt);
+			adapter->tx_int_delay_enable = ide;
+		} else {
+			adapter->tx_int_delay_enable = opt.def;
+		}
 	}
 }

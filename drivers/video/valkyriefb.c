@@ -39,13 +39,11 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
@@ -53,7 +51,6 @@
 #include <linux/fb.h>
 #include <linux/selection.h>
 #include <linux/init.h>
-#include <linux/pci.h>
 #include <linux/nvram.h>
 #include <linux/adb.h>
 #include <linux/cuda.h>
@@ -72,7 +69,7 @@
 #ifdef CONFIG_MAC
 /* We don't yet have functions to read the PRAM... perhaps we can
    adapt them from the PPC code? */
-static int default_vmode = VMODE_640_480_67;
+static int default_vmode = VMODE_CHOOSE;
 static int default_cmode = CMODE_8;
 #else
 static int default_vmode = VMODE_NVRAM;
@@ -89,13 +86,13 @@ struct fb_par_valkyrie {
 struct fb_info_valkyrie {
 	struct fb_info		info;
 	struct fb_par_valkyrie	par;
-	struct cmap_regs	*cmap_regs;
+	struct cmap_regs	__iomem *cmap_regs;
 	unsigned long		cmap_regs_phys;
 	
-	struct valkyrie_regs	*valkyrie_regs;
+	struct valkyrie_regs	__iomem *valkyrie_regs;
 	unsigned long		valkyrie_regs_phys;
 	
-	__u8			*frame_buffer;
+	__u8			__iomem *frame_buffer;
 	unsigned long		frame_buffer_phys;
 	
 	int			sense;
@@ -118,13 +115,11 @@ static int valkyriefb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 static int valkyriefb_blank(int blank_mode, struct fb_info *info);
 
 static int read_valkyrie_sense(struct fb_info_valkyrie *p);
-static inline int valkyrie_vram_reqd(int video_mode, int color_mode);
 static void set_valkyrie_clock(unsigned char *params);
-static inline int valkyrie_par_to_var(struct fb_par_valkyrie *par, struct fb_var_screeninfo *var);
 static int valkyrie_var_to_par(struct fb_var_screeninfo *var,
 	struct fb_par_valkyrie *par, const struct fb_info *fb_info);
 
-static void valkyrie_init_info(struct fb_info *info, struct fb_info_valkyrie *p);
+static int valkyrie_init_info(struct fb_info *info, struct fb_info_valkyrie *p);
 static void valkyrie_par_to_fix(struct fb_par_valkyrie *par, struct fb_fix_screeninfo *fix);
 static void valkyrie_init_fix(struct fb_fix_screeninfo *fix, struct fb_info_valkyrie *p);
 
@@ -137,14 +132,13 @@ static struct fb_ops valkyriefb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 /* Sets the video mode according to info->var */
 static int valkyriefb_set_par(struct fb_info *info)
 {
 	struct fb_info_valkyrie *p = (struct fb_info_valkyrie *) info;
-	volatile struct valkyrie_regs *valkyrie_regs = p->valkyrie_regs;
+	volatile struct valkyrie_regs __iomem *valkyrie_regs = p->valkyrie_regs;
 	struct fb_par_valkyrie *par = info->par;
 	struct valkyrie_regvals	*init;
 	int err;
@@ -169,6 +163,12 @@ static int valkyriefb_set_par(struct fb_info *info)
 	out_8(&valkyrie_regs->mode.r, init->mode);
 
 	return 0;
+}
+
+static inline int valkyrie_par_to_var(struct fb_par_valkyrie *par,
+				      struct fb_var_screeninfo *var)
+{
+	return mac_vmode_to_var(par->vmode, par->cmode, var);
 }
 
 static int
@@ -203,13 +203,13 @@ static int valkyriefb_blank(int blank_mode, struct fb_info *info)
 		return 1;
 
 	switch (blank_mode) {
-	case 0:			/* unblank */
+	case FB_BLANK_UNBLANK:			/* unblank */
 		out_8(&p->valkyrie_regs->mode.r, init->mode);
 		break;
-	case 1:
+	case FB_BLANK_NORMAL:
 		return 1;	/* get caller to set CLUT to all black */
-	case VESA_VSYNC_SUSPEND+1:
-	case VESA_HSYNC_SUSPEND+1:
+	case FB_BLANK_VSYNC_SUSPEND:
+	case FB_BLANK_HSYNC_SUSPEND:
 		/*
 		 * [kps] Value extracted from MacOS. I don't know
 		 * whether this bit disables hsync or vsync, or
@@ -217,7 +217,7 @@ static int valkyriefb_blank(int blank_mode, struct fb_info *info)
 		 */
 		out_8(&p->valkyrie_regs->mode.r, init->mode | 0x40);
 		break;
-	case VESA_POWERDOWN+1:
+	case FB_BLANK_POWERDOWN:
 		out_8(&p->valkyrie_regs->mode.r, 0x66);
 		break;
 	}
@@ -228,7 +228,7 @@ static int valkyriefb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 			     u_int transp, struct fb_info *info)
 {
 	struct fb_info_valkyrie *p = (struct fb_info_valkyrie *) info;
-	volatile struct cmap_regs *cmap_regs = p->cmap_regs;
+	volatile struct cmap_regs __iomem *cmap_regs = p->cmap_regs;
 	struct fb_par_valkyrie *par = info->par;
 
 	if (regno > 255)
@@ -252,7 +252,7 @@ static int valkyriefb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	return 0;
 }
 
-static int valkyrie_vram_reqd(int video_mode, int color_mode)
+static inline int valkyrie_vram_reqd(int video_mode, int color_mode)
 {
 	int pitch;
 	struct valkyrie_regvals *init = valkyrie_reg_init[video_mode-1];
@@ -283,7 +283,7 @@ static void __init valkyrie_choose_mode(struct fb_info_valkyrie *p)
 	printk(KERN_INFO "Monitor sense value = 0x%x\n", p->sense);
 
 	/* Try to pick a video mode out of NVRAM if we have one. */
-#ifndef CONFIG_MAC
+#if !defined(CONFIG_MAC) && defined(CONFIG_NVRAM)
 	if (default_vmode == VMODE_NVRAM) {
 		default_vmode = nvram_read_byte(NV_VMODE);
 		if (default_vmode <= 0
@@ -296,7 +296,7 @@ static void __init valkyrie_choose_mode(struct fb_info_valkyrie *p)
 		default_vmode = mac_map_monitor_sense(p->sense);
 	if (!valkyrie_reg_init[default_vmode - 1])
 		default_vmode = VMODE_640_480_67;
-#ifndef CONFIG_MAC
+#if !defined(CONFIG_MAC) && defined(CONFIG_NVRAM)
 	if (default_cmode == CMODE_NVRAM)
 		default_cmode = nvram_read_byte(NV_CMODE);
 #endif
@@ -318,41 +318,47 @@ int __init valkyriefb_init(void)
 	struct fb_info_valkyrie	*p;
 	unsigned long frame_buffer_phys, cmap_regs_phys, flags;
 	int err;
+	char *option = NULL;
+
+	if (fb_get_options("valkyriefb", &option))
+		return -ENODEV;
+	valkyriefb_setup(option);
 
 #ifdef CONFIG_MAC
 	if (!MACH_IS_MAC)
-		return 0;
+		return -ENODEV;
 	if (!(mac_bi_data.id == MAC_MODEL_Q630
 	      /* I'm not sure about this one */
 	    || mac_bi_data.id == MAC_MODEL_P588))
-		return 0;
+		return -ENODEV;
 
 	/* Hardcoded addresses... welcome to 68k Macintosh country :-) */
 	frame_buffer_phys = 0xf9000000;
 	cmap_regs_phys = 0x50f24000;
 	flags = IOMAP_NOCACHE_SER; /* IOMAP_WRITETHROUGH?? */
 #else /* ppc (!CONFIG_MAC) */
-	struct device_node *dp;
+	{
+		struct device_node *dp;
+		struct resource r;
 
-	dp = find_devices("valkyrie");
-	if (dp == 0)
-		return 0;
+		dp = of_find_node_by_name(NULL, "valkyrie");
+		if (dp == 0)
+			return 0;
 
-	if (dp->n_addrs != 1) {
-		printk(KERN_ERR "expecting 1 address for valkyrie (got %d)\n",
-		       dp->n_addrs);
-		return 0;
+		if (of_address_to_resource(dp, 0, &r)) {
+			printk(KERN_ERR "can't find address for valkyrie\n");
+			return 0;
+		}
+
+		frame_buffer_phys = r.start;
+		cmap_regs_phys = r.start + 0x304000;
+		flags = _PAGE_WRITETHRU;
 	}
-
-	frame_buffer_phys = dp->addrs[0].address;
-	cmap_regs_phys = dp->addrs[0].address+0x304000;
-	flags = _PAGE_WRITETHRU;
 #endif /* ppc (!CONFIG_MAC) */
 
-	p = kmalloc(sizeof(*p), GFP_ATOMIC);
+	p = kzalloc(sizeof(*p), GFP_ATOMIC);
 	if (p == 0)
 		return -ENOMEM;
-	memset(p, 0, sizeof(*p));
 
 	/* Map in frame buffer and registers */
 	if (!request_mem_region(frame_buffer_phys, 0x100000, "valkyriefb")) {
@@ -375,18 +381,22 @@ int __init valkyriefb_init(void)
 
 	valkyrie_choose_mode(p);
 	mac_vmode_to_var(default_vmode, default_cmode, &p->info.var);
-	valkyrie_init_info(&p->info, p);
+	err = valkyrie_init_info(&p->info, p);
+	if (err < 0)
+		goto out_free;
 	valkyrie_init_fix(&p->info.fix, p);
 	if (valkyriefb_set_par(&p->info))
 		/* "can't happen" */
 		printk(KERN_ERR "valkyriefb: can't set default video mode\n");
 
 	if ((err = register_framebuffer(&p->info)) != 0)
-		goto out_free;
+		goto out_cmap_free;
 
 	printk(KERN_INFO "fb%d: valkyrie frame buffer device\n", p->info.node);
 	return 0;
 
+ out_cmap_free:
+	fb_dealloc_cmap(&p->info.cmap);
  out_free:
 	if (p->frame_buffer)
 		iounmap(p->frame_buffer);
@@ -504,11 +514,6 @@ static int valkyrie_var_to_par(struct fb_var_screeninfo *var,
 	return 0;
 }
 
-static int valkyrie_par_to_var(struct fb_par_valkyrie *par, struct fb_var_screeninfo *var)
-{
-	return mac_vmode_to_var(par->vmode, par->cmode, var);
-}
-
 static void valkyrie_init_fix(struct fb_fix_screeninfo *fix, struct fb_info_valkyrie *p)
 {
 	memset(fix, 0, sizeof(*fix));
@@ -537,14 +542,15 @@ static void valkyrie_par_to_fix(struct fb_par_valkyrie *par,
 		/* ywrapstep, xpanstep, ypanstep */
 }
 
-static void __init valkyrie_init_info(struct fb_info *info, struct fb_info_valkyrie *p)
+static int __init valkyrie_init_info(struct fb_info *info,
+		struct fb_info_valkyrie *p)
 {
 	info->fbops = &valkyriefb_ops;
-	info->screen_base = (char *) p->frame_buffer + 0x1000;
-	info->flags = FBINFO_FLAG_DEFAULT;
+	info->screen_base = p->frame_buffer + 0x1000;
+	info->flags = FBINFO_DEFAULT;
 	info->pseudo_palette = p->pseudo_palette;
-	fb_alloc_cmap(&info->cmap, 256, 0);
 	info->par = &p->par;
+	return fb_alloc_cmap(&info->cmap, 256, 0);
 }
 
 
@@ -580,4 +586,5 @@ int __init valkyriefb_setup(char *options)
 	return 0;
 }
 
+module_init(valkyriefb_init);
 MODULE_LICENSE("GPL");

@@ -1,335 +1,591 @@
 #include <linux/usb.h>
+#include <linux/usb/ch9.h>
+#include <linux/usb/hcd.h>
+#include <linux/usb/quirks.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/device.h>
 #include <asm/byteorder.h>
+#include "usb.h"
 
 
 #define USB_MAXALTSETTING		128	/* Hard limit */
 #define USB_MAXENDPOINTS		30	/* Hard limit */
 
-/* these maximums are arbitrary */
-#define USB_MAXCONFIG			8
-#define USB_MAXINTERFACES		32
+#define USB_MAXCONFIG			8	/* Arbitrary limit */
 
-static int usb_parse_endpoint(struct usb_host_endpoint *endpoint, unsigned char *buffer, int size)
+
+static inline const char *plural(int n)
 {
+	return (n == 1 ? "" : "s");
+}
+
+static int find_next_descriptor(unsigned char *buffer, int size,
+    int dt1, int dt2, int *num_skipped)
+{
+	struct usb_descriptor_header *h;
+	int n = 0;
 	unsigned char *buffer0 = buffer;
-	struct usb_descriptor_header *header;
-	unsigned char *begin;
-	int numskipped;
 
-	header = (struct usb_descriptor_header *)buffer;
-	if (header->bDescriptorType != USB_DT_ENDPOINT) {
-		warn("unexpected descriptor 0x%X, expecting endpoint, 0x%X",
-			header->bDescriptorType, USB_DT_ENDPOINT);
-		return -EINVAL;
-	}
-
-	if (header->bLength >= USB_DT_ENDPOINT_AUDIO_SIZE)
-		memcpy(&endpoint->desc, buffer, USB_DT_ENDPOINT_AUDIO_SIZE);
-	else if (header->bLength >= USB_DT_ENDPOINT_SIZE)
-		memcpy(&endpoint->desc, buffer, USB_DT_ENDPOINT_SIZE);
-	else {
-		warn("invalid endpoint descriptor");
-		return -EINVAL;
-	}
-
-	if ((endpoint->desc.bEndpointAddress & ~USB_ENDPOINT_DIR_MASK) >= 16) {
-		warn("invalid endpoint address 0x%X",
-		    endpoint->desc.bEndpointAddress);
-		return -EINVAL;
-	}
-
-	le16_to_cpus(&endpoint->desc.wMaxPacketSize);
-
-	buffer += header->bLength;
-	size -= header->bLength;
-
-	/* Skip over any Class Specific or Vendor Specific descriptors */
-	begin = buffer;
-	numskipped = 0;
-	while (size >= sizeof(struct usb_descriptor_header)) {
-		header = (struct usb_descriptor_header *)buffer;
-
-		/* If we find another "proper" descriptor then we're done  */
-		if ((header->bDescriptorType == USB_DT_ENDPOINT) ||
-		    (header->bDescriptorType == USB_DT_INTERFACE))
+	/* Find the next descriptor of type dt1 or dt2 */
+	while (size > 0) {
+		h = (struct usb_descriptor_header *) buffer;
+		if (h->bDescriptorType == dt1 || h->bDescriptorType == dt2)
 			break;
-
-		dbg("skipping descriptor 0x%X", header->bDescriptorType);
-		numskipped++;
-
-		buffer += header->bLength;
-		size -= header->bLength;
-	}
-	if (numskipped) {
-		dbg("skipped %d class/vendor specific endpoint descriptors", numskipped);
-		endpoint->extra = begin;
-		endpoint->extralen = buffer - begin;
+		buffer += h->bLength;
+		size -= h->bLength;
+		++n;
 	}
 
+	/* Store the number of descriptors skipped and return the
+	 * number of bytes skipped */
+	if (num_skipped)
+		*num_skipped = n;
 	return buffer - buffer0;
 }
 
-static void usb_release_intf(struct device *dev)
+static void usb_parse_ss_endpoint_companion(struct device *ddev, int cfgno,
+		int inum, int asnum, struct usb_host_endpoint *ep,
+		unsigned char *buffer, int size)
 {
-	struct usb_interface *intf;
-	int j;
+	struct usb_ss_ep_comp_descriptor *desc;
+	int max_tx;
 
-	intf = to_usb_interface(dev);
+	/* The SuperSpeed endpoint companion descriptor is supposed to
+	 * be the first thing immediately following the endpoint descriptor.
+	 */
+	desc = (struct usb_ss_ep_comp_descriptor *) buffer;
+	if (desc->bDescriptorType != USB_DT_SS_ENDPOINT_COMP ||
+			size < USB_DT_SS_EP_COMP_SIZE) {
+		dev_warn(ddev, "No SuperSpeed endpoint companion for config %d "
+				" interface %d altsetting %d ep %d: "
+				"using minimum values\n",
+				cfgno, inum, asnum, ep->desc.bEndpointAddress);
 
-	if (intf->altsetting) {
-		for (j = 0; j < intf->num_altsetting; j++) {
-			struct usb_host_interface *as = &intf->altsetting[j];
-
-			kfree(as->endpoint);
-		}
-		kfree(intf->altsetting);
+		/* Fill in some default values.
+		 * Leave bmAttributes as zero, which will mean no streams for
+		 * bulk, and isoc won't support multiple bursts of packets.
+		 * With bursts of only one packet, and a Mult of 1, the max
+		 * amount of data moved per endpoint service interval is one
+		 * packet.
+		 */
+		ep->ss_ep_comp.bLength = USB_DT_SS_EP_COMP_SIZE;
+		ep->ss_ep_comp.bDescriptorType = USB_DT_SS_ENDPOINT_COMP;
+		if (usb_endpoint_xfer_isoc(&ep->desc) ||
+				usb_endpoint_xfer_int(&ep->desc))
+			ep->ss_ep_comp.wBytesPerInterval =
+					ep->desc.wMaxPacketSize;
+		return;
 	}
-	kfree(intf);
+
+	memcpy(&ep->ss_ep_comp, desc, USB_DT_SS_EP_COMP_SIZE);
+
+	/* Check the various values */
+	if (usb_endpoint_xfer_control(&ep->desc) && desc->bMaxBurst != 0) {
+		dev_warn(ddev, "Control endpoint with bMaxBurst = %d in "
+				"config %d interface %d altsetting %d ep %d: "
+				"setting to zero\n", desc->bMaxBurst,
+				cfgno, inum, asnum, ep->desc.bEndpointAddress);
+		ep->ss_ep_comp.bMaxBurst = 0;
+	} else if (desc->bMaxBurst > 15) {
+		dev_warn(ddev, "Endpoint with bMaxBurst = %d in "
+				"config %d interface %d altsetting %d ep %d: "
+				"setting to 15\n", desc->bMaxBurst,
+				cfgno, inum, asnum, ep->desc.bEndpointAddress);
+		ep->ss_ep_comp.bMaxBurst = 15;
+	}
+
+	if ((usb_endpoint_xfer_control(&ep->desc) ||
+			usb_endpoint_xfer_int(&ep->desc)) &&
+				desc->bmAttributes != 0) {
+		dev_warn(ddev, "%s endpoint with bmAttributes = %d in "
+				"config %d interface %d altsetting %d ep %d: "
+				"setting to zero\n",
+				usb_endpoint_xfer_control(&ep->desc) ? "Control" : "Bulk",
+				desc->bmAttributes,
+				cfgno, inum, asnum, ep->desc.bEndpointAddress);
+		ep->ss_ep_comp.bmAttributes = 0;
+	} else if (usb_endpoint_xfer_bulk(&ep->desc) &&
+			desc->bmAttributes > 16) {
+		dev_warn(ddev, "Bulk endpoint with more than 65536 streams in "
+				"config %d interface %d altsetting %d ep %d: "
+				"setting to max\n",
+				cfgno, inum, asnum, ep->desc.bEndpointAddress);
+		ep->ss_ep_comp.bmAttributes = 16;
+	} else if (usb_endpoint_xfer_isoc(&ep->desc) &&
+			desc->bmAttributes > 2) {
+		dev_warn(ddev, "Isoc endpoint has Mult of %d in "
+				"config %d interface %d altsetting %d ep %d: "
+				"setting to 3\n", desc->bmAttributes + 1,
+				cfgno, inum, asnum, ep->desc.bEndpointAddress);
+		ep->ss_ep_comp.bmAttributes = 2;
+	}
+
+	if (usb_endpoint_xfer_isoc(&ep->desc))
+		max_tx = ep->desc.wMaxPacketSize * (desc->bMaxBurst + 1) *
+			(desc->bmAttributes + 1);
+	else if (usb_endpoint_xfer_int(&ep->desc))
+		max_tx = ep->desc.wMaxPacketSize * (desc->bMaxBurst + 1);
+	else
+		max_tx = 999999;
+	if (desc->wBytesPerInterval > max_tx) {
+		dev_warn(ddev, "%s endpoint with wBytesPerInterval of %d in "
+				"config %d interface %d altsetting %d ep %d: "
+				"setting to %d\n",
+				usb_endpoint_xfer_isoc(&ep->desc) ? "Isoc" : "Int",
+				desc->wBytesPerInterval,
+				cfgno, inum, asnum, ep->desc.bEndpointAddress,
+				max_tx);
+		ep->ss_ep_comp.wBytesPerInterval = max_tx;
+	}
 }
 
-static int usb_parse_interface(struct usb_host_config *config, unsigned char *buffer, int size)
+static int usb_parse_endpoint(struct device *ddev, int cfgno, int inum,
+    int asnum, struct usb_host_interface *ifp, int num_ep,
+    unsigned char *buffer, int size)
+{
+	unsigned char *buffer0 = buffer;
+	struct usb_endpoint_descriptor *d;
+	struct usb_host_endpoint *endpoint;
+	int n, i, j, retval;
+
+	d = (struct usb_endpoint_descriptor *) buffer;
+	buffer += d->bLength;
+	size -= d->bLength;
+
+	if (d->bLength >= USB_DT_ENDPOINT_AUDIO_SIZE)
+		n = USB_DT_ENDPOINT_AUDIO_SIZE;
+	else if (d->bLength >= USB_DT_ENDPOINT_SIZE)
+		n = USB_DT_ENDPOINT_SIZE;
+	else {
+		dev_warn(ddev, "config %d interface %d altsetting %d has an "
+		    "invalid endpoint descriptor of length %d, skipping\n",
+		    cfgno, inum, asnum, d->bLength);
+		goto skip_to_next_endpoint_or_interface_descriptor;
+	}
+
+	i = d->bEndpointAddress & ~USB_ENDPOINT_DIR_MASK;
+	if (i >= 16 || i == 0) {
+		dev_warn(ddev, "config %d interface %d altsetting %d has an "
+		    "invalid endpoint with address 0x%X, skipping\n",
+		    cfgno, inum, asnum, d->bEndpointAddress);
+		goto skip_to_next_endpoint_or_interface_descriptor;
+	}
+
+	/* Only store as many endpoints as we have room for */
+	if (ifp->desc.bNumEndpoints >= num_ep)
+		goto skip_to_next_endpoint_or_interface_descriptor;
+
+	endpoint = &ifp->endpoint[ifp->desc.bNumEndpoints];
+	++ifp->desc.bNumEndpoints;
+
+	memcpy(&endpoint->desc, d, n);
+	INIT_LIST_HEAD(&endpoint->urb_list);
+
+	/* Fix up bInterval values outside the legal range. Use 32 ms if no
+	 * proper value can be guessed. */
+	i = 0;		/* i = min, j = max, n = default */
+	j = 255;
+	if (usb_endpoint_xfer_int(d)) {
+		i = 1;
+		switch (to_usb_device(ddev)->speed) {
+		case USB_SPEED_SUPER:
+		case USB_SPEED_HIGH:
+			/* Many device manufacturers are using full-speed
+			 * bInterval values in high-speed interrupt endpoint
+			 * descriptors. Try to fix those and fall back to a
+			 * 32 ms default value otherwise. */
+			n = fls(d->bInterval*8);
+			if (n == 0)
+				n = 9;	/* 32 ms = 2^(9-1) uframes */
+			j = 16;
+			break;
+		default:		/* USB_SPEED_FULL or _LOW */
+			/* For low-speed, 10 ms is the official minimum.
+			 * But some "overclocked" devices might want faster
+			 * polling so we'll allow it. */
+			n = 32;
+			break;
+		}
+	} else if (usb_endpoint_xfer_isoc(d)) {
+		i = 1;
+		j = 16;
+		switch (to_usb_device(ddev)->speed) {
+		case USB_SPEED_HIGH:
+			n = 9;		/* 32 ms = 2^(9-1) uframes */
+			break;
+		default:		/* USB_SPEED_FULL */
+			n = 6;		/* 32 ms = 2^(6-1) frames */
+			break;
+		}
+	}
+	if (d->bInterval < i || d->bInterval > j) {
+		dev_warn(ddev, "config %d interface %d altsetting %d "
+		    "endpoint 0x%X has an invalid bInterval %d, "
+		    "changing to %d\n",
+		    cfgno, inum, asnum,
+		    d->bEndpointAddress, d->bInterval, n);
+		endpoint->desc.bInterval = n;
+	}
+
+	/* Some buggy low-speed devices have Bulk endpoints, which is
+	 * explicitly forbidden by the USB spec.  In an attempt to make
+	 * them usable, we will try treating them as Interrupt endpoints.
+	 */
+	if (to_usb_device(ddev)->speed == USB_SPEED_LOW &&
+			usb_endpoint_xfer_bulk(d)) {
+		dev_warn(ddev, "config %d interface %d altsetting %d "
+		    "endpoint 0x%X is Bulk; changing to Interrupt\n",
+		    cfgno, inum, asnum, d->bEndpointAddress);
+		endpoint->desc.bmAttributes = USB_ENDPOINT_XFER_INT;
+		endpoint->desc.bInterval = 1;
+		if (le16_to_cpu(endpoint->desc.wMaxPacketSize) > 8)
+			endpoint->desc.wMaxPacketSize = cpu_to_le16(8);
+	}
+
+	/*
+	 * Some buggy high speed devices have bulk endpoints using
+	 * maxpacket sizes other than 512.  High speed HCDs may not
+	 * be able to handle that particular bug, so let's warn...
+	 */
+	if (to_usb_device(ddev)->speed == USB_SPEED_HIGH
+			&& usb_endpoint_xfer_bulk(d)) {
+		unsigned maxp;
+
+		maxp = le16_to_cpu(endpoint->desc.wMaxPacketSize) & 0x07ff;
+		if (maxp != 512)
+			dev_warn(ddev, "config %d interface %d altsetting %d "
+				"bulk endpoint 0x%X has invalid maxpacket %d\n",
+				cfgno, inum, asnum, d->bEndpointAddress,
+				maxp);
+	}
+
+	/* Parse a possible SuperSpeed endpoint companion descriptor */
+	if (to_usb_device(ddev)->speed == USB_SPEED_SUPER)
+		usb_parse_ss_endpoint_companion(ddev, cfgno,
+				inum, asnum, endpoint, buffer, size);
+
+	/* Skip over any Class Specific or Vendor Specific descriptors;
+	 * find the next endpoint or interface descriptor */
+	endpoint->extra = buffer;
+	i = find_next_descriptor(buffer, size, USB_DT_ENDPOINT,
+			USB_DT_INTERFACE, &n);
+	endpoint->extralen = i;
+	retval = buffer - buffer0 + i;
+	if (n > 0)
+		dev_dbg(ddev, "skipped %d descriptor%s after %s\n",
+		    n, plural(n), "endpoint");
+	return retval;
+
+skip_to_next_endpoint_or_interface_descriptor:
+	i = find_next_descriptor(buffer, size, USB_DT_ENDPOINT,
+	    USB_DT_INTERFACE, NULL);
+	return buffer - buffer0 + i;
+}
+
+void usb_release_interface_cache(struct kref *ref)
+{
+	struct usb_interface_cache *intfc = ref_to_usb_interface_cache(ref);
+	int j;
+
+	for (j = 0; j < intfc->num_altsetting; j++) {
+		struct usb_host_interface *alt = &intfc->altsetting[j];
+
+		kfree(alt->endpoint);
+		kfree(alt->string);
+	}
+	kfree(intfc);
+}
+
+static int usb_parse_interface(struct device *ddev, int cfgno,
+    struct usb_host_config *config, unsigned char *buffer, int size,
+    u8 inums[], u8 nalts[])
 {
 	unsigned char *buffer0 = buffer;
 	struct usb_interface_descriptor	*d;
 	int inum, asnum;
-	struct usb_interface *interface;
-	struct usb_host_interface *ifp;
-	int len, numskipped;
-	struct usb_descriptor_header *header;
-	unsigned char *begin;
-	int i, retval;
+	struct usb_interface_cache *intfc;
+	struct usb_host_interface *alt;
+	int i, n;
+	int len, retval;
+	int num_ep, num_ep_orig;
 
 	d = (struct usb_interface_descriptor *) buffer;
-	if (d->bDescriptorType != USB_DT_INTERFACE) {
-		warn("unexpected descriptor 0x%X, expecting interface, 0x%X",
-			d->bDescriptorType, USB_DT_INTERFACE);
-		return -EINVAL;
-	}
-
-	inum = d->bInterfaceNumber;
-	if (inum >= config->desc.bNumInterfaces) {
-
-		/* Skip to the next interface descriptor */
-		buffer += d->bLength;
-		size -= d->bLength;
-		while (size >= sizeof(struct usb_descriptor_header)) {
-			header = (struct usb_descriptor_header *) buffer;
-
-			if (header->bDescriptorType == USB_DT_INTERFACE)
-				break;
-			buffer += header->bLength;
-			size -= header->bLength;
-		}
-		return buffer - buffer0;
-	}
-
-	interface = config->interface[inum];
-	asnum = d->bAlternateSetting;
-	if (asnum >= interface->num_altsetting) {
-		warn("invalid alternate setting %d for interface %d",
-		    asnum, inum);
-		return -EINVAL;
-	}
-
-	ifp = &interface->altsetting[asnum];
-	if (ifp->desc.bLength) {
-		warn("duplicate descriptor for interface %d altsetting %d",
-		    inum, asnum);
-		return -EINVAL;
-	}
-	memcpy(&ifp->desc, buffer, USB_DT_INTERFACE_SIZE);
-
 	buffer += d->bLength;
 	size -= d->bLength;
 
-	/* Skip over any Class Specific or Vendor Specific descriptors */
-	begin = buffer;
-	numskipped = 0;
-	while (size >= sizeof(struct usb_descriptor_header)) {
-		header = (struct usb_descriptor_header *)buffer;
+	if (d->bLength < USB_DT_INTERFACE_SIZE)
+		goto skip_to_next_interface_descriptor;
 
-		/* If we find another "proper" descriptor then we're done  */
-		if ((header->bDescriptorType == USB_DT_INTERFACE) ||
-		    (header->bDescriptorType == USB_DT_ENDPOINT))
+	/* Which interface entry is this? */
+	intfc = NULL;
+	inum = d->bInterfaceNumber;
+	for (i = 0; i < config->desc.bNumInterfaces; ++i) {
+		if (inums[i] == inum) {
+			intfc = config->intf_cache[i];
 			break;
-
-		dbg("skipping descriptor 0x%X", header->bDescriptorType);
-		numskipped++;
-
-		buffer += header->bLength;
-		size -= header->bLength;
-	}
-	if (numskipped) {
-		dbg("skipped %d class/vendor specific interface descriptors", numskipped);
-		ifp->extra = begin;
-		ifp->extralen = buffer - begin;
-	}
-
-	if (ifp->desc.bNumEndpoints > USB_MAXENDPOINTS) {
-		warn("too many endpoints for interface %d altsetting %d",
-		    inum, asnum);
-		return -EINVAL;
-	}
-
-	len = ifp->desc.bNumEndpoints * sizeof(struct usb_host_endpoint);
-	ifp->endpoint = kmalloc(len, GFP_KERNEL);
-	if (!ifp->endpoint) {
-		err("out of memory");
-		return -ENOMEM;
-	}
-	memset(ifp->endpoint, 0, len);
-
-	for (i = 0; i < ifp->desc.bNumEndpoints; i++) {
-		if (size < USB_DT_ENDPOINT_SIZE) {
-			warn("ran out of descriptors while parsing endpoints");
-			return -EINVAL;
 		}
+	}
+	if (!intfc || intfc->num_altsetting >= nalts[i])
+		goto skip_to_next_interface_descriptor;
 
-		retval = usb_parse_endpoint(ifp->endpoint + i, buffer, size);
+	/* Check for duplicate altsetting entries */
+	asnum = d->bAlternateSetting;
+	for ((i = 0, alt = &intfc->altsetting[0]);
+	      i < intfc->num_altsetting;
+	     (++i, ++alt)) {
+		if (alt->desc.bAlternateSetting == asnum) {
+			dev_warn(ddev, "Duplicate descriptor for config %d "
+			    "interface %d altsetting %d, skipping\n",
+			    cfgno, inum, asnum);
+			goto skip_to_next_interface_descriptor;
+		}
+	}
+
+	++intfc->num_altsetting;
+	memcpy(&alt->desc, d, USB_DT_INTERFACE_SIZE);
+
+	/* Skip over any Class Specific or Vendor Specific descriptors;
+	 * find the first endpoint or interface descriptor */
+	alt->extra = buffer;
+	i = find_next_descriptor(buffer, size, USB_DT_ENDPOINT,
+	    USB_DT_INTERFACE, &n);
+	alt->extralen = i;
+	if (n > 0)
+		dev_dbg(ddev, "skipped %d descriptor%s after %s\n",
+		    n, plural(n), "interface");
+	buffer += i;
+	size -= i;
+
+	/* Allocate space for the right(?) number of endpoints */
+	num_ep = num_ep_orig = alt->desc.bNumEndpoints;
+	alt->desc.bNumEndpoints = 0;		/* Use as a counter */
+	if (num_ep > USB_MAXENDPOINTS) {
+		dev_warn(ddev, "too many endpoints for config %d interface %d "
+		    "altsetting %d: %d, using maximum allowed: %d\n",
+		    cfgno, inum, asnum, num_ep, USB_MAXENDPOINTS);
+		num_ep = USB_MAXENDPOINTS;
+	}
+
+	if (num_ep > 0) {
+		/* Can't allocate 0 bytes */
+		len = sizeof(struct usb_host_endpoint) * num_ep;
+		alt->endpoint = kzalloc(len, GFP_KERNEL);
+		if (!alt->endpoint)
+			return -ENOMEM;
+	}
+
+	/* Parse all the endpoint descriptors */
+	n = 0;
+	while (size > 0) {
+		if (((struct usb_descriptor_header *) buffer)->bDescriptorType
+		     == USB_DT_INTERFACE)
+			break;
+		retval = usb_parse_endpoint(ddev, cfgno, inum, asnum, alt,
+		    num_ep, buffer, size);
 		if (retval < 0)
 			return retval;
+		++n;
 
 		buffer += retval;
 		size -= retval;
 	}
 
+	if (n != num_ep_orig)
+		dev_warn(ddev, "config %d interface %d altsetting %d has %d "
+		    "endpoint descriptor%s, different from the interface "
+		    "descriptor's value: %d\n",
+		    cfgno, inum, asnum, n, plural(n), num_ep_orig);
 	return buffer - buffer0;
+
+skip_to_next_interface_descriptor:
+	i = find_next_descriptor(buffer, size, USB_DT_INTERFACE,
+	    USB_DT_INTERFACE, NULL);
+	return buffer - buffer0 + i;
 }
 
-int usb_parse_configuration(struct usb_host_config *config, char *buffer, int size)
+static int usb_parse_configuration(struct usb_device *dev, int cfgidx,
+    struct usb_host_config *config, unsigned char *buffer, int size)
 {
+	struct device *ddev = &dev->dev;
+	unsigned char *buffer0 = buffer;
+	int cfgno;
 	int nintf, nintf_orig;
-	int i, j;
-	struct usb_interface *interface;
-	char *buffer2;
+	int i, j, n;
+	struct usb_interface_cache *intfc;
+	unsigned char *buffer2;
 	int size2;
 	struct usb_descriptor_header *header;
-	int numskipped, len;
-	char *begin;
-	int retval;
+	int len, retval;
+	u8 inums[USB_MAXINTERFACES], nalts[USB_MAXINTERFACES];
+	unsigned iad_num = 0;
 
 	memcpy(&config->desc, buffer, USB_DT_CONFIG_SIZE);
 	if (config->desc.bDescriptorType != USB_DT_CONFIG ||
 	    config->desc.bLength < USB_DT_CONFIG_SIZE) {
-		warn("invalid configuration descriptor");
+		dev_err(ddev, "invalid descriptor for config index %d: "
+		    "type = 0x%X, length = %d\n", cfgidx,
+		    config->desc.bDescriptorType, config->desc.bLength);
 		return -EINVAL;
 	}
-	config->desc.wTotalLength = size;
-
-	nintf = nintf_orig = config->desc.bNumInterfaces;
-	if (nintf > USB_MAXINTERFACES) {
-		warn("too many interfaces (%d max %d)",
-		    nintf, USB_MAXINTERFACES);
-		config->desc.bNumInterfaces = nintf = USB_MAXINTERFACES;
-	}
-
-	for (i = 0; i < nintf; ++i) {
-		interface = config->interface[i] =
-		    kmalloc(sizeof(struct usb_interface), GFP_KERNEL);
-		dbg("kmalloc IF %p, numif %i", interface, i);
-		if (!interface) {
-			err("out of memory");
-			return -ENOMEM;
-		}
-		memset(interface, 0, sizeof(struct usb_interface));
-		interface->dev.release = usb_release_intf;
-		device_initialize(&interface->dev);
-	}
-
-	/* Go through the descriptors, checking their length and counting the
-	 * number of altsettings for each interface */
-	buffer2 = buffer;
-	size2 = size;
-	j = 0;
-	while (size2 >= sizeof(struct usb_descriptor_header)) {
-		header = (struct usb_descriptor_header *) buffer2;
-		if ((header->bLength > size2) || (header->bLength < 2)) {
-			warn("invalid descriptor of length %d", header->bLength);
-			return -EINVAL;
-		}
-
-		if (header->bDescriptorType == USB_DT_INTERFACE) {
-			struct usb_interface_descriptor *d;
-
-			if (header->bLength < USB_DT_INTERFACE_SIZE) {
-				warn("invalid interface descriptor");
-				return -EINVAL;
-			}
-			d = (struct usb_interface_descriptor *) header;
-			i = d->bInterfaceNumber;
-			if (i >= nintf_orig) {
-				warn("invalid interface number (%d/%d)",
-				    i, nintf_orig);
-				return -EINVAL;
-			}
-			if (i < nintf)
-				++config->interface[i]->num_altsetting;
-
-		} else if ((header->bDescriptorType == USB_DT_DEVICE ||
-		    header->bDescriptorType == USB_DT_CONFIG) && j) {
-			warn("unexpected descriptor type 0x%X", header->bDescriptorType);
-			return -EINVAL;
-		}
-
-		j = 1;
-		buffer2 += header->bLength;
-		size2 -= header->bLength;
-	}
-
-	/* Allocate the altsetting arrays */
-	for (i = 0; i < config->desc.bNumInterfaces; ++i) {
-		interface = config->interface[i];
-		if (interface->num_altsetting > USB_MAXALTSETTING) {
-			warn("too many alternate settings for interface %d (%d max %d)\n",
-			    i, interface->num_altsetting, USB_MAXALTSETTING);
-			return -EINVAL;
-		}
-		if (interface->num_altsetting == 0) {
-			warn("no alternate settings for interface %d", i);
-			return -EINVAL;
-		}
-
-		len = sizeof(*interface->altsetting) * interface->num_altsetting;
-		interface->altsetting = kmalloc(len, GFP_KERNEL);
-		if (!interface->altsetting) {
-			err("couldn't kmalloc interface->altsetting");
-			return -ENOMEM;
-		}
-		memset(interface->altsetting, 0, len);
-	}
+	cfgno = config->desc.bConfigurationValue;
 
 	buffer += config->desc.bLength;
 	size -= config->desc.bLength;
 
-	/* Skip over any Class Specific or Vendor Specific descriptors */
-	begin = buffer;
-	numskipped = 0;
-	while (size >= sizeof(struct usb_descriptor_header)) {
-		header = (struct usb_descriptor_header *)buffer;
+	nintf = nintf_orig = config->desc.bNumInterfaces;
+	if (nintf > USB_MAXINTERFACES) {
+		dev_warn(ddev, "config %d has too many interfaces: %d, "
+		    "using maximum allowed: %d\n",
+		    cfgno, nintf, USB_MAXINTERFACES);
+		nintf = USB_MAXINTERFACES;
+	}
 
-		/* If we find another "proper" descriptor then we're done  */
-		if ((header->bDescriptorType == USB_DT_ENDPOINT) ||
-		    (header->bDescriptorType == USB_DT_INTERFACE))
+	/* Go through the descriptors, checking their length and counting the
+	 * number of altsettings for each interface */
+	n = 0;
+	for ((buffer2 = buffer, size2 = size);
+	      size2 > 0;
+	     (buffer2 += header->bLength, size2 -= header->bLength)) {
+
+		if (size2 < sizeof(struct usb_descriptor_header)) {
+			dev_warn(ddev, "config %d descriptor has %d excess "
+			    "byte%s, ignoring\n",
+			    cfgno, size2, plural(size2));
 			break;
+		}
 
-		dbg("skipping descriptor 0x%X", header->bDescriptorType);
-		numskipped++;
+		header = (struct usb_descriptor_header *) buffer2;
+		if ((header->bLength > size2) || (header->bLength < 2)) {
+			dev_warn(ddev, "config %d has an invalid descriptor "
+			    "of length %d, skipping remainder of the config\n",
+			    cfgno, header->bLength);
+			break;
+		}
 
-		buffer += header->bLength;
-		size -= header->bLength;
+		if (header->bDescriptorType == USB_DT_INTERFACE) {
+			struct usb_interface_descriptor *d;
+			int inum;
+
+			d = (struct usb_interface_descriptor *) header;
+			if (d->bLength < USB_DT_INTERFACE_SIZE) {
+				dev_warn(ddev, "config %d has an invalid "
+				    "interface descriptor of length %d, "
+				    "skipping\n", cfgno, d->bLength);
+				continue;
+			}
+
+			inum = d->bInterfaceNumber;
+
+			if ((dev->quirks & USB_QUIRK_HONOR_BNUMINTERFACES) &&
+			    n >= nintf_orig) {
+				dev_warn(ddev, "config %d has more interface "
+				    "descriptors, than it declares in "
+				    "bNumInterfaces, ignoring interface "
+				    "number: %d\n", cfgno, inum);
+				continue;
+			}
+
+			if (inum >= nintf_orig)
+				dev_warn(ddev, "config %d has an invalid "
+				    "interface number: %d but max is %d\n",
+				    cfgno, inum, nintf_orig - 1);
+
+			/* Have we already encountered this interface?
+			 * Count its altsettings */
+			for (i = 0; i < n; ++i) {
+				if (inums[i] == inum)
+					break;
+			}
+			if (i < n) {
+				if (nalts[i] < 255)
+					++nalts[i];
+			} else if (n < USB_MAXINTERFACES) {
+				inums[n] = inum;
+				nalts[n] = 1;
+				++n;
+			}
+
+		} else if (header->bDescriptorType ==
+				USB_DT_INTERFACE_ASSOCIATION) {
+			if (iad_num == USB_MAXIADS) {
+				dev_warn(ddev, "found more Interface "
+					       "Association Descriptors "
+					       "than allocated for in "
+					       "configuration %d\n", cfgno);
+			} else {
+				config->intf_assoc[iad_num] =
+					(struct usb_interface_assoc_descriptor
+					*)header;
+				iad_num++;
+			}
+
+		} else if (header->bDescriptorType == USB_DT_DEVICE ||
+			    header->bDescriptorType == USB_DT_CONFIG)
+			dev_warn(ddev, "config %d contains an unexpected "
+			    "descriptor of type 0x%X, skipping\n",
+			    cfgno, header->bDescriptorType);
+
+	}	/* for ((buffer2 = buffer, size2 = size); ...) */
+	size = buffer2 - buffer;
+	config->desc.wTotalLength = cpu_to_le16(buffer2 - buffer0);
+
+	if (n != nintf)
+		dev_warn(ddev, "config %d has %d interface%s, different from "
+		    "the descriptor's value: %d\n",
+		    cfgno, n, plural(n), nintf_orig);
+	else if (n == 0)
+		dev_warn(ddev, "config %d has no interfaces?\n", cfgno);
+	config->desc.bNumInterfaces = nintf = n;
+
+	/* Check for missing interface numbers */
+	for (i = 0; i < nintf; ++i) {
+		for (j = 0; j < nintf; ++j) {
+			if (inums[j] == i)
+				break;
+		}
+		if (j >= nintf)
+			dev_warn(ddev, "config %d has no interface number "
+			    "%d\n", cfgno, i);
 	}
-	if (numskipped) {
-		dbg("skipped %d class/vendor specific configuration descriptors", numskipped);
-		config->extra = begin;
-		config->extralen = buffer - begin;
+
+	/* Allocate the usb_interface_caches and altsetting arrays */
+	for (i = 0; i < nintf; ++i) {
+		j = nalts[i];
+		if (j > USB_MAXALTSETTING) {
+			dev_warn(ddev, "too many alternate settings for "
+			    "config %d interface %d: %d, "
+			    "using maximum allowed: %d\n",
+			    cfgno, inums[i], j, USB_MAXALTSETTING);
+			nalts[i] = j = USB_MAXALTSETTING;
+		}
+
+		len = sizeof(*intfc) + sizeof(struct usb_host_interface) * j;
+		config->intf_cache[i] = intfc = kzalloc(len, GFP_KERNEL);
+		if (!intfc)
+			return -ENOMEM;
+		kref_init(&intfc->ref);
 	}
+
+	/* FIXME: parse the BOS descriptor */
+
+	/* Skip over any Class Specific or Vendor Specific descriptors;
+	 * find the first interface descriptor */
+	config->extra = buffer;
+	i = find_next_descriptor(buffer, size, USB_DT_INTERFACE,
+	    USB_DT_INTERFACE, &n);
+	config->extralen = i;
+	if (n > 0)
+		dev_dbg(ddev, "skipped %d descriptor%s after %s\n",
+		    n, plural(n), "configuration");
+	buffer += i;
+	size -= i;
 
 	/* Parse all the interface/altsetting descriptors */
-	while (size >= sizeof(struct usb_descriptor_header)) {
-		retval = usb_parse_interface(config, buffer, size);
+	while (size > 0) {
+		retval = usb_parse_interface(ddev, cfgno, config,
+		    buffer, size, inums, nalts);
 		if (retval < 0)
 			return retval;
 
@@ -339,20 +595,25 @@ int usb_parse_configuration(struct usb_host_config *config, char *buffer, int si
 
 	/* Check for missing altsettings */
 	for (i = 0; i < nintf; ++i) {
-		interface = config->interface[i];
-		for (j = 0; j < interface->num_altsetting; ++j) {
-			if (!interface->altsetting[j].desc.bLength) {
-				warn("missing altsetting %d for interface %d", j, i);
-				return -EINVAL;
+		intfc = config->intf_cache[i];
+		for (j = 0; j < intfc->num_altsetting; ++j) {
+			for (n = 0; n < intfc->num_altsetting; ++n) {
+				if (intfc->altsetting[n].desc.
+				    bAlternateSetting == j)
+					break;
 			}
+			if (n >= intfc->num_altsetting)
+				dev_warn(ddev, "config %d interface %d has no "
+				    "altsetting %d\n", cfgno, inums[i], j);
 		}
 	}
 
-	return size;
+	return 0;
 }
 
-// hub-only!! ... and only exported for reset/reinit path.
-// otherwise used internally on disconnect/destroy path
+/* hub-only!! ... and only exported for reset/reinit path.
+ * otherwise used internally on disconnect/destroy path
+ */
 void usb_destroy_configuration(struct usb_device *dev)
 {
 	int c, i;
@@ -365,122 +626,131 @@ void usb_destroy_configuration(struct usb_device *dev)
 			kfree(dev->rawdescriptors[i]);
 
 		kfree(dev->rawdescriptors);
+		dev->rawdescriptors = NULL;
 	}
 
 	for (c = 0; c < dev->descriptor.bNumConfigurations; c++) {
 		struct usb_host_config *cf = &dev->config[c];
 
+		kfree(cf->string);
 		for (i = 0; i < cf->desc.bNumInterfaces; i++) {
-			struct usb_interface *ifp = cf->interface[i];
-
-			if (ifp)
-				put_device(&ifp->dev);
+			if (cf->intf_cache[i])
+				kref_put(&cf->intf_cache[i]->ref,
+					  usb_release_interface_cache);
 		}
 	}
 	kfree(dev->config);
+	dev->config = NULL;
 }
 
 
-// hub-only!! ... and only in reset path, or usb_new_device()
-// (used by real hubs and virtual root hubs)
+/*
+ * Get the USB config descriptors, cache and parse'em
+ *
+ * hub-only!! ... and only in reset path, or usb_new_device()
+ * (used by real hubs and virtual root hubs)
+ *
+ * NOTE: if this is a WUSB device and is not authorized, we skip the
+ *       whole thing. A non-authorized USB device has no
+ *       configurations.
+ */
 int usb_get_configuration(struct usb_device *dev)
 {
+	struct device *ddev = &dev->dev;
 	int ncfg = dev->descriptor.bNumConfigurations;
-	int result;
+	int result = 0;
 	unsigned int cfgno, length;
-	unsigned char *buffer;
 	unsigned char *bigbuffer;
- 	struct usb_config_descriptor *desc;
+	struct usb_config_descriptor *desc;
 
+	cfgno = 0;
+	if (dev->authorized == 0)	/* Not really an error */
+		goto out_not_authorized;
+	result = -ENOMEM;
 	if (ncfg > USB_MAXCONFIG) {
-		warn("too many configurations (%d max %d)",
-		    ncfg, USB_MAXCONFIG);
+		dev_warn(ddev, "too many configurations: %d, "
+		    "using maximum allowed: %d\n", ncfg, USB_MAXCONFIG);
 		dev->descriptor.bNumConfigurations = ncfg = USB_MAXCONFIG;
 	}
 
 	if (ncfg < 1) {
-		warn("no configurations");
+		dev_err(ddev, "no configurations\n");
 		return -EINVAL;
 	}
 
 	length = ncfg * sizeof(struct usb_host_config);
-	dev->config = kmalloc(length, GFP_KERNEL);
-	if (!dev->config) {
-		err("out of memory");
-		return -ENOMEM;
-	}
-	memset(dev->config, 0, length);
+	dev->config = kzalloc(length, GFP_KERNEL);
+	if (!dev->config)
+		goto err2;
 
 	length = ncfg * sizeof(char *);
-	dev->rawdescriptors = kmalloc(length, GFP_KERNEL);
-	if (!dev->rawdescriptors) {
-		err("out of memory");
-		return -ENOMEM;
-	}
-	memset(dev->rawdescriptors, 0, length);
+	dev->rawdescriptors = kzalloc(length, GFP_KERNEL);
+	if (!dev->rawdescriptors)
+		goto err2;
 
-	buffer = kmalloc(8, GFP_KERNEL);
-	if (!buffer) {
-		err("unable to allocate memory for configuration descriptors");
-		return -ENOMEM;
-	}
-	desc = (struct usb_config_descriptor *)buffer;
+	desc = kmalloc(USB_DT_CONFIG_SIZE, GFP_KERNEL);
+	if (!desc)
+		goto err2;
 
-	for (cfgno = 0; cfgno < ncfg; cfgno++) {
-		/* We grab the first 8 bytes so we know how long the whole */
-		/*  configuration is */
-		result = usb_get_descriptor(dev, USB_DT_CONFIG, cfgno, buffer, 8);
-		if (result < 8) {
-			if (result < 0)
-				err("unable to get descriptor");
-			else {
-				warn("config descriptor too short (expected %i, got %i)", 8, result);
-				result = -EINVAL;
-			}
+	result = 0;
+	for (; cfgno < ncfg; cfgno++) {
+		/* We grab just the first descriptor so we know how long
+		 * the whole configuration is */
+		result = usb_get_descriptor(dev, USB_DT_CONFIG, cfgno,
+		    desc, USB_DT_CONFIG_SIZE);
+		if (result < 0) {
+			dev_err(ddev, "unable to read config index %d "
+			    "descriptor/%s: %d\n", cfgno, "start", result);
+			dev_err(ddev, "chopping to %d config(s)\n", cfgno);
+			dev->descriptor.bNumConfigurations = cfgno;
+			break;
+		} else if (result < 4) {
+			dev_err(ddev, "config index %d descriptor too short "
+			    "(expected %i, got %i)\n", cfgno,
+			    USB_DT_CONFIG_SIZE, result);
+			result = -EINVAL;
 			goto err;
 		}
+		length = max((int) le16_to_cpu(desc->wTotalLength),
+		    USB_DT_CONFIG_SIZE);
 
-  	  	/* Get the full buffer */
-		length = max((int) le16_to_cpu(desc->wTotalLength), USB_DT_CONFIG_SIZE);
-
+		/* Now that we know the length, get the whole thing */
 		bigbuffer = kmalloc(length, GFP_KERNEL);
 		if (!bigbuffer) {
-			err("unable to allocate memory for configuration descriptors");
 			result = -ENOMEM;
 			goto err;
 		}
-
-		/* Now that we know the length, get the whole thing */
-		result = usb_get_descriptor(dev, USB_DT_CONFIG, cfgno, bigbuffer, length);
+		result = usb_get_descriptor(dev, USB_DT_CONFIG, cfgno,
+		    bigbuffer, length);
 		if (result < 0) {
-			err("couldn't get all of config descriptors");
+			dev_err(ddev, "unable to read config index %d "
+			    "descriptor/%s\n", cfgno, "all");
 			kfree(bigbuffer);
 			goto err;
 		}
-
 		if (result < length) {
-			err("config descriptor too short (expected %i, got %i)", length, result);
-			result = -EINVAL;
-			kfree(bigbuffer);
-			goto err;
+			dev_warn(ddev, "config index %d descriptor too short "
+			    "(expected %i, got %i)\n", cfgno, length, result);
+			length = result;
 		}
 
 		dev->rawdescriptors[cfgno] = bigbuffer;
 
-		result = usb_parse_configuration(&dev->config[cfgno], bigbuffer, length);
-		if (result > 0)
-			dbg("descriptor data left");
-		else if (result < 0) {
+		result = usb_parse_configuration(dev, cfgno,
+		    &dev->config[cfgno], bigbuffer, length);
+		if (result < 0) {
 			++cfgno;
 			goto err;
 		}
 	}
+	result = 0;
 
-	kfree(buffer);
-	return 0;
 err:
-	kfree(buffer);
+	kfree(desc);
+out_not_authorized:
 	dev->descriptor.bNumConfigurations = cfgno;
+err2:
+	if (result == -ENOMEM)
+		dev_err(ddev, "out of memory\n");
 	return result;
 }
-

@@ -1,7 +1,7 @@
 /*
   BNEP protocol definition for Linux Bluetooth stack (BlueZ).
   Copyright (C) 2002 Maxim Krasnyansky <maxk@qualcomm.com>
-	
+
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2, as
   published by the Free Software Foundation.
@@ -15,10 +15,6 @@
   along with this program; if not, write to the Free Software
   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
 */
-
-/*
- * $Id: bnep.h,v 1.5 2002/08/04 21:23:58 maxk Exp $
- */
 
 #ifndef _BNEP_H
 #define _BNEP_H
@@ -60,7 +56,7 @@
 // Extension types
 #define BNEP_EXT_CONTROL           0x00
 
-// Response messages 
+// Response messages
 #define BNEP_SUCCESS               0x00
 
 #define BNEP_CONN_INVALID_DST      0x01
@@ -81,7 +77,7 @@
 #define BNEP_CONNECT_TO  15
 #define BNEP_FILTER_TO   15
 
-// Headers 
+// Headers
 #define BNEP_TYPE_MASK	 0x7f
 #define BNEP_EXT_HEADER	 0x80
 
@@ -90,26 +86,26 @@ struct bnep_setup_conn_req {
 	__u8  ctrl;
 	__u8  uuid_size;
 	__u8  service[0];
-} __attribute__((packed));
+} __packed;
 
 struct bnep_set_filter_req {
 	__u8  type;
 	__u8  ctrl;
-	__u16 len;
+	__be16 len;
 	__u8  list[0];
-} __attribute__((packed));
+} __packed;
 
 struct bnep_control_rsp {
 	__u8  type;
 	__u8  ctrl;
-	__u16 resp;
-} __attribute__((packed));
+	__be16 resp;
+} __packed;
 
 struct bnep_ext_hdr {
 	__u8  type;
 	__u8  len;
 	__u8  data[0];
-} __attribute__((packed));
+} __packed;
 
 /* BNEP ioctl defines */
 #define BNEPCONNADD	_IOW('B', 200, int)
@@ -132,14 +128,14 @@ struct bnep_conndel_req {
 struct bnep_conninfo {
 	__u32 flags;
 	__u16 role;
-	__u16 state;	
+	__u16 state;
 	__u8  dst[ETH_ALEN];
 	char  device[16];
 };
 
 struct bnep_connlist_req {
 	__u32  cnum;
-	struct bnep_conninfo *ci;
+	struct bnep_conninfo __user *ci;
 };
 
 struct bnep_proto_filter {
@@ -155,30 +151,29 @@ int bnep_get_conninfo(struct bnep_conninfo *ci);
 // BNEP sessions
 struct bnep_session {
 	struct list_head list;
-	
+
 	unsigned int  role;
-        unsigned long state;
-        unsigned long flags;
+	unsigned long state;
+	unsigned long flags;
 	atomic_t      killed;
 
 	struct ethhdr eh;
 	struct msghdr msg;
 
 	struct bnep_proto_filter proto_filter[BNEP_MAX_PROTO_FILTERS];
-	u64    mc_filter;
-	
+	unsigned long long mc_filter;
+
 	struct socket    *sock;
 	struct net_device *dev;
-	struct net_device_stats stats;
 };
 
 void bnep_net_setup(struct net_device *dev);
 int bnep_sock_init(void);
-int bnep_sock_cleanup(void);
+void bnep_sock_cleanup(void);
 
 static inline int bnep_mc_hash(__u8 *addr)
 {
-        return (crc32_be(~0, addr, ETH_ALEN) >> 26);
+	return (crc32_be(~0, addr, ETH_ALEN) >> 26);
 }
 
 #endif

@@ -3,4 +3,7 @@
 # Licensed under the GPL
 #
 
-core-y		+= $(ARCH_DIR)/os-$(OS)/
+# To get a definition of F_SETSIG
+USER_CFLAGS += -D_GNU_SOURCE -D_LARGEFILE64_SOURCE
+KBUILD_CFLAGS += -D_LARGEFILE64_SOURCE
+DEV_NULL_PATH = \"/dev/null\"

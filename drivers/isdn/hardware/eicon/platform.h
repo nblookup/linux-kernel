@@ -1,4 +1,4 @@
-/* $Id: platform.h,v 1.32 2003/09/18 06:59:59 schindler Exp $
+/* $Id: platform.h,v 1.37.4.6 2005/01/31 12:22:20 armin Exp $
  *
  * platform.h
  * 
@@ -18,7 +18,6 @@
 #define DIVA_BUILD "local"
 #endif
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -27,8 +26,8 @@
 #include <linux/vmalloc.h>
 #include <linux/proc_fs.h>
 #include <linux/interrupt.h>
-#include <linux/smp_lock.h>
 #include <linux/delay.h>
+#include <linux/list.h>
 #include <asm/types.h>
 #include <asm/io.h>
 
@@ -71,24 +70,8 @@
 #define	qword  u64
 #endif
 
-#ifndef	TRUE
-#define	TRUE	1
-#endif
-
-#ifndef	FALSE
-#define	FALSE	0
-#endif
-
 #ifndef	NULL
 #define	NULL	((void *) 0)
-#endif
-
-#ifndef	MIN
-#define MIN(a,b)	((a)>(b) ? (b) : (a))
-#endif
-
-#ifndef	MAX
-#define MAX(a,b)	((a)>(b) ? (a) : (b))
 #endif
 
 #ifndef	far
@@ -117,6 +100,8 @@
 #define MEM_TYPE_CONFIG		7
 #define MEM_TYPE_CONTROL	8
 
+#define MAX_MEM_TYPE		10
+
 #define DIVA_OS_MEM_ATTACH_RAM(a)	((a)->ram)
 #define DIVA_OS_MEM_ATTACH_PORT(a)	((a)->port)
 #define DIVA_OS_MEM_ATTACH_PROM(a)	((a)->prom)
@@ -136,10 +121,6 @@
 #define DIVA_OS_MEM_DETACH_ADDRESS(a, x)	do { } while(0)
 #define DIVA_OS_MEM_DETACH_CONFIG(a, x)	do { } while(0)
 #define DIVA_OS_MEM_DETACH_CONTROL(a, x)	do { } while(0)
-
-#if !defined(DIM)
-#define DIM(array)  (sizeof (array)/sizeof ((array)[0]))
-#endif
 
 #define DIVA_INVALID_FILE_HANDLE  ((dword)(-1))
 
@@ -192,9 +173,7 @@ static __inline__ void* diva_os_malloc (unsigned long flags, unsigned long size)
 }
 static __inline__ void  diva_os_free   (unsigned long flags, void* ptr)
 {
-	if (ptr) {
-		vfree(ptr);
-	}
+	vfree(ptr);
 }
 
 /*
@@ -211,10 +190,7 @@ void diva_os_free_message_buffer(diva_os_message_buffer_s *dmb);
 */
 static __inline__ void diva_os_sleep(dword mSec)
 {
-	unsigned long timeout = HZ * mSec / 1000 + 1;
-
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(timeout);
+	msleep(mSec);
 }
 static __inline__ void diva_os_wait(dword mSec)
 {
@@ -235,12 +211,12 @@ int diva_os_register_io_port (void *adapter, int register, unsigned long port,
 /*
 **  I/O port access abstraction
 */
-byte inpp (void*);
-word inppw (void*);
-void inppw_buffer (void*, void*, int);
-void outppw (void*, word);
-void outppw_buffer (void* , void*, int);
-void outpp (void*, word);
+byte inpp (void __iomem *);
+word inppw (void __iomem *);
+void inppw_buffer (void __iomem *, void*, int);
+void outppw (void __iomem *, word);
+void outppw_buffer (void __iomem * , void*, int);
+void outpp (void __iomem *, word);
 
 /*
 **  IRQ 
@@ -268,20 +244,6 @@ static __inline__ void diva_os_enter_spin_lock (diva_os_spin_lock_t* a, \
 static __inline__ void diva_os_leave_spin_lock (diva_os_spin_lock_t* a, \
                               diva_os_spin_lock_magic_t* old_irql, \
                               void* dbg) { spin_unlock_bh(a); }
-
-static __inline__ void diva_os_enter_spin_lock_hard (diva_os_spin_lock_t* a, \
-                                   diva_os_spin_lock_magic_t* old_irql, \
-                                   void* dbg) { \
-  unsigned long flags; \
-  spin_lock_irqsave (a, flags); \
-  *old_irql = (diva_os_spin_lock_magic_t)flags; \
-}
-static __inline__ void diva_os_leave_spin_lock_hard (diva_os_spin_lock_t* a, \
-                                   diva_os_spin_lock_magic_t* old_irql, \
-                                   void* dbg) { \
-  unsigned long flags = (unsigned long)*old_irql; \
-	spin_unlock_irqrestore (a, flags); \
-}
 
 #define diva_os_destroy_spin_lock(a,b) do { } while(0)
 
@@ -330,7 +292,6 @@ diva_os_atomic_decrement(diva_os_atomic_t* pv)
 */
 #define NO_CORNETN
 #define IMPLEMENT_DTMF 1
-#define IMPLEMENT_LINE_INTERCONNECT2 1
 #define IMPLEMENT_ECHO_CANCELLER 1
 #define IMPLEMENT_RTP 1
 #define IMPLEMENT_T38 1
@@ -344,17 +305,44 @@ diva_os_atomic_decrement(diva_os_atomic_t* pv)
 #define IMPLEMENT_FAX_NONSTANDARD 1
 #define VSWITCH_SUPPORT 1
 
-#define IMPLEMENT_LINE_INTERCONNECT  0
 #define IMPLEMENT_MARKED_OK_AFTER_FC 1
 
 #define DIVA_IDI_RX_DMA 1
 
+/*
+** endian macros
+**
+** If only...  In some cases we did use them for endianness conversion;
+** unfortunately, other uses were real iomem accesses.
+*/
+#define READ_BYTE(addr)   readb(addr)
 #define READ_WORD(addr)   readw(addr)
 #define READ_DWORD(addr)  readl(addr)
 
+#define WRITE_BYTE(addr,v)  writeb(v,addr)
 #define WRITE_WORD(addr,v)  writew(v,addr)
 #define WRITE_DWORD(addr,v) writel(v,addr)
 
+static inline __u16 GET_WORD(void *addr)
+{
+	return le16_to_cpu(*(__le16 *)addr);
+}
+static inline __u32 GET_DWORD(void *addr)
+{
+	return le32_to_cpu(*(__le32 *)addr);
+}
+static inline void PUT_WORD(void *addr, __u16 v)
+{
+	*(__le16 *)addr = cpu_to_le16(v);
+}
+static inline void PUT_DWORD(void *addr, __u32 v)
+{
+	*(__le32 *)addr = cpu_to_le32(v);
+}
+
+/*
+** 32/64 bit macors
+*/
 #ifdef BITS_PER_LONG
  #if BITS_PER_LONG > 32 
   #define PLATFORM_GT_32BIT
@@ -362,8 +350,23 @@ diva_os_atomic_decrement(diva_os_atomic_t* pv)
  #endif
 #endif
 
+/*
+** undef os definitions of macros we use
+*/
 #undef ID_MASK
 #undef N_DATA
 #undef ADDR
+
+/*
+** dump file
+*/
+#define diva_os_dump_file_t char
+#define diva_os_board_trace_t char
+#define diva_os_dump_file(__x__) do { } while(0)
+
+/*
+** size of internal arrays
+*/
+#define MAX_DESCRIPTORS 64
 
 #endif	/* __PLATFORM_H__ */

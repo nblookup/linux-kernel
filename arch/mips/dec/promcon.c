@@ -6,7 +6,6 @@
  */
 
 #include <linux/tty.h>
-#include <linux/major.h>
 #include <linux/ptrace.h>
 #include <linux/init.h>
 #include <linux/console.h>
@@ -34,8 +33,7 @@ static int __init prom_console_setup(struct console *co, char *options)
 	return 0;
 }
 
-static struct console sercons =
-{
+static struct console sercons = {
 	.name	= "ttyS",
 	.write	= prom_console_write,
 	.setup	= prom_console_setup,

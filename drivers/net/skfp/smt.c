@@ -18,6 +18,8 @@
 #include "h/fddi.h"
 #include "h/smc.h"
 #include "h/smt_p.h"
+#include <linux/bitrev.h>
+#include <linux/kernel.h>
 
 #define KERNEL
 #include "h/smtstate.h"
@@ -25,8 +27,6 @@
 #ifndef	lint
 static const char ID_sccs[] = "@(#)smt.c	2.43 98/11/23 (C) SK " ;
 #endif
-
-extern const u_char canonical[256] ;
 
 /*
  * FC in SMbuf
@@ -55,78 +55,95 @@ static const struct fddi_addr SMT_Unknown = {
 } ;
 
 /*
- * external variables
- */
-extern const struct fddi_addr fddi_broadcast ;
-
-/*
- * external functions
- */
-int pcm_status_twisted() ;
-void pcm_status_state() ;
-int pcm_status_type() ;
-
-extern SMbuf *smt_get_mbuf() ;
-
-#define EXPORT_PMF
-/*
  * function prototypes
  */
-u_long smt_get_tid() ;
-EXPORT_PMF SMbuf *smt_build_frame() ;
-EXPORT_PMF void *sm_to_para() ;
 #ifdef	LITTLE_ENDIAN
-static int smt_swap_short() ;
+static int smt_swap_short(u_short s);
 #endif
-static int mac_index() ;
-static int phy_index() ;
-static int mac_con_resource_index() ;
-static int phy_con_resource_index() ;
-EXPORT_PMF void smt_send_frame() ;
-EXPORT_PMF void smt_set_timestamp() ;
-static void smt_send_rdf() ;
-static void smt_send_nif() ;
-static void smt_send_ecf() ;
-static void smt_echo_test() ;
-static void smt_send_sif_config() ;
-static void smt_send_sif_operation() ;
-EXPORT_PMF void smt_swap_para() ;
+static int mac_index(struct s_smc *smc, int mac);
+static int phy_index(struct s_smc *smc, int phy);
+static int mac_con_resource_index(struct s_smc *smc, int mac);
+static int phy_con_resource_index(struct s_smc *smc, int phy);
+static void smt_send_rdf(struct s_smc *smc, SMbuf *rej, int fc, int reason,
+			 int local);
+static void smt_send_nif(struct s_smc *smc, const struct fddi_addr *dest, 
+			 int fc, u_long tid, int type, int local);
+static void smt_send_ecf(struct s_smc *smc, struct fddi_addr *dest, int fc,
+                         u_long tid, int type, int len);
+static void smt_echo_test(struct s_smc *smc, int dna);
+static void smt_send_sif_config(struct s_smc *smc, struct fddi_addr *dest,
+				u_long tid, int local);
+static void smt_send_sif_operation(struct s_smc *smc, struct fddi_addr *dest,
+				   u_long tid, int local);
 #ifdef LITTLE_ENDIAN
-static void smt_string_swap() ;
+static void smt_string_swap(char *data, const char *format, int len);
 #endif
-static void smt_add_frame_len() ;
-static void smt_fill_una() ;
-static void smt_fill_sde() ;
-static void smt_fill_state() ;
-static void smt_fill_timestamp() ;
-static void smt_fill_policy() ;
-static void smt_fill_latency() ;
-static void smt_fill_neighbor() ;
-static int  smt_fill_path() ;
-static void smt_fill_mac_status() ;
-static void smt_fill_lem() ;
-static void smt_fill_version() ;
-static void smt_fill_fsc() ;
-static void smt_fill_mac_counter() ;
-static void smt_fill_mac_fnc() ;
-static void smt_fill_manufacturer() ;
-static void smt_fill_user() ;
-static void smt_fill_setcount() ;
-static void smt_fill_echo() ;
-int smt_check_para() ;
+static void smt_add_frame_len(SMbuf *mb, int len);
+static void smt_fill_una(struct s_smc *smc, struct smt_p_una *una);
+static void smt_fill_sde(struct s_smc *smc, struct smt_p_sde *sde);
+static void smt_fill_state(struct s_smc *smc, struct smt_p_state *state);
+static void smt_fill_timestamp(struct s_smc *smc, struct smt_p_timestamp *ts);
+static void smt_fill_policy(struct s_smc *smc, struct smt_p_policy *policy);
+static void smt_fill_latency(struct s_smc *smc, struct smt_p_latency *latency);
+static void smt_fill_neighbor(struct s_smc *smc, struct smt_p_neighbor *neighbor);
+static int smt_fill_path(struct s_smc *smc, struct smt_p_path *path);
+static void smt_fill_mac_status(struct s_smc *smc, struct smt_p_mac_status *st);
+static void smt_fill_lem(struct s_smc *smc, struct smt_p_lem *lem, int phy);
+static void smt_fill_version(struct s_smc *smc, struct smt_p_version *vers);
+static void smt_fill_fsc(struct s_smc *smc, struct smt_p_fsc *fsc);
+static void smt_fill_mac_counter(struct s_smc *smc, struct smt_p_mac_counter *mc);
+static void smt_fill_mac_fnc(struct s_smc *smc, struct smt_p_mac_fnc *fnc);
+static void smt_fill_manufacturer(struct s_smc *smc, 
+				  struct smp_p_manufacturer *man);
+static void smt_fill_user(struct s_smc *smc, struct smp_p_user *user);
+static void smt_fill_setcount(struct s_smc *smc, struct smt_p_setcount *setcount);
+static void smt_fill_echo(struct s_smc *smc, struct smt_p_echo *echo, u_long seed,
+			  int len);
 
-void smt_clear_una_dna() ;
-static void smt_clear_old_una_dna() ;
+static void smt_clear_una_dna(struct s_smc *smc);
+static void smt_clear_old_una_dna(struct s_smc *smc);
 #ifdef	CONCENTRATOR
-static int entity_to_index() ;
+static int entity_to_index(void);
 #endif
-static void update_dac() ;
-static int div_ratio() ;
+static void update_dac(struct s_smc *smc, int report);
+static int div_ratio(u_long upper, u_long lower);
 #ifdef  USE_CAN_ADDR
-void	hwm_conv_can() ;
+static void	hwm_conv_can(struct s_smc *smc, char *data, int len);
 #else
 #define		hwm_conv_can(smc,data,len)
 #endif
+
+
+static inline int is_my_addr(const struct s_smc *smc, 
+			     const struct fddi_addr *addr)
+{
+	return(*(short *)(&addr->a[0]) ==
+		*(short *)(&smc->mib.m[MAC0].fddiMACSMTAddress.a[0])
+	  && *(short *)(&addr->a[2]) ==
+		*(short *)(&smc->mib.m[MAC0].fddiMACSMTAddress.a[2])
+	  && *(short *)(&addr->a[4]) ==
+		*(short *)(&smc->mib.m[MAC0].fddiMACSMTAddress.a[4])) ;
+}
+
+static inline int is_broadcast(const struct fddi_addr *addr)
+{
+	return *(u_short *)(&addr->a[0]) == 0xffff &&
+	       *(u_short *)(&addr->a[2]) == 0xffff &&
+	       *(u_short *)(&addr->a[4]) == 0xffff;
+}
+
+static inline int is_individual(const struct fddi_addr *addr)
+{
+	return !(addr->a[0] & GROUP_ADDR);
+}
+
+static inline int is_equal(const struct fddi_addr *addr1, 
+			   const struct fddi_addr *addr2)
+{
+	return *(u_short *)(&addr1->a[0]) == *(u_short *)(&addr2->a[0]) &&
+	       *(u_short *)(&addr1->a[2]) == *(u_short *)(&addr2->a[2]) &&
+	       *(u_short *)(&addr1->a[4]) == *(u_short *)(&addr2->a[4]);
+}
 
 /*
  * list of mandatory paras in frames
@@ -136,8 +153,7 @@ static const u_short plist_nif[] = { SMT_P_UNA,SMT_P_SDE,SMT_P_STATE,0 } ;
 /*
  * init SMT agent
  */
-void smt_agent_init(smc)
-struct s_smc *smc ;
+void smt_agent_init(struct s_smc *smc)
 {
 	int		i ;
 
@@ -154,7 +170,7 @@ struct s_smc *smc ;
 	driver_get_bia(smc,&smc->mib.fddiSMTStationId.sid_node) ;
 	for (i = 0 ; i < 6 ; i ++) {
 		smc->mib.fddiSMTStationId.sid_node.a[i] =
-			canonical[smc->mib.fddiSMTStationId.sid_node.a[i]] ;
+			bitrev8(smc->mib.fddiSMTStationId.sid_node.a[i]);
 	}
 	smc->mib.fddiSMTManufacturerData[0] =
 		smc->mib.fddiSMTStationId.sid_node.a[0] ;
@@ -183,36 +199,15 @@ struct s_smc *smc ;
  *	check tvu & tvd
  * end
  */
-void smt_agent_task(smc)
-struct s_smc *smc ;
+void smt_agent_task(struct s_smc *smc)
 {
 	smt_timer_start(smc,&smc->sm.smt_timer, (u_long)1000000L,
 		EV_TOKEN(EVENT_SMT,SM_TIMER)) ;
 	DB_SMT("SMT agent task\n",0,0) ;
 }
 
-void smt_please_reconnect(smc,reconn_time)
-struct s_smc	*smc ;		/* Pointer to SMT context */
-int		reconn_time ;	/* Wait for reconnect time in seconds */
-{
-	/*
-	 * The please reconnect variable is used as a timer.
-	 * It is decremented each time smt_event is called.
-	 * This happens every second or when smt_force_irq is called.
-	 * Note: smt_force_irq () is called on some packet receives and
-	 *       when a multicast address is changed. Since nothing
-	 *       is received during the disconnect and the multicast
-	 *       address changes can be viewed as not very often and
-	 *       the timer runs out close to its given value
-	 *       (reconn_time).
-	 */
-	smc->sm.please_reconnect = reconn_time ;
-}
-
 #ifndef SMT_REAL_TOKEN_CT
-void smt_emulate_token_ct(smc, mac_index)
-struct s_smc	*smc;
-int		mac_index;
+void smt_emulate_token_ct(struct s_smc *smc, int mac_index)
 {
 	u_long	count;
 	u_long	time;
@@ -224,7 +219,7 @@ int		mac_index;
 
 	/*
 	 * Only when ring is up we will have a token count. The
-	 * flag is unfortunatly a single instance value. This
+	 * flag is unfortunately a single instance value. This
 	 * doesn't matter now, because we currently have only
 	 * one MAC instance.
 	 */
@@ -239,9 +234,7 @@ int		mac_index;
 #endif
 
 /*ARGSUSED1*/
-void smt_event(smc,event)
-struct s_smc *smc ;
-int event ;
+void smt_event(struct s_smc *smc, int event)
 {
 	u_long		time ;
 #ifndef SMT_REAL_TOKEN_CT
@@ -393,7 +386,7 @@ int event ;
 		 */
 		if (!smc->sm.pend[SMT_TID_NIF])
 			smc->sm.pend[SMT_TID_NIF] = smt_get_tid(smc) ;
-		smt_send_nif(smc,&fddi_broadcast,FC_SMT_NSA,
+		smt_send_nif(smc,&fddi_broadcast, FC_SMT_NSA,
 			smc->sm.pend[SMT_TID_NIF], SMT_REQUEST,0) ;
 		smc->sm.smt_last_notify = time ;
 	}
@@ -457,17 +450,15 @@ int event ;
 		EV_TOKEN(EVENT_SMT,SM_TIMER)) ;
 }
 
-static int div_ratio(upper,lower)
-u_long upper ;
-u_long lower ;
+static int div_ratio(u_long upper, u_long lower)
 {
 	if ((upper<<16L) < upper)
 		upper = 0xffff0000L ;
 	else
 		upper <<= 16L ;
 	if (!lower)
-		return(0) ;
-	return((int)(upper/lower)) ;
+		return 0;
+	return (int)(upper/lower) ;
 }
 
 #ifndef	SLIM_SMT
@@ -475,10 +466,8 @@ u_long lower ;
 /*
  * receive packet handler
  */
-void smt_received_pack(smc,mb,fs)
-struct s_smc *smc ;
-SMbuf *mb ;
-int fs ;			/* frame status */
+void smt_received_pack(struct s_smc *smc, SMbuf *mb, int fs)
+/* int fs;  frame status */
 {
 	struct smt_header	*sm ;
 	int			local ;
@@ -585,7 +574,7 @@ int fs ;			/* frame status */
 		if (smt_check_para(smc,sm,plist_nif)) {
 			DB_SMT("SMT: NIF with para problem, ignoring\n",0,0) ;
 			break ;
-		} ;
+		}
 		switch (sm->smt_type) {
 		case SMT_ANNOUNCE :
 		case SMT_REQUEST :
@@ -714,7 +703,7 @@ int fs ;			/* frame status */
 			smc->mib.priv.fddiPRIVECF_Reply_Rx++ ;
 			DB_SMT("SMT: received ECF reply from %s\n",
 				addr_to_string(&sm->smt_source),0) ;
-			if (sm_to_para(smc,sm,SMT_P_ECHODATA) == 0) {
+			if (sm_to_para(smc,sm,SMT_P_ECHODATA) == NULL) {
 				DB_SMT("SMT: ECHODATA missing\n",0,0) ;
 				break ;
 			}
@@ -823,9 +812,7 @@ int fs ;			/* frame status */
 	smt_free_mbuf(smc,mb) ;
 }
 
-static void update_dac(smc,report)
-struct s_smc *smc ;
-int report ;
+static void update_dac(struct s_smc *smc, int report)
 {
 	int	cond ;
 
@@ -843,11 +830,9 @@ int report ;
  *	set station ID
  *	send frame
  */
-EXPORT_PMF void smt_send_frame(smc,mb,fc,local)
-struct s_smc *smc ;
-SMbuf *mb ;			/* buffer to send */
-int fc ;			/* FC value */
-int local ;
+void smt_send_frame(struct s_smc *smc, SMbuf *mb, int fc, int local)
+/* SMbuf *mb;	buffer to send */
+/* int fc;	FC value */
 {
 	struct smt_header	*sm ;
 
@@ -868,12 +853,11 @@ int local ;
 /*
  * generate and send RDF
  */
-static void smt_send_rdf(smc,rej,fc,reason,local)
-struct s_smc *smc ;
-SMbuf	*rej ;			/* mbuf of offending frame */
-int	fc ;			/* FC of denied frame */
-int reason ;			/* reason code */
-int local ;
+static void smt_send_rdf(struct s_smc *smc, SMbuf *rej, int fc, int reason,
+			 int local)
+/* SMbuf *rej;	mbuf of offending frame */
+/* int fc;	FC of denied frame */
+/* int reason;	reason code */
 {
 	SMbuf	*mb ;
 	struct smt_header	*sm ;	/* header of offending frame */
@@ -946,13 +930,12 @@ int local ;
 /*
  * generate and send NIF
  */
-static void smt_send_nif(smc,dest,fc,tid,type,local)
-struct s_smc *smc ;
-struct fddi_addr *dest ;		/* dest address */
-int fc ;				/* frame control */
-u_long tid ;				/* transaction id */
-int type ;				/* frame type */
-int local ;
+static void smt_send_nif(struct s_smc *smc, const struct fddi_addr *dest, 
+			 int fc, u_long tid, int type, int local)
+/* struct fddi_addr *dest;	dest address */
+/* int fc;			frame control */
+/* u_long tid;			transaction id */
+/* int type;			frame type */
 {
 	struct smt_nif	*nif ;
 	SMbuf		*mb ;
@@ -976,9 +959,7 @@ int local ;
 /*
  * send NIF request (test purpose)
  */
-static void smt_send_nif_request(smc,dest)
-struct s_smc *smc ;
-struct fddi_addr *dest ;
+static void smt_send_nif_request(struct s_smc *smc, struct fddi_addr *dest)
 {
 	smc->sm.pend[SMT_TID_NIF_TEST] = smt_get_tid(smc) ;
 	smt_send_nif(smc,dest, FC_SMT_INFO, smc->sm.pend[SMT_TID_NIF_TEST],
@@ -988,10 +969,8 @@ struct fddi_addr *dest ;
 /*
  * send ECF request (test purpose)
  */
-static void smt_send_ecf_request(smc,dest,len)
-struct s_smc *smc ;
-struct fddi_addr *dest ;
-int len ;
+static void smt_send_ecf_request(struct s_smc *smc, struct fddi_addr *dest,
+				 int len)
 {
 	smc->sm.pend[SMT_TID_ECF] = smt_get_tid(smc) ;
 	smt_send_ecf(smc,dest, FC_SMT_INFO, smc->sm.pend[SMT_TID_ECF],
@@ -1002,9 +981,7 @@ int len ;
 /*
  * echo test
  */
-static void smt_echo_test(smc,dna)
-struct s_smc *smc ;
-int dna ;
+static void smt_echo_test(struct s_smc *smc, int dna)
 {
 	u_long	tid ;
 
@@ -1019,13 +996,13 @@ int dna ;
 /*
  * generate and send ECF
  */
-static void smt_send_ecf(smc,dest,fc,tid,type,len)
-struct s_smc *smc ;
-struct fddi_addr *dest ;		/* dest address */
-int fc ;				/* frame control */
-u_long tid ;				/* transaction id */
-int type ;				/* frame type */
-int len ;				/* frame length */
+static void smt_send_ecf(struct s_smc *smc, struct fddi_addr *dest, int fc,
+			 u_long tid, int type, int len)
+/* struct fddi_addr *dest;	dest address */
+/* int fc;			frame control */
+/* u_long tid;			transaction id */
+/* int type;			frame type */
+/* int len;			frame length */
 {
 	struct smt_ecf	*ecf ;
 	SMbuf		*mb ;
@@ -1045,11 +1022,10 @@ int len ;				/* frame length */
  * generate and send SIF config response
  */
 
-static void smt_send_sif_config(smc,dest,tid,local)
-struct s_smc *smc ;
-struct fddi_addr *dest ;		/* dest address */
-u_long tid ;				/* transaction id */
-int local ;
+static void smt_send_sif_config(struct s_smc *smc, struct fddi_addr *dest,
+				u_long tid, int local)
+/* struct fddi_addr *dest;	dest address */
+/* u_long tid;			transaction id */
 {
 	struct smt_sif_config	*sif ;
 	SMbuf			*mb ;
@@ -1079,11 +1055,10 @@ int local ;
  * generate and send SIF operation response
  */
 
-static void smt_send_sif_operation(smc,dest,tid,local)
-struct s_smc *smc ;
-struct fddi_addr *dest ;		/* dest address */
-u_long tid ;				/* transaction id */
-int local ;
+static void smt_send_sif_operation(struct s_smc *smc, struct fddi_addr *dest,
+				   u_long tid, int local)
+/* struct fddi_addr *dest;	dest address */
+/* u_long tid;			transaction id */
 {
 	struct smt_sif_operation *sif ;
 	SMbuf			*mb ;
@@ -1128,22 +1103,19 @@ int local ;
 /*
  * get and initialize SMT frame
  */
-EXPORT_PMF SMbuf *smt_build_frame(smc,class,type,length)
-struct s_smc *smc ;
-int class ;
-int type ;
-int length ;
+SMbuf *smt_build_frame(struct s_smc *smc, int class, int type,
+				  int length)
 {
 	SMbuf			*mb ;
 	struct smt_header	*smt ;
 
 #if	0
 	if (!smc->r.sm_ma_avail) {
-		return(0) ;
+		return 0;
 	}
 #endif
 	if (!(mb = smt_get_mbuf(smc)))
-		return(mb) ;
+		return mb;
 
 	mb->sm_len = length ;
 	smt = smtod(mb, struct smt_header *) ;
@@ -1164,12 +1136,10 @@ int length ;
 	smt->smt_tid = smt_get_tid(smc) ;	/* set transaction ID */
 	smt->smt_pad = 0 ;
 	smt->smt_len = length - sizeof(struct smt_header) ;
-	return(mb) ;
+	return mb;
 }
 
-static void smt_add_frame_len(mb,len)
-SMbuf *mb ;
-int len ;
+static void smt_add_frame_len(SMbuf *mb, int len)
 {
 	struct smt_header	*smt ;
 
@@ -1183,9 +1153,7 @@ int len ;
 /*
  * fill values in UNA parameter
  */
-static void smt_fill_una(smc,una)
-struct s_smc *smc ;
-struct smt_p_una *una ;
+static void smt_fill_una(struct s_smc *smc, struct smt_p_una *una)
 {
 	SMTSETPARA(una,SMT_P_UNA) ;
 	una->una_pad = 0 ;
@@ -1195,9 +1163,7 @@ struct smt_p_una *una ;
 /*
  * fill values in SDE parameter
  */
-static void smt_fill_sde(smc,sde)
-struct s_smc *smc ;
-struct smt_p_sde *sde ;
+static void smt_fill_sde(struct s_smc *smc, struct smt_p_sde *sde)
 {
 	SMTSETPARA(sde,SMT_P_SDE) ;
 	sde->sde_non_master = smc->mib.fddiSMTNonMaster_Ct ;
@@ -1213,9 +1179,7 @@ struct smt_p_sde *sde ;
 /*
  * fill in values in station state parameter
  */
-static void smt_fill_state(smc,state)
-struct s_smc *smc ;
-struct smt_p_state *state ;
+static void smt_fill_state(struct s_smc *smc, struct smt_p_state *state)
 {
 	int	top ;
 	int	twist ;
@@ -1255,18 +1219,14 @@ struct smt_p_state *state ;
 /*
  * fill values in timestamp parameter
  */
-static void smt_fill_timestamp(smc,ts)
-struct s_smc *smc ;
-struct smt_p_timestamp *ts ;
+static void smt_fill_timestamp(struct s_smc *smc, struct smt_p_timestamp *ts)
 {
 
 	SMTSETPARA(ts,SMT_P_TIMESTAMP) ;
 	smt_set_timestamp(smc,ts->ts_time) ;
 }
 
-EXPORT_PMF void smt_set_timestamp(smc,p)
-struct s_smc *smc ;
-u_char *p ;
+void smt_set_timestamp(struct s_smc *smc, u_char *p)
 {
 	u_long	time ;
 	u_long	utime ;
@@ -1300,12 +1260,10 @@ u_char *p ;
 /*
  * fill values in station policy parameter
  */
-static void smt_fill_policy(smc,policy)
-struct s_smc *smc ;
-struct smt_p_policy *policy ;
+static void smt_fill_policy(struct s_smc *smc, struct smt_p_policy *policy)
 {
 	int	i ;
-	u_char	*map ;
+	const u_char *map ;
 	u_short	in ;
 	u_short	out ;
 
@@ -1313,7 +1271,7 @@ struct smt_p_policy *policy ;
 	 * MIB para 101b (fddiSMTConnectionPolicy) coding
 	 * is different from 0005 coding
 	 */
-	static u_char	ansi_weirdness[16] = {
+	static const u_char ansi_weirdness[16] = {
 		0,7,5,3,8,1,6,4,9,10,2,11,12,13,14,15
 	} ;
 	SMTSETPARA(policy,SMT_P_POLICY) ;
@@ -1333,9 +1291,7 @@ struct smt_p_policy *policy ;
 /*
  * fill values in latency equivalent parameter
  */
-static void smt_fill_latency(smc,latency)
-struct s_smc *smc ;
-struct smt_p_latency *latency ;
+static void smt_fill_latency(struct s_smc *smc, struct smt_p_latency *latency)
 {
 	SMTSETPARA(latency,SMT_P_LATENCY) ;
 
@@ -1358,9 +1314,7 @@ struct smt_p_latency *latency ;
 /*
  * fill values in MAC neighbors parameter
  */
-static void smt_fill_neighbor(smc,neighbor)
-struct s_smc *smc ;
-struct smt_p_neighbor *neighbor ;
+static void smt_fill_neighbor(struct s_smc *smc, struct smt_p_neighbor *neighbor)
 {
 	SMTSETPARA(neighbor,SMT_P_NEIGHBORS) ;
 
@@ -1379,9 +1333,7 @@ struct smt_p_neighbor *neighbor ;
 #define ALLPHYS	((smc->s.sas == SMT_SAS) ? 1 : 2)
 #endif
 
-static int smt_fill_path(smc,path)
-struct s_smc *smc ;
-struct smt_p_path *path ;
+static int smt_fill_path(struct s_smc *smc, struct smt_p_path *path)
 {
 	SK_LOC_DECL(int,type) ;
 	SK_LOC_DECL(int,state) ;
@@ -1423,15 +1375,13 @@ struct smt_p_path *path ;
 	pd_mac = (struct smt_mac_rec *) phy ;
 	pd_mac->mac_addr = smc->mib.m[MAC0].fddiMACSMTAddress ;
 	pd_mac->mac_resource_idx = mac_con_resource_index(smc,1) ;
-	return(len) ;
+	return len;
 }
 
 /*
  * fill values in mac status
  */
-static void smt_fill_mac_status(smc,st)
-struct s_smc *smc ;
-struct smt_p_mac_status *st ;
+static void smt_fill_mac_status(struct s_smc *smc, struct smt_p_mac_status *st)
 {
 	SMTSETPARA(st,SMT_P_MAC_STATUS) ;
 
@@ -1458,11 +1408,7 @@ struct smt_p_mac_status *st ;
 /*
  * fill values in LEM status
  */
-
-static void smt_fill_lem(smc,lem,phy)
-struct s_smc *smc ;
-struct smt_p_lem *lem ;
-int phy ;
+static void smt_fill_lem(struct s_smc *smc, struct smt_p_lem *lem, int phy)
 {
 	struct fddi_mib_p	*mib ;
 
@@ -1484,9 +1430,7 @@ int phy ;
 /*
  * fill version parameter
  */
-static void smt_fill_version(smc,vers)
-struct s_smc *smc ;
-struct smt_p_version *vers ;
+static void smt_fill_version(struct s_smc *smc, struct smt_p_version *vers)
 {
 	SK_UNUSED(smc) ;
 	SMTSETPARA(vers,SMT_P_VERSION) ;
@@ -1505,9 +1449,7 @@ struct smt_p_version *vers ;
  * note: this para 200B is NOT in swap table, because it's also set in
  * PMF add_para
  */
-static void smt_fill_fsc(smc,fsc)
-struct s_smc *smc ;
-struct smt_p_fsc *fsc ;
+static void smt_fill_fsc(struct s_smc *smc, struct smt_p_fsc *fsc)
 {
 	SK_UNUSED(smc) ;
 	SMTSETPARA(fsc,SMT_P_FSC) ;
@@ -1527,9 +1469,7 @@ struct smt_p_fsc *fsc ;
 /*
  * fill mac counter field
  */
-static void smt_fill_mac_counter(smc,mc)
-struct s_smc *smc ;
-struct smt_p_mac_counter *mc ;
+static void smt_fill_mac_counter(struct s_smc *smc, struct smt_p_mac_counter *mc)
 {
 	SMTSETPARA(mc,SMT_P_MAC_COUNTER) ;
 	mc->mc_mib_index = INDEX_MAC ;
@@ -1541,9 +1481,7 @@ struct smt_p_mac_counter *mc ;
 /*
  * fill mac frame not copied counter
  */
-static void smt_fill_mac_fnc(smc,fnc)
-struct s_smc *smc ;
-struct smt_p_mac_fnc *fnc ;
+static void smt_fill_mac_fnc(struct s_smc *smc, struct smt_p_mac_fnc *fnc)
 {
 	SMTSETPARA(fnc,SMT_P_MAC_FNC) ;
 	fnc->nc_mib_index = INDEX_MAC ;
@@ -1555,9 +1493,8 @@ struct smt_p_mac_fnc *fnc ;
 /*
  * fill manufacturer field
  */
-static void smt_fill_manufacturer(smc,man)
-struct s_smc *smc ;
-struct smp_p_manufacturer *man ;
+static void smt_fill_manufacturer(struct s_smc *smc, 
+				  struct smp_p_manufacturer *man)
 {
 	SMTSETPARA(man,SMT_P_MANUFACTURER) ;
 	memcpy((char *) man->mf_data,
@@ -1568,9 +1505,7 @@ struct smp_p_manufacturer *man ;
 /*
  * fill user field
  */
-static void smt_fill_user(smc,user)
-struct s_smc *smc ;
-struct smp_p_user *user ;
+static void smt_fill_user(struct s_smc *smc, struct smp_p_user *user)
 {
 	SMTSETPARA(user,SMT_P_USER) ;
 	memcpy((char *) user->us_data,
@@ -1578,14 +1513,10 @@ struct smp_p_user *user ;
 		sizeof(user->us_data)) ;
 }
 
-
-
 /*
  * fill set count
  */
-static void smt_fill_setcount(smc,setcount)
-struct s_smc *smc ;
-struct smt_p_setcount *setcount ;
+static void smt_fill_setcount(struct s_smc *smc, struct smt_p_setcount *setcount)
 {
 	SK_UNUSED(smc) ;
 	SMTSETPARA(setcount,SMT_P_SETCOUNT) ;
@@ -1597,13 +1528,9 @@ struct smt_p_setcount *setcount ;
 /*
  * fill echo data
  */
-static void smt_fill_echo(smc,echo,seed,len)
-struct s_smc *smc ;
-struct smt_p_echo *echo ;
-u_long seed ;
-int len ;
+static void smt_fill_echo(struct s_smc *smc, struct smt_p_echo *echo, u_long seed,
+			  int len)
 {
-
 	u_char	*p ;
 
 	SK_UNUSED(smc) ;
@@ -1619,27 +1546,24 @@ int len ;
  * clear DNA and UNA
  * called from CFM if configuration changes
  */
-void smt_clear_una_dna(smc)
-struct s_smc *smc ;
+static void smt_clear_una_dna(struct s_smc *smc)
 {
 	smc->mib.m[MAC0].fddiMACUpstreamNbr = SMT_Unknown ;
 	smc->mib.m[MAC0].fddiMACDownstreamNbr = SMT_Unknown ;
 }
 
-static void smt_clear_old_una_dna(smc)
-struct s_smc *smc ;
+static void smt_clear_old_una_dna(struct s_smc *smc)
 {
 	smc->mib.m[MAC0].fddiMACOldUpstreamNbr = SMT_Unknown ;
 	smc->mib.m[MAC0].fddiMACOldDownstreamNbr = SMT_Unknown ;
 }
 
-u_long smt_get_tid(smc)
-struct s_smc *smc ;
+u_long smt_get_tid(struct s_smc *smc)
 {
 	u_long	tid ;
 	while ((tid = ++(smc->sm.smt_tid) ^ SMT_TID_MAGIC) == 0)
 		;
-	return(tid & 0x3fffffffL) ;
+	return tid & 0x3fffffffL;
 }
 
 
@@ -1721,33 +1645,28 @@ static const struct smt_pdef {
 	{ SMT_P4053,	0,	SWAP_SMT_P4053			} ,
 } ;
 
-#define N_SMT_PLEN	(sizeof(smt_pdef)/sizeof(smt_pdef[0]))
+#define N_SMT_PLEN	ARRAY_SIZE(smt_pdef)
 
-int smt_check_para(smc,sm,list)
-struct s_smc *smc ;
-struct smt_header	*sm ;
-const u_short		list[] ;
+int smt_check_para(struct s_smc *smc, struct smt_header	*sm,
+		   const u_short list[])
 {
 	const u_short		*p = list ;
 	while (*p) {
 		if (!sm_to_para(smc,sm,(int) *p)) {
 			DB_SMT("SMT: smt_check_para - missing para %x\n",*p,0);
-			return(-1) ;
+			return -1;
 		}
 		p++ ;
 	}
-	return(0) ;
+	return 0;
 }
 
-EXPORT_PMF void *sm_to_para(smc,sm,para)
-struct s_smc *smc ;
-struct smt_header	*sm ;
-int para ;
+void *sm_to_para(struct s_smc *smc, struct smt_header *sm, int para)
 {
 	char	*p ;
 	int	len ;
 	int	plen ;
-	void	*found = 0 ;
+	void	*found = NULL;
 
 	SK_UNUSED(smc) ;
 
@@ -1761,69 +1680,23 @@ int para ;
 		len -= plen ;
 		if (len < 0) {
 			DB_SMT("SMT : sm_to_para - length error %d\n",plen,0) ;
-			return(0) ;
+			return NULL;
 		}
 		if ((plen & 3) && (para != SMT_P_ECHODATA)) {
 			DB_SMT("SMT : sm_to_para - odd length %d\n",plen,0) ;
-			return(0) ;
+			return NULL;
 		}
 		if (found)
-			return(found) ;
+			return found;
 	}
-	return(0) ;
+	return NULL;
 }
-
-int is_my_addr(smc,addr)
-struct s_smc *smc ;
-struct fddi_addr *addr ;
-{
-	return(*(short *)(&addr->a[0]) ==
-		*(short *)(&smc->mib.m[MAC0].fddiMACSMTAddress.a[0])
-	  && *(short *)(&addr->a[2]) ==
-		*(short *)(&smc->mib.m[MAC0].fddiMACSMTAddress.a[2])
-	  && *(short *)(&addr->a[4]) ==
-		*(short *)(&smc->mib.m[MAC0].fddiMACSMTAddress.a[4])) ;
-}
-
-int is_zero(addr)
-struct fddi_addr *addr ;
-{
-	return(*(short *)(&addr->a[0]) == 0 &&
-	       *(short *)(&addr->a[2]) == 0 &&
-	       *(short *)(&addr->a[4]) == 0 ) ;
-}
-
-int is_broadcast(addr)
-struct fddi_addr *addr ;
-{
-	return(*(u_short *)(&addr->a[0]) == 0xffff &&
-	       *(u_short *)(&addr->a[2]) == 0xffff &&
-	       *(u_short *)(&addr->a[4]) == 0xffff ) ;
-}
-
-int is_individual(addr)
-struct fddi_addr *addr ;
-{
-	return(!(addr->a[0] & GROUP_ADDR)) ;
-}
-
-int is_equal(addr1,addr2)
-struct fddi_addr *addr1 ;
-struct fddi_addr *addr2 ;
-{
-	return(*(u_short *)(&addr1->a[0]) == *(u_short *)(&addr2->a[0]) &&
-	       *(u_short *)(&addr1->a[2]) == *(u_short *)(&addr2->a[2]) &&
-	       *(u_short *)(&addr1->a[4]) == *(u_short *)(&addr2->a[4]) ) ;
-}
-
 
 #if	0
 /*
  * send ANTC data test frame
  */
-void fddi_send_antc(smc,dest)
-struct s_smc *smc ;
-struct fddi_addr *dest ;
+void fddi_send_antc(struct s_smc *smc, struct fddi_addr *dest)
 {
 	SK_UNUSED(smc) ;
 	SK_UNUSED(dest) ;
@@ -1848,140 +1721,122 @@ struct fddi_addr *dest ;
 #endif
 
 #ifdef	DEBUG
-#define hextoasc(x)	"0123456789abcdef"[x]
-
-char *addr_to_string(addr)
-struct fddi_addr *addr ;
+char *addr_to_string(struct fddi_addr *addr)
 {
 	int	i ;
 	static char	string[6*3] = "****" ;
 
 	for (i = 0 ; i < 6 ; i++) {
-		string[i*3] = hextoasc((addr->a[i]>>4)&0xf) ;
-		string[i*3+1] = hextoasc((addr->a[i])&0xf) ;
-		string[i*3+2] = ':' ;
+		string[i * 3] = hex_asc_hi(addr->a[i]);
+		string[i * 3 + 1] = hex_asc_lo(addr->a[i]);
+		string[i * 3 + 2] = ':';
 	}
-	string[5*3+2] = 0 ;
-	return(string) ;
+	string[5 * 3 + 2] = 0;
+	return string;
 }
 #endif
 
 #ifdef	AM29K
-smt_ifconfig(argc,argv)
-int argc ;
-char *argv[] ;
+int smt_ifconfig(int argc, char *argv[])
 {
 	if (argc >= 2 && !strcmp(argv[0],"opt_bypass") &&
 	    !strcmp(argv[1],"yes")) {
 		smc->mib.fddiSMTBypassPresent = 1 ;
-		return(0) ;
+		return 0;
 	}
-	return(amdfddi_config(0,argc,argv)) ;
+	return amdfddi_config(0, argc, argv);
 }
 #endif
 
 /*
  * return static mac index
  */
-static int mac_index(smc,mac)
-struct s_smc *smc ;
-int mac ;
+static int mac_index(struct s_smc *smc, int mac)
 {
 	SK_UNUSED(mac) ;
 #ifdef	CONCENTRATOR
 	SK_UNUSED(smc) ;
-	return(NUMPHYS+1) ;
+	return NUMPHYS + 1;
 #else
-	return((smc->s.sas == SMT_SAS) ? 2 : 3) ;
+	return (smc->s.sas == SMT_SAS) ? 2 : 3;
 #endif
 }
 
 /*
  * return static phy index
  */
-static int phy_index(smc,phy)
-struct s_smc *smc ;
-int phy ;
+static int phy_index(struct s_smc *smc, int phy)
 {
 	SK_UNUSED(smc) ;
-	return(phy+1);
+	return phy + 1;
 }
 
 /*
  * return dynamic mac connection resource index
  */
-static int mac_con_resource_index(smc,mac)
-struct s_smc *smc ;
-int mac ;
+static int mac_con_resource_index(struct s_smc *smc, int mac)
 {
 #ifdef	CONCENTRATOR
 	SK_UNUSED(smc) ;
 	SK_UNUSED(mac) ;
-	return(entity_to_index(smc,cem_get_downstream(smc,ENTITY_MAC))) ;
+	return entity_to_index(smc, cem_get_downstream(smc, ENTITY_MAC));
 #else
 	SK_UNUSED(mac) ;
 	switch (smc->mib.fddiSMTCF_State) {
 	case SC9_C_WRAP_A :
 	case SC5_THRU_B :
 	case SC11_C_WRAP_S :
-		return(1) ;
+		return 1;
 	case SC10_C_WRAP_B :
 	case SC4_THRU_A :
-		return(2) ;
+		return 2;
 	}
-	return(smc->s.sas == SMT_SAS ? 2 : 3) ;
+	return smc->s.sas == SMT_SAS ? 2 : 3;
 #endif
 }
 
 /*
  * return dynamic phy connection resource index
  */
-static int phy_con_resource_index(smc,phy)
-struct s_smc *smc ;
-int phy ;
+static int phy_con_resource_index(struct s_smc *smc, int phy)
 {
 #ifdef	CONCENTRATOR
-	return(entity_to_index(smc,cem_get_downstream(smc,ENTITY_PHY(phy)))) ;
+	return entity_to_index(smc, cem_get_downstream(smc, ENTITY_PHY(phy))) ;
 #else
 	switch (smc->mib.fddiSMTCF_State) {
 	case SC9_C_WRAP_A :
-		return(phy == PA ? 3 : 2) ;
+		return phy == PA ? 3 : 2;
 	case SC10_C_WRAP_B :
-		return(phy == PA ? 1 : 3) ;
+		return phy == PA ? 1 : 3;
 	case SC4_THRU_A :
-		return(phy == PA ? 3 : 1) ;
+		return phy == PA ? 3 : 1;
 	case SC5_THRU_B :
-		return(phy == PA ? 2 : 3) ;
+		return phy == PA ? 2 : 3;
 	case SC11_C_WRAP_S :
-		return(2) ;
+		return 2;
 	}
-	return(phy) ;
+	return phy;
 #endif
 }
 
 #ifdef	CONCENTRATOR
-static int entity_to_index(smc,e)
-struct s_smc *smc ;
-int e ;
+static int entity_to_index(struct s_smc *smc, int e)
 {
 	if (e == ENTITY_MAC)
-		return(mac_index(smc,1)) ;
+		return mac_index(smc, 1);
 	else
-		return(phy_index(smc,e - ENTITY_PHY(0))) ;
+		return phy_index(smc, e - ENTITY_PHY(0));
 }
 #endif
 
 #ifdef	LITTLE_ENDIAN
-static int smt_swap_short(s)
-u_short s ;
+static int smt_swap_short(u_short s)
 {
-	return(((s>>8)&0xff)|((s&0xff)<<8)) ;
+	return ((s>>8)&0xff) | ((s&0xff)<<8);
 }
 
-void smt_swap_para(sm,len,direction)
-struct smt_header *sm ;
-int len ;
-int direction ;			/* 0 encode 1 decode */
+void smt_swap_para(struct smt_header *sm, int len, int direction)
+/* int direction;	0 encode 1 decode */
 {
 	struct smt_para	*pa ;
 	const  struct smt_pdef	*pd ;
@@ -2027,12 +1882,9 @@ int direction ;			/* 0 encode 1 decode */
 	}
 }
 
-static void smt_string_swap(data,format,len)
-char *data ;
-const char *format ;
-int len ;
+static void smt_string_swap(char *data, const char *format, int len)
 {
-	const char	*open_paren = 0 ;
+	const char	*open_paren = NULL ;
 	int	x ;
 
 	while (len > 0  && *format) {
@@ -2081,10 +1933,8 @@ int len ;
 	}
 }
 #else
-void smt_swap_para(sm,len,direction)
-struct smt_header *sm ;
-int len ;
-int direction ;			/* 0 encode 1 decode */
+void smt_swap_para(struct smt_header *sm, int len, int direction)
+/* int direction;	0 encode 1 decode */
 {
 	SK_UNUSED(sm) ;
 	SK_UNUSED(len) ;
@@ -2095,11 +1945,7 @@ int direction ;			/* 0 encode 1 decode */
 /*
  * PMF actions
  */
-int smt_action(smc,class,code,index)
-struct s_smc *smc ;
-int class ;
-int code ;
-int index ;
+int smt_action(struct s_smc *smc, int class, int code, int index)
 {
 	int	event ;
 	int	port ;
@@ -2150,7 +1996,7 @@ int index ;
 			}
 			break ;
 		default :
-			return(1) ;
+			return 1;
 		}
 		break ;
 	case SMT_PORT_ACTION :
@@ -2171,55 +2017,30 @@ int index ;
 			event = PC_STOP ;
 			break ;
 		default :
-			return(1) ;
+			return 1;
 		}
 		queue_event(smc,EVENT_PCM+index,event) ;
 		break ;
 	default :
-		return(1) ;
+		return 1;
 	}
-	return(0) ;
-}
-
-/*
- * change tneg
- *	set T_Req in MIB (Path Attribute)
- *	calculate new values for MAC
- *	if change required
- *		disconnect
- *		set reconnect
- *	end
- */
-void smt_change_t_neg(smc,tneg)
-struct s_smc *smc ;
-u_long tneg ;
-{
-	smc->mib.a[PATH0].fddiPATHMaxT_Req = tneg ;
-
-	if (smt_set_mac_opvalues(smc)) {
-		RS_SET(smc,RS_EVENT) ;
-		smc->sm.please_reconnect = 1 ;
-		queue_event(smc,EVENT_ECM,EC_DISCONNECT) ;
-	}
+	return 0;
 }
 
 /*
  * canonical conversion of <len> bytes beginning form *data
  */
 #ifdef  USE_CAN_ADDR
-void hwm_conv_can(smc,data,len)
-struct s_smc *smc ;
-char *data ;
-int len ;
+static void hwm_conv_can(struct s_smc *smc, char *data, int len)
 {
 	int i ;
 
 	SK_UNUSED(smc) ;
 
-	for (i = len; i ; i--, data++) {
-		*data = canonical[*(u_char *)data] ;
-	}
+	for (i = len; i ; i--, data++)
+		*data = bitrev8(*data);
 }
 #endif
 
 #endif	/* no SLIM_SMT */
+

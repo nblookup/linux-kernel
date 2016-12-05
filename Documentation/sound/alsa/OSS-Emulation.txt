@@ -1,7 +1,7 @@
 		NOTES ON KERNEL OSS-EMULATION
 		=============================
 
-		Jan. 9, 2003  Takashi Iwai <tiwai@suse.de>
+		Jan. 22, 2004  Takashi Iwai <tiwai@suse.de>
 
 
 Modules
@@ -13,32 +13,20 @@ as add-on kernel modules, snd-pcm-oss, snd-mixer-oss and snd-seq-oss.
 When you need to access the OSS PCM, mixer or sequencer devices, the
 corresponding module has to be loaded.
 
-For loading these modules automatically, define the aliases in
-/etc/modules.conf like below:
+These modules are loaded automatically when the corresponding service
+is called.  The alias is defined sound-service-x-y, where x and y are
+the card number and the minor unit number.  Usually you don't have to
+define these aliases by yourself.
 
-	alias sound-service-0-0 snd-mixer-oss
-	alias sound-service-0-1 snd-seq-oss
-	alias sound-service-0-3 snd-pcm-oss
-	alias sound-service-0-8 snd-seq-oss
-	alias sound-service-0-12 snd-pcm-oss
+Only necessary step for auto-loading of OSS modules is to define the
+card alias in /etc/modprobe.conf, such as
 
-Then the access to an OSS device file such as /dev/dsp0 triggers to
-load the necessary module via KMOD.
+	alias sound-slot-0 snd-emu10k1
 
-For auto-loading the secondary card device like /dev/dsp1, the
-following aliases are necessary in addition:
-
-	alias sound-service-1-0 snd-mixer-oss
-	alias sound-service-1-3 snd-pcm-oss
-	alias sound-service-1-12 snd-pcm-oss
-
-Here you don't need to define service-1-1 and service-1-8 because
-there is only one sequencer device.
-Similarly, you can add definitions for the third or later cards as
-sound-service-X-Y.
-
-The OSS-MIDI is emulated directly in the ALSA rawmidi module,
-therefore no extra module exists for that purpose.
+As the second card, define sound-slot-1 as well.
+Note that you can't use the aliased name as the target name (i.e.
+"alias sound-slot-0 snd-card-0" doesn't work any more like the old
+modutils).
 
 The currently available OSS configuration is shown in
 /proc/asound/oss/sndstat.  This shows in the same syntax of
@@ -152,8 +140,7 @@ available:
 	direct		don't use plugins
 	block		force block open mode
 	non-block	force non-block open mode
-	whole-frag	write only whole fragments (optimization affecting
-			playback only)
+	partial-frag	write also partial fragments (affects playback only)
 	no-silence	do not fill silence ahead to avoid clicks
 
 The disable option is useful when one stream direction (playback or
@@ -177,18 +164,17 @@ sending the command above.
 
 The block and non-block options are used to change the behavior of
 opening the device file.
-As default, ALSA behaves as defined in POSIX, i.e. blocks the file
-when it's busy until the device becomes free (unless O_NONBLOCK is
-specified).  Some applications assume the non-block open behavior,
-which are actually implemented in some real OSS drivers.
+
+As default, ALSA behaves as original OSS drivers, i.e. does not block
+the file when it's busy. The -EBUSY error is returned in this case.
 
 This blocking behavior can be changed globally via nonblock_open
-module option of snd-pcm-oss.  For using the non-block mode as default
+module option of snd-pcm-oss.  For using the blocking mode as default
 for OSS devices, define like the following:
 
-	options snd-pcm-oss nonblock_open=1
+	options snd-pcm-oss nonblock_open=0
 
-The whole-frag and no-silence commands have been added recently.
+The partial-frag and no-silence commands have been added recently.
 Both commands are for optimization use only.  The former command
 specifies to invoke the write transfer only when the whole fragment is
 filled.  The latter stops writing the silence data ahead
@@ -292,6 +278,21 @@ current mixer configuration by reading and writing the whole file
 image.
 
 
+Duplex Streams
+==============
+
+Note that when attempting to use a single device file for playback and
+capture, the OSS API provides no way to set the format, sample rate or
+number of channels different in each direction.  Thus
+	io_handle = open("device", O_RDWR)
+will only function correctly if the values are the same in each direction.
+
+To use different values in the two directions, use both
+	input_handle = open("device", O_RDONLY)
+	output_handle = open("device", O_WRONLY)
+and set the values for the corresponding handle.
+
+
 Unsupported Features
 ====================
 
@@ -301,11 +302,4 @@ ICE1712 supports only the unconventional format, interleaved
 10-channels 24bit (packed in 32bit) format.  Therefore you cannot mmap
 the buffer as the conventional (mono or 2-channels, 8 or 16bit) format
 on OSS.
-
-USB devices
------------
-Some USB devices support only 24bit format packed in 3bytes.  This
-format is not supported by OSS and no conversion is provided by kernel
-OSS emulation.  You can use the user-space OSS emulation via libaoss
-instead.
 

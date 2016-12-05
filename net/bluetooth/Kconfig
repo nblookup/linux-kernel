@@ -2,11 +2,10 @@
 # Bluetooth subsystem configuration
 #
 
-menu "Bluetooth support"
-	depends on NET
-
-config BT
+menuconfig BT
 	tristate "Bluetooth subsystem support"
+	depends on NET && !S390
+	depends on RFKILL || !RFKILL
 	help
 	  Bluetooth is low-cost, low-power, short-range wireless technology.
 	  It was designed as a replacement for cables and other short-range
@@ -16,48 +15,47 @@ config BT
 
 	  Linux Bluetooth subsystem consist of several layers:
 	     Bluetooth Core (HCI device and connection manager, scheduler)
-	     HCI Device drivers (interface to the hardware)
-	     L2CAP Module (L2CAP protocol)
-	     SCO Module (SCO links)
-	     RFCOMM Module (RFCOMM protocol)  
-	     BNEP Module (BNEP protocol)
+	     HCI Device drivers (Interface to the hardware)
+	     SCO Module (SCO audio links)
+	     L2CAP Module (Logical Link Control and Adaptation Protocol)
+	     RFCOMM Module (RFCOMM Protocol)  
+	     BNEP Module (Bluetooth Network Encapsulation Protocol)
+	     CMTP Module (CAPI Message Transport Protocol)
+	     HIDP Module (Human Interface Device Protocol)
 
-	  Say Y here to enable Linux Bluetooth support and to build Bluetooth Core
-	  layer.
+	  Say Y here to compile Bluetooth support into the kernel or say M to
+	  compile it as module (bluetooth).
 
 	  To use Linux Bluetooth subsystem, you will need several user-space
-	  utilities like hciconfig and hcid.  These utilities and updates to
-	  Bluetooth kernel modules are provided in the BlueZ packages.
-	  For more information, see <http://bluez.sourceforge.net/>.
+	  utilities like hciconfig and bluetoothd.  These utilities and updates
+	  to Bluetooth kernel modules are provided in the BlueZ packages.  For
+	  more information, see <http://www.bluez.org/>.
 
-	  If you want to compile Bluetooth Core as module (bluetooth) say M here.
+if BT != n
 
 config BT_L2CAP
-	tristate "L2CAP protocol support"
-	depends on BT
+	bool "L2CAP protocol support"
+	select CRC16
 	help
 	  L2CAP (Logical Link Control and Adaptation Protocol) provides
 	  connection oriented and connection-less data transport.  L2CAP
 	  support is required for most Bluetooth applications.
 
-	  Say Y here to compile L2CAP support into the kernel or say M to
-	  compile it as module (l2cap).
-
 config BT_SCO
-	tristate "SCO links support"
-	depends on BT
+	bool "SCO links support"
 	help
-	  SCO link provides voice transport over Bluetooth. SCO support is
+	  SCO link provides voice transport over Bluetooth.  SCO support is
 	  required for voice applications like Headset and Audio.
 
-	  Say Y here to compile SCO support into the kernel or say M to
-	  compile it as module (sco).
+endif
 
 source "net/bluetooth/rfcomm/Kconfig"
 
 source "net/bluetooth/bnep/Kconfig"
 
-source "drivers/bluetooth/Kconfig"
+source "net/bluetooth/cmtp/Kconfig"
 
-endmenu
+source "net/bluetooth/hidp/Kconfig"
+
+source "drivers/bluetooth/Kconfig"
 

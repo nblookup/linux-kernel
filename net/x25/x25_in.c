@@ -3,7 +3,7 @@
  *
  *	This is ALPHA test software. This code may break your machine,
  *	randomly fail to work with new releases, misbehave and/or generally
- *	screw up. It might even work. 
+ *	screw up. It might even work.
  *
  *	This code REQUIRES 2.1.15 or higher
  *
@@ -17,38 +17,25 @@
  *	X.25 001	Jonathan Naylor	  Started coding.
  *	X.25 002	Jonathan Naylor	  Centralised disconnection code.
  *					  New timer architecture.
- *	2000-03-20	Daniela Squassoni Disabling/enabling of facilities 
+ *	2000-03-20	Daniela Squassoni Disabling/enabling of facilities
  *					  negotiation.
  *	2000-11-10	Henner Eisen	  Check and reset for out-of-sequence
  *					  i-frames.
  */
 
+#include <linux/slab.h>
 #include <linux/errno.h>
-#include <linux/types.h>
-#include <linux/socket.h>
-#include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/timer.h>
 #include <linux/string.h>
-#include <linux/sockios.h>
-#include <linux/net.h>
-#include <linux/inet.h>
-#include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/ip.h>			/* For ip_rcv */
-#include <net/tcp.h>
-#include <asm/system.h>
-#include <linux/fcntl.h>
-#include <linux/mm.h>
-#include <linux/interrupt.h>
+#include <net/tcp_states.h>
 #include <net/x25.h>
 
 static int x25_queue_rx_frame(struct sock *sk, struct sk_buff *skb, int more)
 {
 	struct sk_buff *skbo, *skbn = skb;
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 
 	if (more) {
 		x25->fraglen += skb->len;
@@ -67,21 +54,24 @@ static int x25_queue_rx_frame(struct sock *sk, struct sk_buff *skb, int more)
 
 		skb_queue_tail(&x25->fragment_queue, skb);
 
-		skbn->h.raw = skbn->data;
+		skb_reset_transport_header(skbn);
 
 		skbo = skb_dequeue(&x25->fragment_queue);
-		memcpy(skb_put(skbn, skbo->len), skbo->data, skbo->len);
+		skb_copy_from_linear_data(skbo, skb_put(skbn, skbo->len),
+					  skbo->len);
 		kfree_skb(skbo);
 
 		while ((skbo =
 			skb_dequeue(&x25->fragment_queue)) != NULL) {
 			skb_pull(skbo, (x25->neighbour->extended) ?
 					X25_EXT_MIN_LEN : X25_STD_MIN_LEN);
-			memcpy(skb_put(skbn, skbo->len), skbo->data, skbo->len);
+			skb_copy_from_linear_data(skbo,
+						  skb_put(skbn, skbo->len),
+						  skbo->len);
 			kfree_skb(skbo);
 		}
 
-		x25->fraglen = 0;		
+		x25->fraglen = 0;
 	}
 
 	skb_set_owner_r(skbn, sk);
@@ -100,10 +90,11 @@ static int x25_queue_rx_frame(struct sock *sk, struct sk_buff *skb, int more)
 static int x25_state1_machine(struct sock *sk, struct sk_buff *skb, int frametype)
 {
 	struct x25_address source_addr, dest_addr;
+	int len;
+	struct x25_sock *x25 = x25_sk(sk);
 
 	switch (frametype) {
 		case X25_CALL_ACCEPTED: {
-			struct x25_opt *x25 = x25_sk(sk);
 
 			x25_stop_timer(sk);
 			x25->condition = 0x00;
@@ -117,16 +108,28 @@ static int x25_state1_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 			 *	Parse the data in the frame.
 			 */
 			skb_pull(skb, X25_STD_MIN_LEN);
-			skb_pull(skb, x25_addr_ntoa(skb->data, &source_addr, &dest_addr));
-			skb_pull(skb,
-				 x25_parse_facilities(skb, &x25->facilities,
-						      &x25->vc_facil_mask));
+
+			len = x25_parse_address_block(skb, &source_addr,
+						&dest_addr);
+			if (len > 0)
+				skb_pull(skb, len);
+			else if (len < 0)
+				goto out_clear;
+
+			len = x25_parse_facilities(skb, &x25->facilities,
+						&x25->dte_facilities,
+						&x25->vc_facil_mask);
+			if (len > 0)
+				skb_pull(skb, len);
+			else if (len < 0)
+				goto out_clear;
 			/*
 			 *	Copy any Call User Data.
 			 */
-			if (skb->len >= 0) {
-				memcpy(x25->calluserdata.cuddata, skb->data,
-				       skb->len);
+			if (skb->len > 0) {
+				skb_copy_from_linear_data(skb,
+					      x25->calluserdata.cuddata,
+					      skb->len);
 				x25->calluserdata.cudlength = skb->len;
 			}
 			if (!sock_flag(sk, SOCK_DEAD))
@@ -142,6 +145,12 @@ static int x25_state1_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 			break;
 	}
 
+	return 0;
+
+out_clear:
+	x25_write_internal(sk, X25_CLEAR_REQUEST);
+	x25->state = X25_STATE_2;
+	x25_start_t23timer(sk);
 	return 0;
 }
 
@@ -179,8 +188,8 @@ static int x25_state3_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 {
 	int queued = 0;
 	int modulus;
-	struct x25_opt *x25 = x25_sk(sk);
-	
+	struct x25_sock *x25 = x25_sk(sk);
+
 	modulus = (x25->neighbour->extended) ? X25_EMODULUS : X25_SMODULUS;
 
 	switch (frametype) {
@@ -256,7 +265,7 @@ static int x25_state3_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 					break;
 				}
 				if (atomic_read(&sk->sk_rmem_alloc) >
-				    (sk->sk_rcvbuf / 2))
+				    (sk->sk_rcvbuf >> 1))
 					x25->condition |= X25_COND_OWN_RX_BUSY;
 			}
 			/*
@@ -274,7 +283,7 @@ static int x25_state3_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 			break;
 
 		case X25_INTERRUPT_CONFIRMATION:
-			x25->intflag = 0;
+			clear_bit(X25_INTERRUPT_FLAG, &x25->flags);
 			break;
 
 		case X25_INTERRUPT:
@@ -309,7 +318,7 @@ static int x25_state4_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 		case X25_RESET_REQUEST:
 			x25_write_internal(sk, X25_RESET_CONFIRMATION);
 		case X25_RESET_CONFIRMATION: {
-			struct x25_opt *x25 = x25_sk(sk);
+			struct x25_sock *x25 = x25_sk(sk);
 
 			x25_stop_timer(sk);
 			x25->condition = 0x00;
@@ -336,7 +345,7 @@ static int x25_state4_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 /* Higher level upcall for a LAPB frame */
 int x25_process_rx_frame(struct sock *sk, struct sk_buff *skb)
 {
-	struct x25_opt *x25 = x25_sk(sk);
+	struct x25_sock *x25 = x25_sk(sk);
 	int queued = 0, frametype, ns, nr, q, d, m;
 
 	if (x25->state == X25_STATE_0)

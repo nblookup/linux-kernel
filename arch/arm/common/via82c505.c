@@ -1,13 +1,11 @@
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
-#include <linux/ptrace.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/system.h>
 
 #include <asm/mach/pci.h>
@@ -59,7 +57,7 @@ static struct pci_ops via82c505_ops = {
 	.write	= via82c505_write_config,
 };
 
-void __init via82c505_preinit(void *sysdata)
+void __init via82c505_preinit(void)
 {
 	printk(KERN_DEBUG "PCI: VIA 82c505\n");
 	if (!request_region(0xA8,2,"via config")) {

@@ -16,8 +16,6 @@
  * Part of the code in this driver was inspired by the old async-only
  * PPP driver, written by Michael Callahan and Al Longyear, and
  * subsequently hacked by Paul Mackerras.
- *
- * ==FILEVERSION 20020125==
  */
 
 #include <linux/module.h>
@@ -26,16 +24,21 @@
 #include <linux/tty.h>
 #include <linux/netdevice.h>
 #include <linux/poll.h>
+#include <linux/crc-ccitt.h>
 #include <linux/ppp_defs.h>
 #include <linux/if_ppp.h>
 #include <linux/ppp_channel.h>
 #include <linux/spinlock.h>
 #include <linux/init.h>
+#include <linux/jiffies.h>
+#include <linux/slab.h>
+#include <asm/unaligned.h>
 #include <asm/uaccess.h>
+#include <asm/string.h>
 
 #define PPP_VERSION	"2.4.2"
 
-#define OBUFSIZE	256
+#define OBUFSIZE	4096
 
 /* Structure for storing local state. */
 struct asyncppp {
@@ -61,6 +64,9 @@ struct asyncppp {
 
 	struct sk_buff	*rpkt;
 	int		lcp_fcs;
+	struct sk_buff_head rqueue;
+
+	struct tasklet_struct tsk;
 
 	atomic_t	refcnt;
 	struct semaphore dead_sem;
@@ -74,14 +80,15 @@ struct asyncppp {
 #define XMIT_BUSY	2
 
 /* State bits */
-#define SC_TOSS		0x20000000
-#define SC_ESCAPE	0x40000000
+#define SC_TOSS		1
+#define SC_ESCAPE	2
+#define SC_PREV_ERROR	4
 
 /* Bits in rbits */
 #define SC_RCV_BITS	(SC_RCV_B7_1|SC_RCV_B7_0|SC_RCV_ODDP|SC_RCV_EVNP)
 
 static int flag_time = HZ;
-MODULE_PARM(flag_time, "i");
+module_param(flag_time, int, 0);
 MODULE_PARM_DESC(flag_time, "ppp_async: interval between flagged packets (in clock ticks)");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_LDISC(N_PPP);
@@ -97,12 +104,14 @@ static void ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 			    char *flags, int count);
 static int ppp_async_ioctl(struct ppp_channel *chan, unsigned int cmd,
 			   unsigned long arg);
+static void ppp_async_process(unsigned long arg);
+
 static void async_lcp_peek(struct asyncppp *ap, unsigned char *data,
 			   int len, int inbound);
 
-static struct ppp_channel_ops async_ops = {
-	ppp_async_send,
-	ppp_async_ioctl
+static const struct ppp_channel_ops async_ops = {
+	.start_xmit = ppp_async_send,
+	.ioctl      = ppp_async_ioctl,
 };
 
 /*
@@ -117,8 +126,11 @@ static struct ppp_channel_ops async_ops = {
  * frees the memory that ppp_asynctty_receive is using.  The best
  * way to fix this is to use a rwlock in the tty struct, but for now
  * we use a single global rwlock for all ttys in ppp line discipline.
+ *
+ * FIXME: this is no longer true. The _close path for the ldisc is
+ * now guaranteed to be sane.
  */
-static rwlock_t disc_data_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(disc_data_lock);
 
 static struct asyncppp *ap_get(struct tty_struct *tty)
 {
@@ -139,21 +151,25 @@ static void ap_put(struct asyncppp *ap)
 }
 
 /*
- * Called when a tty is put into PPP line discipline.
+ * Called when a tty is put into PPP line discipline. Called in process
+ * context.
  */
 static int
 ppp_asynctty_open(struct tty_struct *tty)
 {
 	struct asyncppp *ap;
 	int err;
+	int speed;
+
+	if (tty->ops->write == NULL)
+		return -EOPNOTSUPP;
 
 	err = -ENOMEM;
-	ap = kmalloc(sizeof(*ap), GFP_KERNEL);
-	if (ap == 0)
+	ap = kzalloc(sizeof(*ap), GFP_KERNEL);
+	if (!ap)
 		goto out;
 
 	/* initialize the asyncppp structure */
-	memset(ap, 0, sizeof(*ap));
 	ap->tty = tty;
 	ap->mru = PPP_MRU;
 	spin_lock_init(&ap->xmit_lock);
@@ -165,18 +181,23 @@ ppp_asynctty_open(struct tty_struct *tty)
 	ap->olim = ap->obuf;
 	ap->lcp_fcs = -1;
 
+	skb_queue_head_init(&ap->rqueue);
+	tasklet_init(&ap->tsk, ppp_async_process, (unsigned long) ap);
+
 	atomic_set(&ap->refcnt, 1);
-	init_MUTEX_LOCKED(&ap->dead_sem);
+	sema_init(&ap->dead_sem, 0);
 
 	ap->chan.private = ap;
 	ap->chan.ops = &async_ops;
 	ap->chan.mtu = PPP_MRU;
+	speed = tty_get_baud_rate(tty);
+	ap->chan.speed = speed;
 	err = ppp_register_channel(&ap->chan);
 	if (err)
 		goto out_free;
 
 	tty->disc_data = ap;
-
+	tty->receive_room = 65536;
 	return 0;
 
  out_free:
@@ -198,11 +219,11 @@ ppp_asynctty_close(struct tty_struct *tty)
 {
 	struct asyncppp *ap;
 
-	write_lock(&disc_data_lock);
+	write_lock_irq(&disc_data_lock);
 	ap = tty->disc_data;
-	tty->disc_data = 0;
-	write_unlock(&disc_data_lock);
-	if (ap == 0)
+	tty->disc_data = NULL;
+	write_unlock_irq(&disc_data_lock);
+	if (!ap)
 		return;
 
 	/*
@@ -214,13 +235,25 @@ ppp_asynctty_close(struct tty_struct *tty)
 	 */
 	if (!atomic_dec_and_test(&ap->refcnt))
 		down(&ap->dead_sem);
+	tasklet_kill(&ap->tsk);
 
 	ppp_unregister_channel(&ap->chan);
-	if (ap->rpkt != 0)
-		kfree_skb(ap->rpkt);
-	if (ap->tpkt != 0)
-		kfree_skb(ap->tpkt);
+	kfree_skb(ap->rpkt);
+	skb_queue_purge(&ap->rqueue);
+	kfree_skb(ap->tpkt);
 	kfree(ap);
+}
+
+/*
+ * Called on tty hangup in process context.
+ *
+ * Wait for I/O to driver to complete and unregister PPP channel.
+ * This is already done by the close routine, so just call that.
+ */
+static int ppp_asynctty_hangup(struct tty_struct *tty)
+{
+	ppp_asynctty_close(tty);
+	return 0;
 }
 
 /*
@@ -229,7 +262,7 @@ ppp_asynctty_close(struct tty_struct *tty)
  */
 static ssize_t
 ppp_asynctty_read(struct tty_struct *tty, struct file *file,
-		  unsigned char *buf, size_t count)
+		  unsigned char __user *buf, size_t count)
 {
 	return -EAGAIN;
 }
@@ -245,58 +278,54 @@ ppp_asynctty_write(struct tty_struct *tty, struct file *file,
 	return -EAGAIN;
 }
 
+/*
+ * Called in process context only. May be re-entered by multiple
+ * ioctl calling threads.
+ */
+
 static int
 ppp_asynctty_ioctl(struct tty_struct *tty, struct file *file,
 		   unsigned int cmd, unsigned long arg)
 {
 	struct asyncppp *ap = ap_get(tty);
 	int err, val;
+	int __user *p = (int __user *)arg;
 
-	if (ap == 0)
+	if (!ap)
 		return -ENXIO;
 	err = -EFAULT;
 	switch (cmd) {
 	case PPPIOCGCHAN:
-		err = -ENXIO;
-		if (ap == 0)
-			break;
 		err = -EFAULT;
-		if (put_user(ppp_channel_index(&ap->chan), (int *) arg))
+		if (put_user(ppp_channel_index(&ap->chan), p))
 			break;
 		err = 0;
 		break;
 
 	case PPPIOCGUNIT:
-		err = -ENXIO;
-		if (ap == 0)
-			break;
 		err = -EFAULT;
-		if (put_user(ppp_unit_number(&ap->chan), (int *) arg))
+		if (put_user(ppp_unit_number(&ap->chan), p))
 			break;
 		err = 0;
-		break;
-
-	case TCGETS:
-	case TCGETA:
-		err = n_tty_ioctl(tty, file, cmd, arg);
 		break;
 
 	case TCFLSH:
 		/* flush our buffers and the serial port's buffer */
 		if (arg == TCIOFLUSH || arg == TCOFLUSH)
 			ppp_async_flush_output(ap);
-		err = n_tty_ioctl(tty, file, cmd, arg);
+		err = tty_perform_flush(tty, arg);
 		break;
 
 	case FIONREAD:
 		val = 0;
-		if (put_user(val, (int *) arg))
+		if (put_user(val, p))
 			break;
 		err = 0;
 		break;
 
 	default:
-		err = -ENOIOCTLCMD;
+		/* Try the various mode ioctls */
+		err = tty_mode_ioctl(tty, file, cmd, arg);
 	}
 
 	ap_put(ap);
@@ -310,27 +339,23 @@ ppp_asynctty_poll(struct tty_struct *tty, struct file *file, poll_table *wait)
 	return 0;
 }
 
-static int
-ppp_asynctty_room(struct tty_struct *tty)
-{
-	return 65535;
-}
-
+/* May sleep, don't call from interrupt level or with interrupts disabled */
 static void
 ppp_asynctty_receive(struct tty_struct *tty, const unsigned char *buf,
-		  char *flags, int count)
+		  char *cflags, int count)
 {
 	struct asyncppp *ap = ap_get(tty);
+	unsigned long flags;
 
-	if (ap == 0)
+	if (!ap)
 		return;
-	spin_lock_bh(&ap->recv_lock);
-	ppp_async_input(ap, buf, flags, count);
-	spin_unlock_bh(&ap->recv_lock);
+	spin_lock_irqsave(&ap->recv_lock, flags);
+	ppp_async_input(ap, buf, cflags, count);
+	spin_unlock_irqrestore(&ap->recv_lock, flags);
+	if (!skb_queue_empty(&ap->rqueue))
+		tasklet_schedule(&ap->tsk);
 	ap_put(ap);
-	if (test_and_clear_bit(TTY_THROTTLED, &tty->flags)
-	    && tty->driver->unthrottle)
-		tty->driver->unthrottle(tty);
+	tty_unthrottle(tty);
 }
 
 static void
@@ -339,25 +364,25 @@ ppp_asynctty_wakeup(struct tty_struct *tty)
 	struct asyncppp *ap = ap_get(tty);
 
 	clear_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
-	if (ap == 0)
+	if (!ap)
 		return;
-	if (ppp_async_push(ap))
-		ppp_output_wakeup(&ap->chan);
+	set_bit(XMIT_WAKEUP, &ap->xmit_flags);
+	tasklet_schedule(&ap->tsk);
 	ap_put(ap);
 }
 
 
-static struct tty_ldisc ppp_ldisc = {
+static struct tty_ldisc_ops ppp_ldisc = {
 	.owner  = THIS_MODULE,
 	.magic	= TTY_LDISC_MAGIC,
 	.name	= "ppp",
 	.open	= ppp_asynctty_open,
 	.close	= ppp_asynctty_close,
+	.hangup	= ppp_asynctty_hangup,
 	.read	= ppp_asynctty_read,
 	.write	= ppp_asynctty_write,
 	.ioctl	= ppp_asynctty_ioctl,
 	.poll	= ppp_asynctty_poll,
-	.receive_room = ppp_asynctty_room,
 	.receive_buf = ppp_asynctty_receive,
 	.write_wakeup = ppp_asynctty_wakeup,
 };
@@ -381,6 +406,8 @@ static int
 ppp_async_ioctl(struct ppp_channel *chan, unsigned int cmd, unsigned long arg)
 {
 	struct asyncppp *ap = chan->private;
+	void __user *argp = (void __user *)arg;
+	int __user *p = argp;
 	int err, val;
 	u32 accm[8];
 
@@ -388,49 +415,49 @@ ppp_async_ioctl(struct ppp_channel *chan, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case PPPIOCGFLAGS:
 		val = ap->flags | ap->rbits;
-		if (put_user(val, (int *) arg))
+		if (put_user(val, p))
 			break;
 		err = 0;
 		break;
 	case PPPIOCSFLAGS:
-		if (get_user(val, (int *) arg))
+		if (get_user(val, p))
 			break;
 		ap->flags = val & ~SC_RCV_BITS;
-		spin_lock_bh(&ap->recv_lock);
+		spin_lock_irq(&ap->recv_lock);
 		ap->rbits = val & SC_RCV_BITS;
-		spin_unlock_bh(&ap->recv_lock);
+		spin_unlock_irq(&ap->recv_lock);
 		err = 0;
 		break;
 
 	case PPPIOCGASYNCMAP:
-		if (put_user(ap->xaccm[0], (u32 *) arg))
+		if (put_user(ap->xaccm[0], (u32 __user *)argp))
 			break;
 		err = 0;
 		break;
 	case PPPIOCSASYNCMAP:
-		if (get_user(ap->xaccm[0], (u32 *) arg))
+		if (get_user(ap->xaccm[0], (u32 __user *)argp))
 			break;
 		err = 0;
 		break;
 
 	case PPPIOCGRASYNCMAP:
-		if (put_user(ap->raccm, (u32 *) arg))
+		if (put_user(ap->raccm, (u32 __user *)argp))
 			break;
 		err = 0;
 		break;
 	case PPPIOCSRASYNCMAP:
-		if (get_user(ap->raccm, (u32 *) arg))
+		if (get_user(ap->raccm, (u32 __user *)argp))
 			break;
 		err = 0;
 		break;
 
 	case PPPIOCGXASYNCMAP:
-		if (copy_to_user((void __user *) arg, ap->xaccm, sizeof(ap->xaccm)))
+		if (copy_to_user(argp, ap->xaccm, sizeof(ap->xaccm)))
 			break;
 		err = 0;
 		break;
 	case PPPIOCSXASYNCMAP:
-		if (copy_from_user(accm, (void __user *) arg, sizeof(accm)))
+		if (copy_from_user(accm, argp, sizeof(accm)))
 			break;
 		accm[2] &= ~0x40000000U;	/* can't escape 0x5e */
 		accm[3] |= 0x60000000U;		/* must escape 0x7d, 0x7e */
@@ -439,12 +466,12 @@ ppp_async_ioctl(struct ppp_channel *chan, unsigned int cmd, unsigned long arg)
 		break;
 
 	case PPPIOCGMRU:
-		if (put_user(ap->mru, (int *) arg))
+		if (put_user(ap->mru, p))
 			break;
 		err = 0;
 		break;
 	case PPPIOCSMRU:
-		if (get_user(val, (int *) arg))
+		if (get_user(val, p))
 			break;
 		if (val < PPP_MRU)
 			val = PPP_MRU;
@@ -460,45 +487,30 @@ ppp_async_ioctl(struct ppp_channel *chan, unsigned int cmd, unsigned long arg)
 }
 
 /*
+ * This is called at softirq level to deliver received packets
+ * to the ppp_generic code, and to tell the ppp_generic code
+ * if we can accept more output now.
+ */
+static void ppp_async_process(unsigned long arg)
+{
+	struct asyncppp *ap = (struct asyncppp *) arg;
+	struct sk_buff *skb;
+
+	/* process received packets */
+	while ((skb = skb_dequeue(&ap->rqueue)) != NULL) {
+		if (skb->cb[0])
+			ppp_input_error(&ap->chan, 0);
+		ppp_input(&ap->chan, skb);
+	}
+
+	/* try to push more stuff out */
+	if (test_bit(XMIT_WAKEUP, &ap->xmit_flags) && ppp_async_push(ap))
+		ppp_output_wakeup(&ap->chan);
+}
+
+/*
  * Procedures for encapsulation and framing.
  */
-
-u16 ppp_crc16_table[256] = {
-	0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
-	0x8c48, 0x9dc1, 0xaf5a, 0xbed3, 0xca6c, 0xdbe5, 0xe97e, 0xf8f7,
-	0x1081, 0x0108, 0x3393, 0x221a, 0x56a5, 0x472c, 0x75b7, 0x643e,
-	0x9cc9, 0x8d40, 0xbfdb, 0xae52, 0xdaed, 0xcb64, 0xf9ff, 0xe876,
-	0x2102, 0x308b, 0x0210, 0x1399, 0x6726, 0x76af, 0x4434, 0x55bd,
-	0xad4a, 0xbcc3, 0x8e58, 0x9fd1, 0xeb6e, 0xfae7, 0xc87c, 0xd9f5,
-	0x3183, 0x200a, 0x1291, 0x0318, 0x77a7, 0x662e, 0x54b5, 0x453c,
-	0xbdcb, 0xac42, 0x9ed9, 0x8f50, 0xfbef, 0xea66, 0xd8fd, 0xc974,
-	0x4204, 0x538d, 0x6116, 0x709f, 0x0420, 0x15a9, 0x2732, 0x36bb,
-	0xce4c, 0xdfc5, 0xed5e, 0xfcd7, 0x8868, 0x99e1, 0xab7a, 0xbaf3,
-	0x5285, 0x430c, 0x7197, 0x601e, 0x14a1, 0x0528, 0x37b3, 0x263a,
-	0xdecd, 0xcf44, 0xfddf, 0xec56, 0x98e9, 0x8960, 0xbbfb, 0xaa72,
-	0x6306, 0x728f, 0x4014, 0x519d, 0x2522, 0x34ab, 0x0630, 0x17b9,
-	0xef4e, 0xfec7, 0xcc5c, 0xddd5, 0xa96a, 0xb8e3, 0x8a78, 0x9bf1,
-	0x7387, 0x620e, 0x5095, 0x411c, 0x35a3, 0x242a, 0x16b1, 0x0738,
-	0xffcf, 0xee46, 0xdcdd, 0xcd54, 0xb9eb, 0xa862, 0x9af9, 0x8b70,
-	0x8408, 0x9581, 0xa71a, 0xb693, 0xc22c, 0xd3a5, 0xe13e, 0xf0b7,
-	0x0840, 0x19c9, 0x2b52, 0x3adb, 0x4e64, 0x5fed, 0x6d76, 0x7cff,
-	0x9489, 0x8500, 0xb79b, 0xa612, 0xd2ad, 0xc324, 0xf1bf, 0xe036,
-	0x18c1, 0x0948, 0x3bd3, 0x2a5a, 0x5ee5, 0x4f6c, 0x7df7, 0x6c7e,
-	0xa50a, 0xb483, 0x8618, 0x9791, 0xe32e, 0xf2a7, 0xc03c, 0xd1b5,
-	0x2942, 0x38cb, 0x0a50, 0x1bd9, 0x6f66, 0x7eef, 0x4c74, 0x5dfd,
-	0xb58b, 0xa402, 0x9699, 0x8710, 0xf3af, 0xe226, 0xd0bd, 0xc134,
-	0x39c3, 0x284a, 0x1ad1, 0x0b58, 0x7fe7, 0x6e6e, 0x5cf5, 0x4d7c,
-	0xc60c, 0xd785, 0xe51e, 0xf497, 0x8028, 0x91a1, 0xa33a, 0xb2b3,
-	0x4a44, 0x5bcd, 0x6956, 0x78df, 0x0c60, 0x1de9, 0x2f72, 0x3efb,
-	0xd68d, 0xc704, 0xf59f, 0xe416, 0x90a9, 0x8120, 0xb3bb, 0xa232,
-	0x5ac5, 0x4b4c, 0x79d7, 0x685e, 0x1ce1, 0x0d68, 0x3ff3, 0x2e7a,
-	0xe70e, 0xf687, 0xc41c, 0xd595, 0xa12a, 0xb0a3, 0x8238, 0x93b1,
-	0x6b46, 0x7acf, 0x4854, 0x59dd, 0x2d62, 0x3ceb, 0x0e70, 0x1ff9,
-	0xf78f, 0xe606, 0xd49d, 0xc514, 0xb1ab, 0xa022, 0x92b9, 0x8330,
-	0x7bc7, 0x6a4e, 0x58d5, 0x495c, 0x3de3, 0x2c6a, 0x1ef1, 0x0f78
-};
-EXPORT_SYMBOL(ppp_crc16_table);
-#define fcstab	ppp_crc16_table		/* for PPP_FCS macro */
 
 /*
  * Procedure to encode the data for async serial transmission.
@@ -531,7 +543,7 @@ ppp_async_encode(struct asyncppp *ap)
 	data = ap->tpkt->data;
 	count = ap->tpkt->len;
 	fcs = ap->tfcs;
-	proto = (data[0] << 8) + data[1];
+	proto = get_unaligned_be16(data);
 
 	/*
 	 * LCP packets with code values between 1 (configure-reqest)
@@ -548,8 +560,8 @@ ppp_async_encode(struct asyncppp *ap)
 		 * Start of a new packet - insert the leading FLAG
 		 * character if necessary.
 		 */
-		if (islcp || flag_time == 0
-		    || jiffies - ap->last_xmit >= flag_time)
+		if (islcp || flag_time == 0 ||
+		    time_after_eq(jiffies, ap->last_xmit + flag_time))
 			*buf++ = PPP_FLAG;
 		ap->last_xmit = jiffies;
 		fcs = PPP_INITFCS;
@@ -601,7 +613,7 @@ ppp_async_encode(struct asyncppp *ap)
 	ap->olim = buf;
 
 	kfree_skb(ap->tpkt);
-	ap->tpkt = 0;
+	ap->tpkt = NULL;
 	return 1;
 }
 
@@ -641,7 +653,6 @@ ppp_async_push(struct asyncppp *ap)
 	struct tty_struct *tty = ap->tty;
 	int tty_stuffed = 0;
 
-	set_bit(XMIT_WAKEUP, &ap->xmit_flags);
 	/*
 	 * We can get called recursively here if the tty write
 	 * function calls our wakeup function.  This can happen
@@ -660,7 +671,7 @@ ppp_async_push(struct asyncppp *ap)
 		if (!tty_stuffed && ap->optr < ap->olim) {
 			avail = ap->olim - ap->optr;
 			set_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
-			sent = tty->driver->write(tty, 0, ap->optr, avail);
+			sent = tty->ops->write(tty, ap->optr, avail);
 			if (sent < 0)
 				goto flush;	/* error, e.g. loss of CD */
 			ap->optr += sent;
@@ -668,7 +679,7 @@ ppp_async_push(struct asyncppp *ap)
 				tty_stuffed = 1;
 			continue;
 		}
-		if (ap->optr >= ap->olim && ap->tpkt != 0) {
+		if (ap->optr >= ap->olim && ap->tpkt) {
 			if (ppp_async_encode(ap)) {
 				/* finished processing ap->tpkt */
 				clear_bit(XMIT_FULL, &ap->xmit_flags);
@@ -687,8 +698,8 @@ ppp_async_push(struct asyncppp *ap)
 		 */
 		clear_bit(XMIT_BUSY, &ap->xmit_flags);
 		/* any more work to do? if not, exit the loop */
-		if (!(test_bit(XMIT_WAKEUP, &ap->xmit_flags)
-		      || (!tty_stuffed && ap->tpkt != 0)))
+		if (!(test_bit(XMIT_WAKEUP, &ap->xmit_flags) ||
+		      (!tty_stuffed && ap->tpkt)))
 			break;
 		/* more work to do, see if we can do it now */
 		if (test_and_set_bit(XMIT_BUSY, &ap->xmit_flags))
@@ -699,9 +710,9 @@ ppp_async_push(struct asyncppp *ap)
 
 flush:
 	clear_bit(XMIT_BUSY, &ap->xmit_flags);
-	if (ap->tpkt != 0) {
+	if (ap->tpkt) {
 		kfree_skb(ap->tpkt);
-		ap->tpkt = 0;
+		ap->tpkt = NULL;
 		clear_bit(XMIT_FULL, &ap->xmit_flags);
 		done = 1;
 	}
@@ -712,7 +723,8 @@ flush:
 
 /*
  * Flush output from our internal buffers.
- * Called for the TCFLSH ioctl.
+ * Called for the TCFLSH ioctl. Can be entered in parallel
+ * but this is covered by the xmit_lock.
  */
 static void
 ppp_async_flush_output(struct asyncppp *ap)
@@ -723,7 +735,7 @@ ppp_async_flush_output(struct asyncppp *ap)
 	ap->optr = ap->olim;
 	if (ap->tpkt != NULL) {
 		kfree_skb(ap->tpkt);
-		ap->tpkt = 0;
+		ap->tpkt = NULL;
 		clear_bit(XMIT_FULL, &ap->xmit_flags);
 		done = 1;
 	}
@@ -744,30 +756,27 @@ scan_ordinary(struct asyncppp *ap, const unsigned char *buf, int count)
 
 	for (i = 0; i < count; ++i) {
 		c = buf[i];
-		if (c == PPP_ESCAPE || c == PPP_FLAG
-		    || (c < 0x20 && (ap->raccm & (1 << c)) != 0))
+		if (c == PPP_ESCAPE || c == PPP_FLAG ||
+		    (c < 0x20 && (ap->raccm & (1 << c)) != 0))
 			break;
 	}
 	return i;
 }
 
 /* called when a flag is seen - do end-of-packet processing */
-static inline void
+static void
 process_input_packet(struct asyncppp *ap)
 {
 	struct sk_buff *skb;
 	unsigned char *p;
 	unsigned int len, fcs, proto;
-	int code = 0;
 
 	skb = ap->rpkt;
-	ap->rpkt = 0;
-	if ((ap->state & (SC_TOSS | SC_ESCAPE)) || skb == 0) {
-		ap->state &= ~(SC_TOSS | SC_ESCAPE);
-		if (skb != 0)
-			kfree_skb(skb);
-		return;
-	}
+	if (ap->state & (SC_TOSS | SC_ESCAPE))
+		goto err;
+
+	if (skb == NULL)
+		return;		/* 0-length packet */
 
 	/* check the FCS */
 	p = skb->data;
@@ -783,9 +792,9 @@ process_input_packet(struct asyncppp *ap)
 
 	/* check for address/control and protocol compression */
 	p = skb->data;
-	if (p[0] == PPP_ALLSTATIONS && p[1] == PPP_UI) {
+	if (p[0] == PPP_ALLSTATIONS) {
 		/* chop off address/control */
-		if (skb->len < 3)
+		if (p[1] != PPP_UI || skb->len < 3)
 			goto err;
 		p = skb_pull(skb, 2);
 	}
@@ -801,23 +810,26 @@ process_input_packet(struct asyncppp *ap)
 			async_lcp_peek(ap, p, skb->len, 1);
 	}
 
-	/* all OK, give it to the generic layer */
-	ppp_input(&ap->chan, skb);
+	/* queue the frame to be processed */
+	skb->cb[0] = ap->state;
+	skb_queue_tail(&ap->rqueue, skb);
+	ap->rpkt = NULL;
+	ap->state = 0;
 	return;
 
  err:
-	kfree_skb(skb);
-	ppp_input_error(&ap->chan, code);
+	/* frame had an error, remember that, reset SC_TOSS & SC_ESCAPE */
+	ap->state = SC_PREV_ERROR;
+	if (skb) {
+		/* make skb appear as freshly allocated */
+		skb_trim(skb, 0);
+		skb_reserve(skb, - skb_headroom(skb));
+	}
 }
 
-static inline void
-input_error(struct asyncppp *ap, int code)
-{
-	ap->state |= SC_TOSS;
-	ppp_input_error(&ap->chan, code);
-}
+/* Called when the tty driver has data for us. Runs parallel with the
+   other ldisc functions but will not be re-entered */
 
-/* called when the tty driver has data for us. */
 static void
 ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 		char *flags, int count)
@@ -831,7 +843,7 @@ ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 		s = 0;
 		for (i = 0; i < count; ++i) {
 			c = buf[i];
-			if (flags != 0 && flags[i] != 0)
+			if (flags && flags[i] != 0)
 				continue;
 			s |= (c & 0x80)? SC_RCV_B7_1: SC_RCV_B7_0;
 			c = ((c >> 4) ^ c) & 0xf;
@@ -848,7 +860,7 @@ ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 			n = scan_ordinary(ap, buf, count);
 
 		f = 0;
-		if (flags != 0 && (ap->state & SC_TOSS) == 0) {
+		if (flags && (ap->state & SC_TOSS) == 0) {
 			/* check the flags to see if any char had an error */
 			for (j = 0; j < n; ++j)
 				if ((f = flags[j]) != 0)
@@ -856,23 +868,30 @@ ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 		}
 		if (f != 0) {
 			/* start tossing */
-			input_error(ap, f);
+			ap->state |= SC_TOSS;
 
 		} else if (n > 0 && (ap->state & SC_TOSS) == 0) {
 			/* stuff the chars in the skb */
 			skb = ap->rpkt;
-			if (skb == 0) {
+			if (!skb) {
 				skb = dev_alloc_skb(ap->mru + PPP_HDRLEN + 2);
-				if (skb == 0)
+				if (!skb)
 					goto nomem;
-				/* Try to get the payload 4-byte aligned */
+ 				ap->rpkt = skb;
+ 			}
+ 			if (skb->len == 0) {
+ 				/* Try to get the payload 4-byte aligned.
+ 				 * This should match the
+ 				 * PPP_ALLSTATIONS/PPP_UI/compressed tests in
+ 				 * process_input_packet, but we do not have
+ 				 * enough chars here to test buf[1] and buf[2].
+ 				 */
 				if (buf[0] != PPP_ALLSTATIONS)
 					skb_reserve(skb, 2 + (buf[0] & 1));
-				ap->rpkt = skb;
 			}
 			if (n > skb_tailroom(skb)) {
 				/* packet overflowed MRU */
-				input_error(ap, 1);
+				ap->state |= SC_TOSS;
 			} else {
 				sp = skb_put(skb, n);
 				memcpy(sp, buf, n);
@@ -887,7 +906,9 @@ ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 			break;
 
 		c = buf[n];
-		if (c == PPP_FLAG) {
+		if (flags != NULL && flags[n] != 0) {
+			ap->state |= SC_TOSS;
+		} else if (c == PPP_FLAG) {
 			process_input_packet(ap);
 		} else if (c == PPP_ESCAPE) {
 			ap->state |= SC_ESCAPE;
@@ -901,7 +922,7 @@ ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 		++n;
 
 		buf += n;
-		if (flags != 0)
+		if (flags)
 			flags += n;
 		count -= n;
 	}
@@ -909,7 +930,7 @@ ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 
  nomem:
 	printk(KERN_ERR "PPPasync: no memory (input pkt)\n");
-	input_error(ap, 0);
+	ap->state |= SC_TOSS;
 }
 
 /*
@@ -943,7 +964,7 @@ static void async_lcp_peek(struct asyncppp *ap, unsigned char *data,
 	code = data[0];
 	if (code != CONFACK && code != CONFREQ)
 		return;
-	dlen = (data[2] << 8) + data[3];
+	dlen = get_unaligned_be16(data + 2);
 	if (len < dlen)
 		return;		/* packet got truncated or length is bogus */
 
@@ -974,18 +995,17 @@ static void async_lcp_peek(struct asyncppp *ap, unsigned char *data,
 	data += 4;
 	dlen -= 4;
 	/* data[0] is code, data[1] is length */
-	while (dlen >= 2 && dlen >= data[1]) {
+	while (dlen >= 2 && dlen >= data[1] && data[1] >= 2) {
 		switch (data[0]) {
 		case LCP_MRU:
-			val = (data[2] << 8) + data[3];
+			val = get_unaligned_be16(data + 2);
 			if (inbound)
 				ap->mru = val;
 			else
 				ap->chan.mtu = val;
 			break;
 		case LCP_ASYNCMAP:
-			val = (data[2] << 24) + (data[3] << 16)
-				+ (data[4] << 8) + data[5];
+			val = get_unaligned_be32(data + 2);
 			if (inbound)
 				ap->raccm = val;
 			else
@@ -999,7 +1019,7 @@ static void async_lcp_peek(struct asyncppp *ap, unsigned char *data,
 
 static void __exit ppp_async_cleanup(void)
 {
-	if (tty_register_ldisc(N_PPP, NULL) != 0)
+	if (tty_unregister_ldisc(N_PPP) != 0)
 		printk(KERN_ERR "failed to unregister PPP line discipline\n");
 }
 

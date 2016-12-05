@@ -22,10 +22,13 @@
  * aha1740_makecode may still need even more work
  * if it doesn't work for your devices, take a look.
  *
- * Reworked for new_eh and new locking by Alan Cox <alan@redhat.com>
+ * Reworked for new_eh and new locking by Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  * Converted to EISA and generic DMA APIs by Marc Zyngier
  * <maz@wild-wind.fr.eu.org>, 4/2003.
+ *
+ * Shared interrupt support added by Rask Ingemann Lambertsen
+ * <rask@sygehus.dk>, 10/2003
  *
  * For the avoidance of doubt the "preferred form" of this code is one which
  * is in an open non patent encumbered format. Where cryptographic key signing
@@ -47,13 +50,14 @@
 #include <linux/device.h>
 #include <linux/eisa.h>
 #include <linux/dma-mapping.h>
+#include <linux/gfp.h>
 
 #include <asm/dma.h>
 #include <asm/system.h>
 #include <asm/io.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "aha1740.h"
 
 /* IF YOU ARE HAVING PROBLEMS WITH THIS DRIVER, AND WANT TO WATCH
@@ -220,8 +224,7 @@ static int aha1740_test_port(unsigned int base)
 }
 
 /* A "high" level interrupt handler */
-static irqreturn_t aha1740_intr_handle(int irq, void *dev_id,
-				       struct pt_regs *regs)
+static irqreturn_t aha1740_intr_handle(int irq, void *dev_id)
 {
 	struct Scsi_Host *host = (struct Scsi_Host *) dev_id;
         void (*my_done)(Scsi_Cmnd *);
@@ -269,20 +272,8 @@ static irqreturn_t aha1740_intr_handle(int irq, void *dev_id,
 				continue;
 			}
 			sgptr = (struct aha1740_sg *) SCtmp->host_scribble;
-			if (SCtmp->use_sg) {
-				/* We used scatter-gather.
-				   Do the unmapping dance. */
-				dma_unmap_sg (&edev->dev,
-					      (struct scatterlist *) SCtmp->request_buffer,
-					      SCtmp->use_sg,
-					      SCtmp->sc_data_direction);
-			} else {
-				dma_unmap_single (&edev->dev,
-						  sgptr->buf_dma_addr,
-						  SCtmp->request_bufflen,
-						  DMA_BIDIRECTIONAL);
-			}
-	    
+			scsi_dma_unmap(SCtmp);
+
 			/* Free the sg block */
 			dma_free_coherent (&edev->dev,
 					   sizeof (struct aha1740_sg),
@@ -296,7 +287,7 @@ static irqreturn_t aha1740_intr_handle(int irq, void *dev_id,
 			   cdb when we come back */
 			if ( (adapstat & G2INTST_MASK) == G2INTST_CCBERROR ) {
 				memcpy(SCtmp->sense_buffer, ecbptr->sense, 
-				       sizeof(SCtmp->sense_buffer));
+				       SCSI_SENSE_BUFFERSIZE);
 				errstatus = aha1740_makecode(ecbptr->sense,ecbptr->status);
 			} else
 				errstatus = 0;
@@ -340,18 +331,16 @@ static irqreturn_t aha1740_intr_handle(int irq, void *dev_id,
 	return IRQ_RETVAL(handled);
 }
 
-static int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
+static int aha1740_queuecommand_lck(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 {
 	unchar direction;
 	unchar *cmd = (unchar *) SCpnt->cmnd;
-	unchar target = SCpnt->device->id;
+	unchar target = scmd_id(SCpnt);
 	struct aha1740_hostdata *host = HOSTDATA(SCpnt->device->host);
 	unsigned long flags;
-	void *buff = SCpnt->request_buffer;
-	int bufflen = SCpnt->request_bufflen;
 	dma_addr_t sg_dma;
 	struct aha1740_sg *sgptr;
-	int ecbno;
+	int ecbno, nseg;
 	DEB(int i);
 
 	if(*cmd == REQUEST_SENSE) {
@@ -421,24 +410,23 @@ static int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 	}
 	sgptr = (struct aha1740_sg *) SCpnt->host_scribble;
 	sgptr->sg_dma_addr = sg_dma;
-    
-	if (SCpnt->use_sg) {
-		struct scatterlist * sgpnt;
+
+	nseg = scsi_dma_map(SCpnt);
+	BUG_ON(nseg < 0);
+	if (nseg) {
+		struct scatterlist *sg;
 		struct aha1740_chain * cptr;
-		int i, count;
+		int i;
 		DEB(unsigned char * ptr);
 
 		host->ecb[ecbno].sg = 1;  /* SCSI Initiator Command
 					   * w/scatter-gather*/
-		sgpnt = (struct scatterlist *) SCpnt->request_buffer;
 		cptr = sgptr->sg_chain;
-		count = dma_map_sg (&host->edev->dev, sgpnt, SCpnt->use_sg,
-				    SCpnt->sc_data_direction);
-		for(i=0; i < count; i++) {
-			cptr[i].datalen = sg_dma_len (sgpnt + i);
-			cptr[i].dataptr = sg_dma_address (sgpnt + i);
+		scsi_for_each_sg(SCpnt, sg, nseg, i) {
+			cptr[i].datalen = sg_dma_len (sg);
+			cptr[i].dataptr = sg_dma_address (sg);
 		}
-		host->ecb[ecbno].datalen = count*sizeof(struct aha1740_chain);
+		host->ecb[ecbno].datalen = nseg * sizeof(struct aha1740_chain);
 		host->ecb[ecbno].dataptr = sg_dma;
 #ifdef DEBUG
 		printk("cptr %x: ",cptr);
@@ -446,11 +434,8 @@ static int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 		for(i=0;i<24;i++) printk("%02x ", ptr[i]);
 #endif
 	} else {
-		host->ecb[ecbno].datalen = bufflen;
-		sgptr->buf_dma_addr =  dma_map_single (&host->edev->dev,
-						       buff, bufflen,
-						       DMA_BIDIRECTIONAL);
-		host->ecb[ecbno].dataptr = sgptr->buf_dma_addr;
+		host->ecb[ecbno].datalen = 0;
+		host->ecb[ecbno].dataptr = 0;
 	}
 	host->ecb[ecbno].lun = SCpnt->device->lun;
 	host->ecb[ecbno].ses = 1; /* Suppress underrun errors */
@@ -476,7 +461,7 @@ static int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 	/* The Adaptec Spec says the card is so fast that the loops
            will only be executed once in the code below. Even if this
            was true with the fastest processors when the spec was
-           written, it doesn't seem to be true with todays fast
+           written, it doesn't seem to be true with today's fast
            processors. We print a warning if the code is executed more
            often than LOOPCNT_WARN. If this happens, it should be
            investigated. If the count reaches LOOPCNT_MAX, we assume
@@ -518,15 +503,19 @@ static int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 	return 0;
 }
 
-/* Query the board for its irq_level.  Nothing else matters
+static DEF_SCSI_QCMD(aha1740_queuecommand)
+
+/* Query the board for its irq_level and irq_type.  Nothing else matters
    in enhanced mode on an EISA bus. */
 
 static void aha1740_getconfig(unsigned int base, unsigned int *irq_level,
+			      unsigned int *irq_type,
 			      unsigned int *translation)
 {
 	static int intab[] = { 9, 10, 11, 12, 0, 14, 15, 0 };
 
 	*irq_level = intab[inb(INTDEF(base)) & 0x7];
+	*irq_type  = (inb(INTDEF(base)) & 0x8) >> 3;
 	*translation = inb(RESV1(base)) & 0x1;
 	outb(inb(INTDEF(base)) | 0x10, INTDEF(base));
 }
@@ -565,7 +554,7 @@ static int aha1740_eh_abort_handler (Scsi_Cmnd *dummy)
 	return 0;
 }
 
-static Scsi_Host_Template aha1740_template = {
+static struct scsi_host_template aha1740_template = {
 	.module           = THIS_MODULE,
 	.proc_name        = "aha1740",
 	.proc_info        = aha1740_proc_info,
@@ -582,8 +571,8 @@ static Scsi_Host_Template aha1740_template = {
 
 static int aha1740_probe (struct device *dev)
 {
-	int slotbase;
-	unsigned int irq_level, translation;
+	int slotbase, rc;
+	unsigned int irq_level, irq_type, translation;
 	struct Scsi_Host *shpnt;
 	struct aha1740_hostdata *host;
 	struct eisa_device *edev = to_eisa_device (dev);
@@ -595,15 +584,15 @@ static int aha1740_probe (struct device *dev)
 		return -EBUSY;
 	if (!aha1740_test_port(slotbase))
 		goto err_release_region;
-	aha1740_getconfig(slotbase,&irq_level,&translation);
+	aha1740_getconfig(slotbase,&irq_level,&irq_type,&translation);
 	if ((inb(G2STAT(slotbase)) &
 	     (G2STAT_MBXOUT|G2STAT_BUSY)) != G2STAT_MBXOUT) {
 		/* If the card isn't ready, hard reset it */
 		outb(G2CNTRL_HRST, G2CNTRL(slotbase));
 		outb(0, G2CNTRL(slotbase));
 	}
-	printk(KERN_INFO "Configuring slot %d at IO:%x, IRQ %d\n",
-	       edev->slot, slotbase, irq_level);
+	printk(KERN_INFO "Configuring slot %d at IO:%x, IRQ %u (%s)\n",
+	       edev->slot, slotbase, irq_level, irq_type ? "edge" : "level");
 	printk(KERN_INFO "aha174x: Extended translation %sabled.\n",
 	       translation ? "en" : "dis");
 	shpnt = scsi_host_alloc(&aha1740_template,
@@ -629,17 +618,24 @@ static int aha1740_probe (struct device *dev)
 	}
 	
 	DEB(printk("aha1740_probe: enable interrupt channel %d\n",irq_level));
-	if (request_irq(irq_level,aha1740_intr_handle,0,"aha1740",shpnt)) {
+	if (request_irq(irq_level,aha1740_intr_handle,irq_type ? 0 : IRQF_SHARED,
+			"aha1740",shpnt)) {
 		printk(KERN_ERR "aha1740_probe: Unable to allocate IRQ %d.\n",
 		       irq_level);
 		goto err_unmap;
 	}
 
 	eisa_set_drvdata (edev, shpnt);
-	scsi_add_host (shpnt, dev); /* XXX handle failure */
+
+	rc = scsi_add_host (shpnt, dev);
+	if (rc)
+		goto err_irq;
+
 	scsi_scan_host (shpnt);
 	return 0;
 
+ err_irq:
+ 	free_irq(irq_level, shpnt);
  err_unmap:
 	dma_unmap_single (&edev->dev, host->ecb_dma_addr,
 			  sizeof (host->ecb), DMA_BIDIRECTIONAL);
@@ -653,7 +649,7 @@ static int aha1740_probe (struct device *dev)
 
 static __devexit int aha1740_remove (struct device *dev)
 {
-	struct Scsi_Host *shpnt = dev->driver_data;
+	struct Scsi_Host *shpnt = dev_get_drvdata(dev);
 	struct aha1740_hostdata *host = HOSTDATA (shpnt);
 
 	scsi_remove_host(shpnt);
@@ -675,6 +671,7 @@ static struct eisa_device_id aha1740_ids[] = {
 	{ "ADP0400" },		/* 1744  */
 	{ "" }
 };
+MODULE_DEVICE_TABLE(eisa, aha1740_ids);
 
 static struct eisa_driver aha1740_driver = {
 	.id_table = aha1740_ids,

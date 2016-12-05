@@ -1,7 +1,5 @@
 /* Driver for SanDisk SDDR-55 SmartMedia reader
  *
- * $Id:$
- *
  * SDDR55 driver v0.1:
  *
  * First release
@@ -24,16 +22,61 @@
  * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include "transport.h"
-#include "raw_bulk.h"
-#include "protocol.h"
-#include "usb.h"
-#include "debug.h"
-#include "sddr55.h"
-
 #include <linux/jiffies.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/slab.h>
+
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
+
+#include "usb.h"
+#include "transport.h"
+#include "protocol.h"
+#include "debug.h"
+
+MODULE_DESCRIPTION("Driver for SanDisk SDDR-55 SmartMedia reader");
+MODULE_AUTHOR("Simon Munton");
+MODULE_LICENSE("GPL");
+
+/*
+ * The table of devices
+ */
+#define UNUSUAL_DEV(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax, \
+		    vendorName, productName, useProtocol, useTransport, \
+		    initFunction, flags) \
+{ USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
+  .driver_info = (flags)|(USB_US_TYPE_STOR<<24) }
+
+struct usb_device_id sddr55_usb_ids[] = {
+#	include "unusual_sddr55.h"
+	{ }		/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(usb, sddr55_usb_ids);
+
+#undef UNUSUAL_DEV
+
+/*
+ * The flags table
+ */
+#define UNUSUAL_DEV(idVendor, idProduct, bcdDeviceMin, bcdDeviceMax, \
+		    vendor_name, product_name, use_protocol, use_transport, \
+		    init_function, Flags) \
+{ \
+	.vendorName = vendor_name,	\
+	.productName = product_name,	\
+	.useProtocol = use_protocol,	\
+	.useTransport = use_transport,	\
+	.initFunction = init_function,	\
+}
+
+static struct us_unusual_dev sddr55_unusual_dev_list[] = {
+#	include "unusual_sddr55.h"
+	{ }		/* Terminating entry */
+};
+
+#undef UNUSUAL_DEV
+
 
 #define short_pack(lsb,msb) ( ((u16)(lsb)) | ( ((u16)(msb))<<8 ) )
 #define LSB_of(s) ((s)&0xFF)
@@ -75,7 +118,7 @@ static int
 sddr55_bulk_transport(struct us_data *us, int direction,
 		      unsigned char *data, unsigned int len) {
 	struct sddr55_card_info *info = (struct sddr55_card_info *)us->extra;
-	unsigned int pipe = (direction == SCSI_DATA_READ) ?
+	unsigned int pipe = (direction == DMA_FROM_DEVICE) ?
 			us->recv_bulk_pipe : us->send_bulk_pipe;
 
 	if (!len)
@@ -100,7 +143,7 @@ static int sddr55_status(struct us_data *us)
 	command[5] = 0xB0;
 	command[7] = 0x80;
 	result = sddr55_bulk_transport(us,
-		SCSI_DATA_WRITE, command, 8);
+		DMA_TO_DEVICE, command, 8);
 
 	US_DEBUGP("Result for send_command in status %d\n",
 		result);
@@ -111,15 +154,13 @@ static int sddr55_status(struct us_data *us)
 	}
 
 	result = sddr55_bulk_transport(us,
-		SCSI_DATA_READ, status,	4);
+		DMA_FROM_DEVICE, status,	4);
 
 	/* expect to get short transfer if no card fitted */
 	if (result == USB_STOR_XFER_SHORT || result == USB_STOR_XFER_STALLED) {
 		/* had a short transfer, no card inserted, free map memory */
-		if (info->lba_to_pba)
-			kfree(info->lba_to_pba);
-		if (info->pba_to_lba)
-			kfree(info->pba_to_lba);
+		kfree(info->lba_to_pba);
+		kfree(info->pba_to_lba);
 		info->lba_to_pba = NULL;
 		info->pba_to_lba = NULL;
 
@@ -140,7 +181,7 @@ static int sddr55_status(struct us_data *us)
 
 	/* now read status */
 	result = sddr55_bulk_transport(us,
-		SCSI_DATA_READ, status,	2);
+		DMA_FROM_DEVICE, status,	2);
 
 	if (result != USB_STOR_XFER_GOOD) {
 		set_sense_info (4, 0, 0);	/* hardware error */
@@ -154,30 +195,32 @@ static int sddr55_status(struct us_data *us)
 static int sddr55_read_data(struct us_data *us,
 		unsigned int lba,
 		unsigned int page,
-		unsigned short sectors,
-		unsigned char *content,
-		int use_sg) {
+		unsigned short sectors) {
 
 	int result = USB_STOR_TRANSPORT_GOOD;
 	unsigned char *command = us->iobuf;
 	unsigned char *status = us->iobuf;
 	struct sddr55_card_info *info = (struct sddr55_card_info *)us->extra;
+	unsigned char *buffer;
 
 	unsigned int pba;
 	unsigned long address;
 
 	unsigned short pages;
-	unsigned char *buffer = NULL;
-	unsigned char *ptr;
-	int len;
+	unsigned int len, offset;
+	struct scatterlist *sg;
 
-	len = sectors * PAGESIZE;
+	// Since we only read in one block at a time, we have to create
+	// a bounce buffer and move the data a piece at a time between the
+	// bounce buffer and the actual transfer buffer.
 
-	buffer = (use_sg ? kmalloc(len, GFP_NOIO) : content);
+	len = min((unsigned int) sectors, (unsigned int) info->blocksize >>
+			info->smallpageshift) * PAGESIZE;
+	buffer = kmalloc(len, GFP_NOIO);
 	if (buffer == NULL)
 		return USB_STOR_TRANSPORT_ERROR; /* out of memory */
-
-	ptr = buffer;
+	offset = 0;
+	sg = NULL;
 
 	while (sectors>0) {
 
@@ -189,9 +232,9 @@ static int sddr55_read_data(struct us_data *us,
 
 		// Read as many sectors as possible in this block
 
-		pages = info->blocksize - page;
-		if (pages > (sectors << info->smallpageshift))
-			pages = (sectors << info->smallpageshift);
+		pages = min((unsigned int) sectors << info->smallpageshift,
+				info->blocksize - page);
+		len = pages << info->pageshift;
 
 		US_DEBUGP("Read %02X pages, from PBA %04X"
 			" (LBA %04X) page %02X\n",
@@ -199,7 +242,7 @@ static int sddr55_read_data(struct us_data *us,
 
 		if (pba == NOT_ALLOCATED) {
 			/* no pba for this lba, fill with zeroes */
-			memset (ptr, 0, pages << info->pageshift);
+			memset (buffer, 0, len);
 		} else {
 
 			address = (pba << info->blockshift) + page;
@@ -216,7 +259,7 @@ static int sddr55_read_data(struct us_data *us,
 
 			/* send command */
 			result = sddr55_bulk_transport(us,
-				SCSI_DATA_WRITE, command, 8);
+				DMA_TO_DEVICE, command, 8);
 
 			US_DEBUGP("Result for send_command in read_data %d\n",
 				result);
@@ -228,8 +271,7 @@ static int sddr55_read_data(struct us_data *us,
 
 			/* read data */
 			result = sddr55_bulk_transport(us,
-				SCSI_DATA_READ, ptr,
-				pages<<info->pageshift);
+				DMA_FROM_DEVICE, buffer, len);
 
 			if (result != USB_STOR_XFER_GOOD) {
 				result = USB_STOR_TRANSPORT_ERROR;
@@ -238,7 +280,7 @@ static int sddr55_read_data(struct us_data *us,
 
 			/* now read status */
 			result = sddr55_bulk_transport(us,
-				SCSI_DATA_READ, status, 2);
+				DMA_FROM_DEVICE, status, 2);
 
 			if (result != USB_STOR_XFER_GOOD) {
 				result = USB_STOR_TRANSPORT_ERROR;
@@ -253,18 +295,19 @@ static int sddr55_read_data(struct us_data *us,
 			}
 		}
 
+		// Store the data in the transfer buffer
+		usb_stor_access_xfer_buf(buffer, len, us->srb,
+				&sg, &offset, TO_XFER_BUF);
+
 		page = 0;
 		lba++;
 		sectors -= pages >> info->smallpageshift;
-		ptr += (pages << info->pageshift);
 	}
 
-	us_copy_to_sgbuf_all(buffer, len, content, use_sg);
 	result = USB_STOR_TRANSPORT_GOOD;
 
 leave:
-	if (use_sg)
-		kfree(buffer);
+	kfree(buffer);
 
 	return result;
 }
@@ -272,23 +315,22 @@ leave:
 static int sddr55_write_data(struct us_data *us,
 		unsigned int lba,
 		unsigned int page,
-		unsigned short sectors,
-		unsigned char *content,
-		int use_sg) {
+		unsigned short sectors) {
 
 	int result = USB_STOR_TRANSPORT_GOOD;
 	unsigned char *command = us->iobuf;
 	unsigned char *status = us->iobuf;
 	struct sddr55_card_info *info = (struct sddr55_card_info *)us->extra;
+	unsigned char *buffer;
 
 	unsigned int pba;
 	unsigned int new_pba;
 	unsigned long address;
 
 	unsigned short pages;
-	unsigned char *buffer = NULL;
-	unsigned char *ptr;
-	int i, len;
+	int i;
+	unsigned int len, offset;
+	struct scatterlist *sg;
 
 	/* check if we are allowed to write */
 	if (info->read_only || info->force_read_only) {
@@ -296,13 +338,17 @@ static int sddr55_write_data(struct us_data *us,
 		return USB_STOR_TRANSPORT_FAILED;
 	}
 
-	len = sectors * PAGESIZE;
+	// Since we only write one block at a time, we have to create
+	// a bounce buffer and move the data a piece at a time between the
+	// bounce buffer and the actual transfer buffer.
 
-	buffer = us_copy_from_sgbuf_all(content, len, use_sg);
+	len = min((unsigned int) sectors, (unsigned int) info->blocksize >>
+			info->smallpageshift) * PAGESIZE;
+	buffer = kmalloc(len, GFP_NOIO);
 	if (buffer == NULL)
 		return USB_STOR_TRANSPORT_ERROR;
-
-	ptr = buffer;
+	offset = 0;
+	sg = NULL;
 
 	while (sectors > 0) {
 
@@ -314,9 +360,13 @@ static int sddr55_write_data(struct us_data *us,
 
 		// Write as many sectors as possible in this block
 
-		pages = info->blocksize - page;
-		if (pages > (sectors << info->smallpageshift))
-			pages = (sectors << info->smallpageshift);
+		pages = min((unsigned int) sectors << info->smallpageshift,
+				info->blocksize - page);
+		len = pages << info->pageshift;
+
+		// Get the data from the transfer buffer
+		usb_stor_access_xfer_buf(buffer, len, us->srb,
+				&sg, &offset, FROM_XFER_BUF);
 
 		US_DEBUGP("Write %02X pages, to PBA %04X"
 			" (LBA %04X) page %02X\n",
@@ -386,7 +436,7 @@ static int sddr55_write_data(struct us_data *us,
 
 		/* send command */
 		result = sddr55_bulk_transport(us,
-			SCSI_DATA_WRITE, command, 8);
+			DMA_TO_DEVICE, command, 8);
 
 		if (result != USB_STOR_XFER_GOOD) {
 			US_DEBUGP("Result for send_command in write_data %d\n",
@@ -400,8 +450,7 @@ static int sddr55_write_data(struct us_data *us,
 
 		/* send the data */
 		result = sddr55_bulk_transport(us,
-			SCSI_DATA_WRITE, ptr,
-			pages<<info->pageshift);
+			DMA_TO_DEVICE, buffer, len);
 
 		if (result != USB_STOR_XFER_GOOD) {
 			US_DEBUGP("Result for send_data in write_data %d\n",
@@ -414,7 +463,7 @@ static int sddr55_write_data(struct us_data *us,
 		}
 
 		/* now read status */
-		result = sddr55_bulk_transport(us, SCSI_DATA_READ, status, 6);
+		result = sddr55_bulk_transport(us, DMA_FROM_DEVICE, status, 6);
 
 		if (result != USB_STOR_XFER_GOOD) {
 			US_DEBUGP("Result for get_status in write_data %d\n",
@@ -461,13 +510,11 @@ static int sddr55_write_data(struct us_data *us,
 		page = 0;
 		lba++;
 		sectors -= pages >> info->smallpageshift;
-		ptr += (pages << info->pageshift);
 	}
 	result = USB_STOR_TRANSPORT_GOOD;
 
  leave:
-	if (use_sg)
-		kfree(buffer);
+	kfree(buffer);
 	return result;
 }
 
@@ -482,7 +529,7 @@ static int sddr55_read_deviceID(struct us_data *us,
 	memset(command, 0, 8);
 	command[5] = 0xB0;
 	command[7] = 0x84;
-	result = sddr55_bulk_transport(us, SCSI_DATA_WRITE, command, 8);
+	result = sddr55_bulk_transport(us, DMA_TO_DEVICE, command, 8);
 
 	US_DEBUGP("Result of send_control for device ID is %d\n",
 		result);
@@ -491,7 +538,7 @@ static int sddr55_read_deviceID(struct us_data *us,
 		return USB_STOR_TRANSPORT_ERROR;
 
 	result = sddr55_bulk_transport(us,
-		SCSI_DATA_READ, content, 4);
+		DMA_FROM_DEVICE, content, 4);
 
 	if (result != USB_STOR_XFER_GOOD)
 		return USB_STOR_TRANSPORT_ERROR;
@@ -501,22 +548,23 @@ static int sddr55_read_deviceID(struct us_data *us,
 
 	if (content[0] != 0xff)	{
     		result = sddr55_bulk_transport(us,
-			SCSI_DATA_READ, content, 2);
+			DMA_FROM_DEVICE, content, 2);
 	}
 
 	return USB_STOR_TRANSPORT_GOOD;
 }
 
 
-int sddr55_reset(struct us_data *us) {
+static int sddr55_reset(struct us_data *us)
+{
 	return 0;
 }
 
 
 static unsigned long sddr55_get_capacity(struct us_data *us) {
 
-	unsigned char manufacturerID;
-	unsigned char deviceID;
+	unsigned char uninitialized_var(manufacturerID);
+	unsigned char uninitialized_var(deviceID);
 	int result;
 	struct sddr55_card_info *info = (struct sddr55_card_info *)us->extra;
 
@@ -623,39 +671,35 @@ static int sddr55_read_map(struct us_data *us) {
 	command[6] = numblocks * 2 / 256;
 	command[7] = 0x8A;
 
-	result = sddr55_bulk_transport(us, SCSI_DATA_WRITE, command, 8);
+	result = sddr55_bulk_transport(us, DMA_TO_DEVICE, command, 8);
 
 	if ( result != USB_STOR_XFER_GOOD) {
 		kfree (buffer);
 		return -1;
 	}
 
-	result = sddr55_bulk_transport(us, SCSI_DATA_READ, buffer, numblocks * 2);
+	result = sddr55_bulk_transport(us, DMA_FROM_DEVICE, buffer, numblocks * 2);
 
 	if ( result != USB_STOR_XFER_GOOD) {
 		kfree (buffer);
 		return -1;
 	}
 
-	result = sddr55_bulk_transport(us, SCSI_DATA_READ, command, 2);
+	result = sddr55_bulk_transport(us, DMA_FROM_DEVICE, command, 2);
 
 	if ( result != USB_STOR_XFER_GOOD) {
 		kfree (buffer);
 		return -1;
 	}
 
-	if (info->lba_to_pba)
-		kfree(info->lba_to_pba);
-	if (info->pba_to_lba)
-		kfree(info->pba_to_lba);
+	kfree(info->lba_to_pba);
+	kfree(info->pba_to_lba);
 	info->lba_to_pba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
 	info->pba_to_lba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
 
 	if (info->lba_to_pba == NULL || info->pba_to_lba == NULL) {
-		if (info->lba_to_pba != NULL)
-			kfree(info->lba_to_pba);
-		if (info->pba_to_lba != NULL)
-			kfree(info->pba_to_lba);
+		kfree(info->lba_to_pba);
+		kfree(info->pba_to_lba);
 		info->lba_to_pba = NULL;
 		info->pba_to_lba = NULL;
 		kfree(buffer);
@@ -702,7 +746,9 @@ static int sddr55_read_map(struct us_data *us) {
 		
 		if (info->lba_to_pba[lba + zone * 1000] != NOT_ALLOCATED &&
 		    !info->force_read_only) {
-			printk("sddr55: map inconsistency at LBA %04X\n", lba + zone * 1000);
+			printk(KERN_WARNING
+			       "sddr55: map inconsistency at LBA %04X\n",
+			       lba + zone * 1000);
 			info->force_read_only = 1;
 		}
 
@@ -723,29 +769,27 @@ static void sddr55_card_info_destructor(void *extra) {
 	if (!extra)
 		return;
 
-	if (info->lba_to_pba)
-		kfree(info->lba_to_pba);
-	if (info->pba_to_lba)
-		kfree(info->pba_to_lba);
+	kfree(info->lba_to_pba);
+	kfree(info->pba_to_lba);
 }
 
 
 /*
  * Transport for the Sandisk SDDR-55
  */
-int sddr55_transport(Scsi_Cmnd *srb, struct us_data *us)
+static int sddr55_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
 	int result;
-	int i;
-	unsigned char inquiry_response[36] = {
+	static unsigned char inquiry_response[8] = {
 		0x00, 0x80, 0x00, 0x02, 0x1F, 0x00, 0x00, 0x00
 	};
-	unsigned char mode_page_01[16] = { // write-protected for now
-		0x03, 0x00, 0x80, 0x00,
+ 	// write-protected for now, no block descriptor support
+	static unsigned char mode_page_01[20] = {
+		0x0, 0x12, 0x00, 0x80, 0x0, 0x0, 0x0, 0x0,
 		0x01, 0x0A,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 	};
-	unsigned char *ptr;
+	unsigned char *ptr = us->iobuf;
 	unsigned long capacity;
 	unsigned int lba;
 	unsigned int pba;
@@ -754,31 +798,22 @@ int sddr55_transport(Scsi_Cmnd *srb, struct us_data *us)
 	struct sddr55_card_info *info;
 
 	if (!us->extra) {
-		us->extra = kmalloc(
+		us->extra = kzalloc(
 			sizeof(struct sddr55_card_info), GFP_NOIO);
 		if (!us->extra)
 			return USB_STOR_TRANSPORT_ERROR;
-		memset(us->extra, 0, sizeof(struct sddr55_card_info));
 		us->extra_destructor = sddr55_card_info_destructor;
 	}
 
 	info = (struct sddr55_card_info *)(us->extra);
 
-	ptr = (unsigned char *)srb->request_buffer;
-
 	if (srb->cmnd[0] == REQUEST_SENSE) {
-		i = srb->cmnd[4];
-
-		if (i > sizeof info->sense_data)
-			i = sizeof info->sense_data;
-
-
 		US_DEBUGP("SDDR55: request sense %02x/%02x/%02x\n", info->sense_data[2], info->sense_data[12], info->sense_data[13]);
 
-		info->sense_data[0] = 0x70;
-		info->sense_data[7] = 10;
-
-		memcpy (ptr, info->sense_data, i);
+		memcpy (ptr, info->sense_data, sizeof info->sense_data);
+		ptr[0] = 0x70;
+		ptr[7] = 11;
+		usb_stor_set_xfer_buf (ptr, sizeof info->sense_data, srb);
 		memset (info->sense_data, 0, sizeof info->sense_data);
 
 		return USB_STOR_TRANSPORT_GOOD;
@@ -790,8 +825,8 @@ int sddr55_transport(Scsi_Cmnd *srb, struct us_data *us)
 	   respond to INQUIRY commands */
 
 	if (srb->cmnd[0] == INQUIRY) {
-		memset(inquiry_response+8, 0, 28);
-		fill_inquiry_response(us, inquiry_response, 36);
+		memcpy(ptr, inquiry_response, 8);
+		fill_inquiry_response(us, ptr, 36);
 		return USB_STOR_TRANSPORT_GOOD;
 	}
 
@@ -834,64 +869,40 @@ int sddr55_transport(Scsi_Cmnd *srb, struct us_data *us)
 		 * the fact that only 250 out of every 256 are used */
 		info->max_log_blks = ((info->capacity >> (info->pageshift + info->blockshift)) / 256) * 250;
 
-		/* Last page in the card, adjust as we only use 250 out of every 256 pages */
+		/* Last page in the card, adjust as we only use 250 out of
+		 * every 256 pages */
 		capacity = (capacity / 256) * 250;
 
 		capacity /= PAGESIZE;
 		capacity--;
 
-		ptr[0] = MSB_of(capacity>>16);
-		ptr[1] = LSB_of(capacity>>16);
-		ptr[2] = MSB_of(capacity&0xFFFF);
-		ptr[3] = LSB_of(capacity&0xFFFF);
-
-		// The page size
-
-		ptr[4] = MSB_of(PAGESIZE>>16);
-		ptr[5] = LSB_of(PAGESIZE>>16);
-		ptr[6] = MSB_of(PAGESIZE&0xFFFF);
-		ptr[7] = LSB_of(PAGESIZE&0xFFFF);
+		((__be32 *) ptr)[0] = cpu_to_be32(capacity);
+		((__be32 *) ptr)[1] = cpu_to_be32(PAGESIZE);
+		usb_stor_set_xfer_buf(ptr, 8, srb);
 
 		sddr55_read_map(us);
 
 		return USB_STOR_TRANSPORT_GOOD;
 	}
 
-	if (srb->cmnd[0] == MODE_SENSE) {
+	if (srb->cmnd[0] == MODE_SENSE_10) {
 
-		mode_page_01[2] = (info->read_only || info->force_read_only) ? 0x80 : 0;
+		memcpy(ptr, mode_page_01, sizeof mode_page_01);
+		ptr[3] = (info->read_only || info->force_read_only) ? 0x80 : 0;
+		usb_stor_set_xfer_buf(ptr, sizeof(mode_page_01), srb);
 
 		if ( (srb->cmnd[2] & 0x3F) == 0x01 ) {
-
 			US_DEBUGP(
 			  "SDDR55: Dummy up request for mode page 1\n");
-
-			if (ptr==NULL || 
-			  srb->request_bufflen<sizeof(mode_page_01)) {
-				set_sense_info (5, 0x24, 0);	/* invalid field in command */
-				return USB_STOR_TRANSPORT_FAILED;
-			}
-
-			memcpy(ptr, mode_page_01, sizeof(mode_page_01));
 			return USB_STOR_TRANSPORT_GOOD;
 
 		} else if ( (srb->cmnd[2] & 0x3F) == 0x3F ) {
-
 			US_DEBUGP(
 			  "SDDR55: Dummy up request for all mode pages\n");
-
-			if (ptr==NULL || 
-			  srb->request_bufflen<sizeof(mode_page_01)) {
-				set_sense_info (5, 0x24, 0);	/* invalid field in command */
-				return USB_STOR_TRANSPORT_FAILED;
-			}
-
-			memcpy(ptr, mode_page_01, sizeof(mode_page_01));
 			return USB_STOR_TRANSPORT_GOOD;
 		}
 
 		set_sense_info (5, 0x24, 0);	/* invalid field in command */
-
 		return USB_STOR_TRANSPORT_FAILED;
 	}
 
@@ -939,13 +950,13 @@ int sddr55_transport(Scsi_Cmnd *srb, struct us_data *us)
 				" pages %d\n",
 				pba, lba, page, pages);
 
-			return sddr55_write_data(us, lba, page, pages, ptr, srb->use_sg);
+			return sddr55_write_data(us, lba, page, pages);
 		} else {
 			US_DEBUGP("READ_10: read block %04X (LBA %04X) page %01X"
 				" pages %d\n",
 				pba, lba, page, pages);
 
-			return sddr55_read_data(us, lba, page, pages, ptr, srb->use_sg);
+			return sddr55_read_data(us, lba, page, pages);
 		}
 	}
 
@@ -963,3 +974,49 @@ int sddr55_transport(Scsi_Cmnd *srb, struct us_data *us)
 	return USB_STOR_TRANSPORT_FAILED; // FIXME: sense buffer?
 }
 
+
+static int sddr55_probe(struct usb_interface *intf,
+			 const struct usb_device_id *id)
+{
+	struct us_data *us;
+	int result;
+
+	result = usb_stor_probe1(&us, intf, id,
+			(id - sddr55_usb_ids) + sddr55_unusual_dev_list);
+	if (result)
+		return result;
+
+	us->transport_name = "SDDR55";
+	us->transport = sddr55_transport;
+	us->transport_reset = sddr55_reset;
+	us->max_lun = 0;
+
+	result = usb_stor_probe2(us);
+	return result;
+}
+
+static struct usb_driver sddr55_driver = {
+	.name =		"ums-sddr55",
+	.probe =	sddr55_probe,
+	.disconnect =	usb_stor_disconnect,
+	.suspend =	usb_stor_suspend,
+	.resume =	usb_stor_resume,
+	.reset_resume =	usb_stor_reset_resume,
+	.pre_reset =	usb_stor_pre_reset,
+	.post_reset =	usb_stor_post_reset,
+	.id_table =	sddr55_usb_ids,
+	.soft_unbind =	1,
+};
+
+static int __init sddr55_init(void)
+{
+	return usb_register(&sddr55_driver);
+}
+
+static void __exit sddr55_exit(void)
+{
+	usb_deregister(&sddr55_driver);
+}
+
+module_init(sddr55_init);
+module_exit(sddr55_exit);

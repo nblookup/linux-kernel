@@ -3,7 +3,7 @@
 void * memset(void * s, int c, size_t count)
 {
   void *xs = s;
-  size_t temp, temp1;
+  size_t temp;
 
   if (!count)
     return xs;
@@ -28,29 +28,8 @@ void * memset(void * s, int c, size_t count)
   if (temp)
     {
       long *ls = s;
-
-      __asm__ __volatile__("movel %1,%2\n\t"
-			   "andw  #7,%2\n\t"
-			   "lsrl  #3,%1\n\t"
-			   "negw  %2\n\t"
-			   "jmp   %%pc@(2f,%2:w:2)\n\t"
-			   "1:\t"
-			   "movel %3,%0@+\n\t"
-			   "movel %3,%0@+\n\t"
-			   "movel %3,%0@+\n\t"
-			   "movel %3,%0@+\n\t"
-			   "movel %3,%0@+\n\t"
-			   "movel %3,%0@+\n\t"
-			   "movel %3,%0@+\n\t"
-			   "movel %3,%0@+\n\t"
-			   "2:\t"
-			   "dbra  %1,1b\n\t"
-			   "clrw  %1\n\t"
-			   "subql #1,%1\n\t"
-			   "jpl   1b\n\t"
-			   : "=a" (ls), "=d" (temp), "=&d" (temp1)
-			   : "d" (c), "0" (ls), "1" (temp)
-			   );
+      for (; temp; temp--)
+	*ls++ = c;
       s = ls;
     }
   if (count & 2)

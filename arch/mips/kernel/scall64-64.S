@@ -7,17 +7,18 @@
  * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  * Copyright (C) 2001 MIPS Technologies, Inc.
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <asm/asm.h>
 #include <asm/asmmacro.h>
+#include <asm/irqflags.h>
 #include <asm/mipsregs.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/sysmips.h>
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
+#include <asm/war.h>
 
 #ifndef CONFIG_BINFMT_ELF32
 /* Neither O32 nor N32, so define handle_sys here */
@@ -33,17 +34,19 @@ NESTED(handle_sys64, PT_SIZE, sp)
 	 */
 	.set	noat
 	SAVE_SOME
+	TRACE_IRQS_ON_RELOAD
 	STI
 	.set	at
 #endif
-	ld	t1, PT_EPC(sp)		# skip syscall on return
 
-FEXPORT(__handle_sys64)
-	subu	t0, v0, __NR_64_Linux	# check syscall number
+	dsubu	t0, v0, __NR_64_Linux	# check syscall number
 	sltiu	t0, t0,	__NR_64_Linux_syscalls + 1
+#if !defined(CONFIG_MIPS32_O32) && !defined(CONFIG_MIPS32_N32)
+	ld	t1, PT_EPC(sp)		# skip syscall on return
 	daddiu	t1, 4			# skip to next instruction
-	beqz	t0, illegal_syscall
 	sd	t1, PT_EPC(sp)
+#endif
+	beqz	t0, illegal_syscall
 
 	dsll	t0, v0, 3		# offset into table
 	ld	t2, (sys_call_table - (__NR_64_Linux * 8))(t0)
@@ -51,8 +54,10 @@ FEXPORT(__handle_sys64)
 
 	sd	a3, PT_R26(sp)		# save a3 for syscall restarting
 
-	LONG_L	t0, TI_FLAGS($28)
-	bltz	t0, syscall_trace_entry	# syscall tracing enabled?
+	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
+	LONG_L	t0, TI_FLAGS($28)	# syscall tracing enabled?
+	and	t0, t1, t0
+	bnez	t0, syscall_trace_entry
 
 	jalr	t2			# Do The Real Thing (TM)
 
@@ -61,53 +66,52 @@ FEXPORT(__handle_sys64)
 	sd	t0, PT_R7(sp)		# set error flag
 	beqz	t0, 1f
 
-	negu	v0			# error
-	sd	v0, PT_R0(sp)		# set flag for syscall
-					# restarting
+	ld	t1, PT_R2(sp)		# syscall number
+	dnegu	v0			# error
+	sd	t1, PT_R0(sp)		# save it for syscall restarting
 1:	sd	v0, PT_R2(sp)		# result
 
-syscall_exit:
+n64_syscall_exit:
 	local_irq_disable		# make sure need_resched and
 					# signals dont change between
 					# sampling and return
 	LONG_L	a2, TI_FLAGS($28)	# current->work
-	bnez	a2, n64_syscall_exit_work
+	li	t0, _TIF_ALLWORK_MASK
+	and	t0, a2, t0
+	bnez	t0, n64_syscall_exit_work
 
-	j	restore_all
-
-work_notifysig:				# deal with pending signals and
-					# notify-resume requests
-	SAVE_STATIC
-	move	a0, sp
-	li	a1, 0
-	jal	do_notify_resume	# a2 already loaded
-	RESTORE_STATIC
-	j	restore_all
+	j	restore_partial
 
 n64_syscall_exit_work:
-	j	syscall_exit_work
+	j	syscall_exit_work_partial
 
 /* ------------------------------------------------------------------------ */
 
 syscall_trace_entry:
 	SAVE_STATIC
-	sd	t2,PT_R1(sp)
+	move	s0, t2
+	move	a0, sp
+	li	a1, 0
 	jal	do_syscall_trace
-	ld	t2,PT_R1(sp)
 
+	move	t0, s0
+	RESTORE_STATIC
 	ld	a0, PT_R4(sp)		# Restore argument registers
 	ld	a1, PT_R5(sp)
 	ld	a2, PT_R6(sp)
 	ld	a3, PT_R7(sp)
-	jalr	t2
+	ld	a4, PT_R8(sp)
+	ld	a5, PT_R9(sp)
+	jalr	t0
 
 	li	t0, -EMAXERRNO - 1	# error?
 	sltu	t0, t0, v0
 	sd	t0, PT_R7(sp)		# set error flag
 	beqz	t0, 1f
 
-	negu	v0			# error
-	sd	v0, PT_R0(sp)		# set flag for syscall restarting
+	ld	t1, PT_R2(sp)		# syscall number
+	dnegu	v0			# error
+	sd	t1, PT_R0(sp)		# save it for syscall restarting
 1:	sd	v0, PT_R2(sp)		# result
 
 	j	syscall_exit
@@ -118,97 +122,8 @@ illegal_syscall:
 	sd	v0, PT_R2(sp)
 	li	t0, 1				# set error flag
 	sd	t0, PT_R7(sp)
-	j	syscall_exit
+	j	n64_syscall_exit
 	END(handle_sys64)
-
-	LEAF(mips_atomic_set)
-	andi	v0, a1, 3			# must be word aligned
-	bnez	v0, bad_alignment
-
-	LONG_L	v1, TI_ADDR_LIMIT($28)		# in legal address range?
-	LONG_ADDIU	a0, a1, 4
-	or	a0, a0, a1
-	and	a0, a0, v1
-	bltz	a0, bad_address
-
-#ifdef CONFIG_CPU_HAS_LLSC
-	/* Ok, this is the ll/sc case.  World is sane :-)  */
-1:	ll	v0, (a1)
-	move	a0, a2
-2:	sc	a0, (a1)
-	beqz	a0, 1b
-
-	.section __ex_table,"a"
-	PTR	1b, bad_stack
-	PTR	2b, bad_stack
-	.previous
-#else
-	sw	a1, 16(sp)
-	sw	a2, 20(sp)
-
-	move	a0, sp
-	move	a2, a1
-	li	a1, 1
-	jal	do_page_fault
-
-	lw	a1, 16(sp)
-	lw	a2, 20(sp)
-
-	/*
-	 * At this point the page should be readable and writable unless
-	 * there was no more memory available.
-	 */
-1:	lw	v0, (a1)
-2:	sw	a2, (a1)
-
-	.section __ex_table,"a"
-	PTR	1b, no_mem
-	PTR	2b, no_mem
-	.previous
-#endif
-
-	sw	v0, PT_R2(sp)		# result
-1:
-
-	/* Success, so skip usual error handling garbage.  */
-	LONG_L	a2, TI_FLAGS($28)	# syscall tracing enabled?
-	li	t0, _TIF_SYSCALL_TRACE
-	and	t0, a2, t0
-	bnez	t0, 1f
-
-	b	syscall_exit
-
-1:	SAVE_STATIC
-	jal	do_syscall_trace
-	j	syscall_exit
-
-no_mem:	li	v0, -ENOMEM
-	jr	ra
-
-bad_address:
-	li	v0, -EFAULT
-	jr	ra
-
-bad_alignment:
-	li	v0, -EINVAL
-	jr	ra
-	END(mips_atomic_set)
-
-	LEAF(sys_sysmips)
-	beq	a0, MIPS_ATOMIC_SET, mips_atomic_set
-	j	_sys_sysmips
-	END(sys_sysmips)
-
-	LEAF(sys_syscall)			/* Quick'n'dirty ... */
-	move	v0, a0
-	move	a0, a1
-	move	a1, a2
-	move	a2, a3
-	move	a3, a4
-	move	a4, a5
-	move	a5, a6
-	j	__handle_sys64
-	END(sys_syscall)
 
 	.align	3
 sys_call_table:
@@ -221,7 +136,7 @@ sys_call_table:
 	PTR	sys_newlstat
 	PTR	sys_poll
 	PTR	sys_lseek
-	PTR	sys_mmap2
+	PTR	sys_mips_mmap
 	PTR	sys_mprotect			/* 5010 */
 	PTR	sys_munmap
 	PTR	sys_brk
@@ -233,7 +148,7 @@ sys_call_table:
 	PTR	sys_readv
 	PTR	sys_writev
 	PTR	sys_access			/* 5020 */
-	PTR	sys_pipe
+	PTR	sysm_pipe
 	PTR	sys_select
 	PTR	sys_sched_yield
 	PTR	sys_mremap
@@ -251,7 +166,7 @@ sys_call_table:
 	PTR	sys_setitimer
 	PTR	sys_alarm
 	PTR	sys_getpid
-	PTR	sys_sendfile
+	PTR	sys_sendfile64
 	PTR	sys_socket			/* 5040 */
 	PTR	sys_connect
 	PTR	sys_accept
@@ -405,7 +320,7 @@ sys_call_table:
 	PTR	sys_lremovexattr		/* 5190 */
 	PTR	sys_fremovexattr
 	PTR	sys_tkill
-	PTR	sys_time
+	PTR	sys_ni_syscall
 	PTR	sys_futex
 	PTR	sys_sched_setaffinity		/* 5195 */
 	PTR	sys_sched_getaffinity
@@ -427,7 +342,7 @@ sys_call_table:
 	PTR	sys_set_tid_address
 	PTR	sys_restart_syscall
 	PTR	sys_semtimedop
-	PTR	sys_fadvise64			/* 5215 */
+	PTR	sys_fadvise64_64		/* 5215 */
 	PTR	sys_timer_create
 	PTR	sys_timer_settime
 	PTR	sys_timer_gettime
@@ -439,3 +354,79 @@ sys_call_table:
 	PTR	sys_clock_nanosleep
 	PTR	sys_tgkill			/* 5225 */
 	PTR	sys_utimes
+	PTR	sys_mbind
+	PTR	sys_ni_syscall			/* sys_get_mempolicy */
+	PTR	sys_ni_syscall			/* sys_set_mempolicy */
+	PTR	sys_mq_open			/* 5230 */
+	PTR	sys_mq_unlink
+	PTR	sys_mq_timedsend
+	PTR	sys_mq_timedreceive
+	PTR	sys_mq_notify
+	PTR	sys_mq_getsetattr		/* 5235 */
+	PTR	sys_ni_syscall			/* sys_vserver */
+	PTR	sys_waitid
+	PTR	sys_ni_syscall			/* available, was setaltroot */
+	PTR	sys_add_key
+	PTR	sys_request_key			/* 5240 */
+	PTR	sys_keyctl
+	PTR	sys_set_thread_area
+	PTR	sys_inotify_init
+	PTR	sys_inotify_add_watch
+	PTR	sys_inotify_rm_watch		/* 5245 */
+	PTR	sys_migrate_pages
+	PTR	sys_openat
+	PTR	sys_mkdirat
+	PTR	sys_mknodat
+	PTR	sys_fchownat			/* 5250 */
+	PTR	sys_futimesat
+	PTR	sys_newfstatat
+	PTR	sys_unlinkat
+	PTR	sys_renameat
+	PTR	sys_linkat			/* 5255 */
+	PTR	sys_symlinkat
+	PTR	sys_readlinkat
+	PTR	sys_fchmodat
+	PTR	sys_faccessat
+	PTR	sys_pselect6			/* 5260 */
+	PTR	sys_ppoll
+	PTR	sys_unshare
+	PTR	sys_splice
+	PTR	sys_sync_file_range
+	PTR	sys_tee				/* 5265 */
+	PTR	sys_vmsplice
+	PTR	sys_move_pages
+	PTR	sys_set_robust_list
+	PTR	sys_get_robust_list
+	PTR	sys_kexec_load			/* 5270 */
+	PTR	sys_getcpu
+	PTR	sys_epoll_pwait
+	PTR	sys_ioprio_set
+	PTR	sys_ioprio_get
+	PTR	sys_utimensat			/* 5275 */
+	PTR	sys_signalfd
+	PTR	sys_ni_syscall			/* was timerfd */
+	PTR	sys_eventfd
+	PTR	sys_fallocate
+	PTR	sys_timerfd_create		/* 5280 */
+	PTR	sys_timerfd_gettime
+	PTR	sys_timerfd_settime
+	PTR	sys_signalfd4
+	PTR	sys_eventfd2
+	PTR	sys_epoll_create1		/* 5285 */
+	PTR	sys_dup3
+	PTR	sys_pipe2
+	PTR	sys_inotify_init1
+	PTR	sys_preadv
+	PTR	sys_pwritev			/* 5290 */
+	PTR	sys_rt_tgsigqueueinfo
+	PTR	sys_perf_event_open
+	PTR	sys_accept4
+	PTR	sys_recvmmsg
+	PTR	sys_fanotify_init		/* 5295 */
+	PTR	sys_fanotify_mark
+	PTR	sys_prlimit64
+	PTR	sys_name_to_handle_at
+	PTR	sys_open_by_handle_at
+	PTR	sys_clock_adjtime		/* 5300 */
+	PTR	sys_syncfs
+	.size	sys_call_table,.-sys_call_table

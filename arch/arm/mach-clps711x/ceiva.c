@@ -27,21 +27,23 @@
 
 #include <linux/kernel.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/sizes.h>
 
 #include <asm/mach/map.h>
 
-extern void clps711x_init_irq(void);
+#include "common.h"
 
 static struct map_desc ceiva_io_desc[] __initdata = {
- /* virtual, physical, length, type */
-
- /* SED1355 controlled video RAM & registers */
- { CEIVA_VIRT_SED1355, CEIVA_PHYS_SED1355, SZ_2M, MT_DEVICE }
-
+ 	/* SED1355 controlled video RAM & registers */
+ 	{
+		.virtual	= CEIVA_VIRT_SED1355,
+		.pfn		= __phys_to_pfn(CEIVA_PHYS_SED1355),
+		.length		= SZ_2M,
+		.type		= MT_DEVICE
+	}
 };
 
 
@@ -53,9 +55,9 @@ static void __init ceiva_map_io(void)
 
 
 MACHINE_START(CEIVA, "CEIVA/Polaroid Photo MAX Digital Picture Frame")
-	MAINTAINER("Rob Scott")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xff000000)
-	BOOT_PARAMS(0xc0000100)
-	MAPIO(ceiva_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: Rob Scott */
+	.boot_params	= 0xc0000100,
+	.map_io		= ceiva_map_io,
+	.init_irq	= clps711x_init_irq,
+	.timer		= &clps711x_timer,
 MACHINE_END

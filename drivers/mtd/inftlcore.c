@@ -1,13 +1,11 @@
-/* 
+/*
  * inftlcore.c -- Linux driver for Inverse Flash Translation Layer (INFTL)
  *
- * (C) Copyright 2002, Greg Ungerer (gerg@snapgear.com)
+ * Copyright © 2002, Greg Ungerer (gerg@snapgear.com)
  *
  * Based heavily on the nftlcore.c code which is:
- * (c) 1999 Machine Vision Holdings, Inc.
- * Author: David Woodhouse <dwmw2@infradead.org>
- *
- * $Id: inftlcore.c,v 1.14 2003/06/26 08:28:26 dwmw2 Exp $
+ * Copyright © 1999 Machine Vision Holdings, Inc.
+ * Copyright © 1999 David Woodhouse <dwmw2@infradead.org>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,7 +22,6 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
@@ -36,6 +33,7 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/nftl.h>
 #include <linux/mtd/inftl.h>
+#include <linux/mtd/nand.h>
 #include <asm/uaccess.h>
 #include <asm/errno.h>
 #include <asm/io.h>
@@ -47,37 +45,43 @@
  */
 #define MAX_LOOPS 10000
 
-extern void INFTL_dumptables(struct INFTLrecord *inftl);
-extern void INFTL_dumpVUchains(struct INFTLrecord *inftl);
-
 static void inftl_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 {
 	struct INFTLrecord *inftl;
 	unsigned long temp;
 
-	if (mtd->ecctype != MTD_ECC_RS_DiskOnChip)
+	if (mtd->type != MTD_NANDFLASH || mtd->size > UINT_MAX)
 		return;
+	/* OK, this is moderately ugly.  But probably safe.  Alternatives? */
+	if (memcmp(mtd->name, "DiskOnChip", 10))
+		return;
+
+	if (!mtd->block_isbad) {
+		printk(KERN_ERR
+"INFTL no longer supports the old DiskOnChip drivers loaded via docprobe.\n"
+"Please use the new diskonchip driver under the NAND subsystem.\n");
+		return;
+	}
 
 	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: add_mtd for %s\n", mtd->name);
 
-	inftl = kmalloc(sizeof(*inftl), GFP_KERNEL);
+	inftl = kzalloc(sizeof(*inftl), GFP_KERNEL);
 
 	if (!inftl) {
 		printk(KERN_WARNING "INFTL: Out of memory for data structures\n");
 		return;
 	}
-	memset(inftl, 0, sizeof(*inftl));
 
 	inftl->mbd.mtd = mtd;
 	inftl->mbd.devnum = -1;
-	inftl->mbd.blksize = 512;
+
 	inftl->mbd.tr = tr;
 
-        if (INFTL_mount(inftl) < 0) {
+	if (INFTL_mount(inftl) < 0) {
 		printk(KERN_WARNING "INFTL: could not mount device\n");
 		kfree(inftl);
 		return;
-        }
+	}
 
 	/* OK, it's a new one. Set up all the data structures. */
 
@@ -101,28 +105,26 @@ static void inftl_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 
 	if (inftl->mbd.size != inftl->heads * inftl->cylinders * inftl->sectors) {
 		/*
-		  Oh no we don't have 
+		  Oh no we don't have
 		   mbd.size == heads * cylinders * sectors
 		*/
 		printk(KERN_WARNING "INFTL: cannot calculate a geometry to "
 		       "match size of 0x%lx.\n", inftl->mbd.size);
 		printk(KERN_WARNING "INFTL: using C:%d H:%d S:%d "
 			"(== 0x%lx sects)\n",
-			inftl->cylinders, inftl->heads , inftl->sectors, 
+			inftl->cylinders, inftl->heads , inftl->sectors,
 			(long)inftl->cylinders * (long)inftl->heads *
 			(long)inftl->sectors );
 	}
 
 	if (add_mtd_blktrans_dev(&inftl->mbd)) {
-		if (inftl->PUtable)
-			kfree(inftl->PUtable);
-		if (inftl->VUtable)
-			kfree(inftl->VUtable);
+		kfree(inftl->PUtable);
+		kfree(inftl->VUtable);
 		kfree(inftl);
 		return;
 	}
 #ifdef PSYCHO_DEBUG
-	printk(KERN_INFO "INFTL: Found new nftl%c\n", nftl->mbd.devnum + 'a');
+	printk(KERN_INFO "INFTL: Found new inftl%c\n", inftl->mbd.devnum + 'a');
 #endif
 	return;
 }
@@ -135,16 +137,74 @@ static void inftl_remove_dev(struct mtd_blktrans_dev *dev)
 
 	del_mtd_blktrans_dev(dev);
 
-	if (inftl->PUtable)
-		kfree(inftl->PUtable);
-	if (inftl->VUtable)
-		kfree(inftl->VUtable);
-	kfree(inftl);
+	kfree(inftl->PUtable);
+	kfree(inftl->VUtable);
 }
 
 /*
  * Actual INFTL access routines.
  */
+
+/*
+ * Read oob data from flash
+ */
+int inftl_read_oob(struct mtd_info *mtd, loff_t offs, size_t len,
+		   size_t *retlen, uint8_t *buf)
+{
+	struct mtd_oob_ops ops;
+	int res;
+
+	ops.mode = MTD_OOB_PLACE;
+	ops.ooboffs = offs & (mtd->writesize - 1);
+	ops.ooblen = len;
+	ops.oobbuf = buf;
+	ops.datbuf = NULL;
+
+	res = mtd->read_oob(mtd, offs & ~(mtd->writesize - 1), &ops);
+	*retlen = ops.oobretlen;
+	return res;
+}
+
+/*
+ * Write oob data to flash
+ */
+int inftl_write_oob(struct mtd_info *mtd, loff_t offs, size_t len,
+		    size_t *retlen, uint8_t *buf)
+{
+	struct mtd_oob_ops ops;
+	int res;
+
+	ops.mode = MTD_OOB_PLACE;
+	ops.ooboffs = offs & (mtd->writesize - 1);
+	ops.ooblen = len;
+	ops.oobbuf = buf;
+	ops.datbuf = NULL;
+
+	res = mtd->write_oob(mtd, offs & ~(mtd->writesize - 1), &ops);
+	*retlen = ops.oobretlen;
+	return res;
+}
+
+/*
+ * Write data and oob to flash
+ */
+static int inftl_write(struct mtd_info *mtd, loff_t offs, size_t len,
+		       size_t *retlen, uint8_t *buf, uint8_t *oob)
+{
+	struct mtd_oob_ops ops;
+	int res;
+
+	ops.mode = MTD_OOB_PLACE;
+	ops.ooboffs = offs;
+	ops.ooblen = mtd->oobsize;
+	ops.oobbuf = oob;
+	ops.datbuf = buf;
+	ops.len = len;
+
+	res = mtd->write_oob(mtd, offs & ~(mtd->writesize - 1), &ops);
+	*retlen = ops.retlen;
+	return res;
+}
 
 /*
  * INFTL_findfreeblock: Find a free Erase Unit on the INFTL partition.
@@ -155,8 +215,8 @@ static u16 INFTL_findfreeblock(struct INFTLrecord *inftl, int desperate)
 	u16 pot = inftl->LastFreeEUN;
 	int silly = inftl->nb_blocks;
 
-	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_findfreeblock(inftl=0x%x,"
-		"desperate=%d)\n", (int)inftl, desperate);
+	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_findfreeblock(inftl=%p,"
+		"desperate=%d)\n", inftl, desperate);
 
 	/*
 	 * Normally, we force a fold to happen before we run out of free
@@ -165,7 +225,7 @@ static u16 INFTL_findfreeblock(struct INFTLrecord *inftl, int desperate)
 	if (!desperate && inftl->numfreeEUNs < 2) {
 		DEBUG(MTD_DEBUG_LEVEL1, "INFTL: there are too few free "
 			"EUNs (%d)\n", inftl->numfreeEUNs);
-		return 0xffff;
+		return BLOCK_NIL;
 	}
 
 	/* Scan for a free block */
@@ -193,13 +253,14 @@ static u16 INFTL_foldchain(struct INFTLrecord *inftl, unsigned thisVUC, unsigned
 	u16 BlockMap[MAX_SECTORS_PER_UNIT];
 	unsigned char BlockDeleted[MAX_SECTORS_PER_UNIT];
 	unsigned int thisEUN, prevEUN, status;
+	struct mtd_info *mtd = inftl->mbd.mtd;
 	int block, silly;
 	unsigned int targetEUN;
 	struct inftl_oob oob;
-        size_t retlen;
+	size_t retlen;
 
-	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_foldchain(inftl=0x%x,thisVUC=%d,"
-		"pending=%d)\n", (int)inftl, thisVUC, pendingblock);
+	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_foldchain(inftl=%p,thisVUC=%d,"
+		"pending=%d)\n", inftl, thisVUC, pendingblock);
 
 	memset(BlockMap, 0xff, sizeof(BlockMap));
 	memset(BlockDeleted, 0, sizeof(BlockDeleted));
@@ -211,23 +272,24 @@ static u16 INFTL_foldchain(struct INFTLrecord *inftl, unsigned thisVUC, unsigned
 		       "Virtual Unit Chain %d!\n", thisVUC);
 		return BLOCK_NIL;
 	}
-	
+
 	/*
 	 * Scan to find the Erase Unit which holds the actual data for each
 	 * 512-byte block within the Chain.
 	 */
-        silly = MAX_LOOPS;
+	silly = MAX_LOOPS;
 	while (thisEUN < inftl->nb_blocks) {
 		for (block = 0; block < inftl->EraseSize/SECTORSIZE; block ++) {
-			if ((BlockMap[block] != 0xffff) || BlockDeleted[block])
+			if ((BlockMap[block] != BLOCK_NIL) ||
+			    BlockDeleted[block])
 				continue;
 
-			if (MTD_READOOB(inftl->mbd.mtd, (thisEUN * inftl->EraseSize)
-			     + (block * SECTORSIZE), 16 , &retlen,
-			     (char *)&oob) < 0)
+			if (inftl_read_oob(mtd, (thisEUN * inftl->EraseSize)
+					   + (block * SECTORSIZE), 16, &retlen,
+					   (char *)&oob) < 0)
 				status = SECTOR_IGNORE;
 			else
-                        	status = oob.b.Status | oob.b.Status1;
+				status = oob.b.Status | oob.b.Status1;
 
 			switch(status) {
 			case SECTOR_FREE:
@@ -252,7 +314,7 @@ static u16 INFTL_foldchain(struct INFTLrecord *inftl, unsigned thisVUC, unsigned
 				"Unit Chain 0x%x\n", thisVUC);
 			return BLOCK_NIL;
 		}
-		
+
 		thisEUN = inftl->PUtable[thisEUN];
 	}
 
@@ -277,28 +339,31 @@ static u16 INFTL_foldchain(struct INFTLrecord *inftl, unsigned thisVUC, unsigned
 			continue;
 		}
 
-                /*
+		/*
 		 * Copy only in non free block (free blocks can only
                  * happen in case of media errors or deleted blocks).
 		 */
-                if (BlockMap[block] == BLOCK_NIL)
-                        continue;
-                
-                ret = MTD_READECC(inftl->mbd.mtd, (inftl->EraseSize *
-			BlockMap[block]) + (block * SECTORSIZE), SECTORSIZE,
-			&retlen, movebuf, (char *)&oob, NULL); 
-                if (ret < 0) {
-			ret = MTD_READECC(inftl->mbd.mtd, (inftl->EraseSize *
-				BlockMap[block]) + (block * SECTORSIZE),
-				SECTORSIZE, &retlen, movebuf, (char *)&oob,
-				NULL); 
-			if (ret != -EIO) 
-                        	DEBUG(MTD_DEBUG_LEVEL1, "INFTL: error went "
-					"away on retry?\n");
-                }
-                MTD_WRITEECC(inftl->mbd.mtd, (inftl->EraseSize * targetEUN) +
-			(block * SECTORSIZE), SECTORSIZE, &retlen,
-			movebuf, (char *)&oob, NULL);
+		if (BlockMap[block] == BLOCK_NIL)
+			continue;
+
+		ret = mtd->read(mtd, (inftl->EraseSize * BlockMap[block]) +
+				(block * SECTORSIZE), SECTORSIZE, &retlen,
+				movebuf);
+		if (ret < 0 && ret != -EUCLEAN) {
+			ret = mtd->read(mtd,
+					(inftl->EraseSize * BlockMap[block]) +
+					(block * SECTORSIZE), SECTORSIZE,
+					&retlen, movebuf);
+			if (ret != -EIO)
+				DEBUG(MTD_DEBUG_LEVEL1, "INFTL: error went "
+				      "away on retry?\n");
+		}
+		memset(&oob, 0xff, sizeof(struct inftl_oob));
+		oob.b.Status = oob.b.Status1 = SECTOR_USED;
+
+		inftl_write(inftl->mbd.mtd, (inftl->EraseSize * targetEUN) +
+			    (block * SECTORSIZE), SECTORSIZE, &retlen,
+			    movebuf, (char *)&oob);
 	}
 
 	/*
@@ -323,27 +388,29 @@ static u16 INFTL_foldchain(struct INFTLrecord *inftl, unsigned thisVUC, unsigned
 		if (thisEUN == targetEUN)
 			break;
 
-                if (INFTL_formatblock(inftl, thisEUN) < 0) {
+		/* Unlink the last block from the chain. */
+		inftl->PUtable[prevEUN] = BLOCK_NIL;
+
+		/* Now try to erase it. */
+		if (INFTL_formatblock(inftl, thisEUN) < 0) {
 			/*
 			 * Could not erase : mark block as reserved.
-			 * FixMe: Update Bad Unit Table on disk.
 			 */
 			inftl->PUtable[thisEUN] = BLOCK_RESERVED;
-                } else {
+		} else {
 			/* Correctly erased : mark it as free */
 			inftl->PUtable[thisEUN] = BLOCK_FREE;
-			inftl->PUtable[prevEUN] = BLOCK_NIL;
 			inftl->numfreeEUNs++;
-                }
+		}
 	}
 
 	return targetEUN;
 }
 
-u16 INFTL_makefreeblock(struct INFTLrecord *inftl, unsigned pendingblock)
+static u16 INFTL_makefreeblock(struct INFTLrecord *inftl, unsigned pendingblock)
 {
 	/*
-	 * This is the part that needs some cleverness applied. 
+	 * This is the part that needs some cleverness applied.
 	 * For now, I'm doing the minimum applicable to actually
 	 * get the thing to work.
 	 * Wear-levelling and other clever stuff needs to be implemented
@@ -354,8 +421,8 @@ u16 INFTL_makefreeblock(struct INFTLrecord *inftl, unsigned pendingblock)
 	u16 ChainLength = 0, thislen;
 	u16 chain, EUN;
 
-	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_makefreeblock(inftl=0x%x,"
-		"pending=%d)\n", (int)inftl, pendingblock);
+	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_makefreeblock(inftl=%p,"
+		"pending=%d)\n", inftl, pendingblock);
 
 	for (chain = 0; chain < inftl->nb_blocks; chain++) {
 		EUN = inftl->VUtable[chain];
@@ -402,7 +469,7 @@ static int nrbits(unsigned int val, int bitcount)
 }
 
 /*
- * INFTL_findwriteunit: Return the unit number into which we can write 
+ * INFTL_findwriteunit: Return the unit number into which we can write
  *                      for this block. Make it available if it isn't already.
  */
 static inline u16 INFTL_findwriteunit(struct INFTLrecord *inftl, unsigned block)
@@ -410,14 +477,15 @@ static inline u16 INFTL_findwriteunit(struct INFTLrecord *inftl, unsigned block)
 	unsigned int thisVUC = block / (inftl->EraseSize / SECTORSIZE);
 	unsigned int thisEUN, writeEUN, prev_block, status;
 	unsigned long blockofs = (block * SECTORSIZE) & (inftl->EraseSize -1);
+	struct mtd_info *mtd = inftl->mbd.mtd;
 	struct inftl_oob oob;
 	struct inftl_bci bci;
 	unsigned char anac, nacs, parity;
 	size_t retlen;
 	int silly, silly2 = 3;
 
-	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_findwriteunit(inftl=0x%x,"
-		"block=%d)\n", (int)inftl, block);
+	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_findwriteunit(inftl=%p,"
+		"block=%d)\n", inftl, block);
 
 	do {
 		/*
@@ -429,10 +497,10 @@ static inline u16 INFTL_findwriteunit(struct INFTLrecord *inftl, unsigned block)
 		silly = MAX_LOOPS;
 
 		while (thisEUN <= inftl->lastEUN) {
-			MTD_READOOB(inftl->mbd.mtd, (thisEUN * inftl->EraseSize) +
-				blockofs, 8, &retlen, (char *)&bci);
+			inftl_read_oob(mtd, (thisEUN * inftl->EraseSize) +
+				       blockofs, 8, &retlen, (char *)&bci);
 
-                        status = bci.Status | bci.Status1;
+			status = bci.Status | bci.Status1;
 			DEBUG(MTD_DEBUG_LEVEL3, "INFTL: status of block %d in "
 				"EUN %d is %x\n", block , writeEUN, status);
 
@@ -451,13 +519,13 @@ static inline u16 INFTL_findwriteunit(struct INFTLrecord *inftl, unsigned block)
 				 * Invalid block. Don't use it any more.
 				 * Must implement.
 				 */
-				break;			
+				break;
 			}
-			
-			if (!silly--) { 
+
+			if (!silly--) {
 				printk(KERN_WARNING "INFTL: infinite loop in "
 					"Virtual Unit Chain 0x%x\n", thisVUC);
-				return 0xffff;
+				return BLOCK_NIL;
 			}
 
 			/* Skip to next block in chain */
@@ -470,7 +538,7 @@ hitused:
 
 
 		/*
-		 * OK. We didn't find one in the existing chain, or there 
+		 * OK. We didn't find one in the existing chain, or there
 		 * is no existing chain. Allocate a new one.
 		 */
 		writeEUN = INFTL_findfreeblock(inftl, 0);
@@ -481,7 +549,7 @@ hitused:
 			 * waiting to be picked up. We're going to have to fold
 			 * a chain to make room.
 			 */
-			thisEUN = INFTL_makefreeblock(inftl, 0xffff);
+			thisEUN = INFTL_makefreeblock(inftl, block);
 
 			/*
 			 * Hopefully we free something, lets try again.
@@ -494,8 +562,8 @@ hitused:
 			if (writeEUN == BLOCK_NIL) {
 				/*
 				 * Ouch. This should never happen - we should
-				 * always be able to make some room somehow. 
-				 * If we get here, we've allocated more storage 
+				 * always be able to make some room somehow.
+				 * If we get here, we've allocated more storage
 				 * space than actual media, or our makefreeblock
 				 * routine is missing something.
 				 */
@@ -506,7 +574,7 @@ hitused:
 				INFTL_dumpVUchains(inftl);
 #endif
 				return BLOCK_NIL;
-			}			
+			}
 		}
 
 		/*
@@ -517,8 +585,8 @@ hitused:
 		nacs = 0;
 		thisEUN = inftl->VUtable[thisVUC];
 		if (thisEUN != BLOCK_NIL) {
-			MTD_READOOB(inftl->mbd.mtd, thisEUN * inftl->EraseSize
-				+ 8, 8, &retlen, (char *)&oob.u);
+			inftl_read_oob(mtd, thisEUN * inftl->EraseSize
+				       + 8, 8, &retlen, (char *)&oob.u);
 			anac = oob.u.a.ANAC + 1;
 			nacs = oob.u.a.NACs + 1;
 		}
@@ -531,7 +599,7 @@ hitused:
 		parity |= (nrbits(prev_block, 16) & 0x1) ? 0x2 : 0;
 		parity |= (nrbits(anac, 8) & 0x1) ? 0x4 : 0;
 		parity |= (nrbits(nacs, 8) & 0x1) ? 0x8 : 0;
- 
+
 		oob.u.a.virtualUnitNo = cpu_to_le16(thisVUC);
 		oob.u.a.prevUnitNo = cpu_to_le16(prev_block);
 		oob.u.a.ANAC = anac;
@@ -539,8 +607,8 @@ hitused:
 		oob.u.a.parityPerField = parity;
 		oob.u.a.discarded = 0xaa;
 
-		MTD_WRITEOOB(inftl->mbd.mtd, writeEUN * inftl->EraseSize + 8, 8,
-			&retlen, (char *)&oob.u);
+		inftl_write_oob(mtd, writeEUN * inftl->EraseSize + 8, 8,
+				&retlen, (char *)&oob.u);
 
 		/* Also back up header... */
 		oob.u.b.virtualUnitNo = cpu_to_le16(thisVUC);
@@ -550,8 +618,8 @@ hitused:
 		oob.u.b.parityPerField = parity;
 		oob.u.b.discarded = 0xaa;
 
-		MTD_WRITEOOB(inftl->mbd.mtd, writeEUN * inftl->EraseSize + 
-			SECTORSIZE * 4 + 8, 8, &retlen, (char *)&oob.u);
+		inftl_write_oob(mtd, writeEUN * inftl->EraseSize +
+				SECTORSIZE * 4 + 8, 8, &retlen, (char *)&oob.u);
 
 		inftl->PUtable[writeEUN] = inftl->VUtable[thisVUC];
 		inftl->VUtable[thisVUC] = writeEUN;
@@ -563,7 +631,7 @@ hitused:
 
 	printk(KERN_WARNING "INFTL: error folding to make room for Virtual "
 		"Unit Chain 0x%x\n", thisVUC);
-	return 0xffff;
+	return BLOCK_NIL;
 }
 
 /*
@@ -571,6 +639,7 @@ hitused:
  */
 static void INFTL_trydeletechain(struct INFTLrecord *inftl, unsigned thisVUC)
 {
+	struct mtd_info *mtd = inftl->mbd.mtd;
 	unsigned char BlockUsed[MAX_SECTORS_PER_UNIT];
 	unsigned char BlockDeleted[MAX_SECTORS_PER_UNIT];
 	unsigned int thisEUN, status;
@@ -578,8 +647,8 @@ static void INFTL_trydeletechain(struct INFTLrecord *inftl, unsigned thisVUC)
 	struct inftl_bci bci;
 	size_t retlen;
 
-	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_trydeletechain(inftl=0x%x,"
-		"thisVUC=%d)\n", (int)inftl, thisVUC);
+	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_trydeletechain(inftl=%p,"
+		"thisVUC=%d)\n", inftl, thisVUC);
 
 	memset(BlockUsed, 0, sizeof(BlockUsed));
 	memset(BlockDeleted, 0, sizeof(BlockDeleted));
@@ -590,7 +659,7 @@ static void INFTL_trydeletechain(struct INFTLrecord *inftl, unsigned thisVUC)
 		       "Virtual Unit Chain %d!\n", thisVUC);
 		return;
 	}
-	
+
 	/*
 	 * Scan through the Erase Units to determine whether any data is in
 	 * each of the 512-byte blocks within the Chain.
@@ -601,9 +670,9 @@ static void INFTL_trydeletechain(struct INFTLrecord *inftl, unsigned thisVUC)
 			if (BlockUsed[block] || BlockDeleted[block])
 				continue;
 
-			if (MTD_READOOB(inftl->mbd.mtd, (thisEUN * inftl->EraseSize)
-			    + (block * SECTORSIZE), 8 , &retlen,
-			    (char *)&bci) < 0)
+			if (inftl_read_oob(mtd, (thisEUN * inftl->EraseSize)
+					   + (block * SECTORSIZE), 8 , &retlen,
+					  (char *)&bci) < 0)
 				status = SECTOR_IGNORE;
 			else
 				status = bci.Status | bci.Status1;
@@ -630,7 +699,7 @@ static void INFTL_trydeletechain(struct INFTLrecord *inftl, unsigned thisVUC)
 				"Unit Chain 0x%x\n", thisVUC);
 			return;
 		}
-		
+
 		thisEUN = inftl->PUtable[thisEUN];
 	}
 
@@ -665,13 +734,12 @@ static void INFTL_trydeletechain(struct INFTLrecord *inftl, unsigned thisVUC)
 		DEBUG(MTD_DEBUG_LEVEL3, "Deleting EUN %d from VUC %d\n",
 		      thisEUN, thisVUC);
 
-                if (INFTL_formatblock(inftl, thisEUN) < 0) {
+		if (INFTL_formatblock(inftl, thisEUN) < 0) {
 			/*
 			 * Could not erase : mark block as reserved.
-			 * FixMe: Update Bad Unit Table on medium.
 			 */
 			inftl->PUtable[thisEUN] = BLOCK_RESERVED;
-                } else {
+		} else {
 			/* Correctly erased : mark it as free */
 			inftl->PUtable[thisEUN] = BLOCK_FREE;
 			inftl->numfreeEUNs++;
@@ -693,17 +761,18 @@ static int INFTL_deleteblock(struct INFTLrecord *inftl, unsigned block)
 {
 	unsigned int thisEUN = inftl->VUtable[block / (inftl->EraseSize / SECTORSIZE)];
 	unsigned long blockofs = (block * SECTORSIZE) & (inftl->EraseSize - 1);
+	struct mtd_info *mtd = inftl->mbd.mtd;
 	unsigned int status;
 	int silly = MAX_LOOPS;
 	size_t retlen;
 	struct inftl_bci bci;
 
-	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_deleteblock(inftl=0x%x,"
-		"block=%d)\n", (int)inftl, block);
+	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: INFTL_deleteblock(inftl=%p,"
+		"block=%d)\n", inftl, block);
 
 	while (thisEUN < inftl->nb_blocks) {
-		if (MTD_READOOB(inftl->mbd.mtd, (thisEUN * inftl->EraseSize) +
-		    blockofs, 8, &retlen, (char *)&bci) < 0)
+		if (inftl_read_oob(mtd, (thisEUN * inftl->EraseSize) +
+				   blockofs, 8, &retlen, (char *)&bci) < 0)
 			status = SECTOR_IGNORE;
 		else
 			status = bci.Status | bci.Status1;
@@ -737,28 +806,28 @@ foundit:
 	if (thisEUN != BLOCK_NIL) {
 		loff_t ptr = (thisEUN * inftl->EraseSize) + blockofs;
 
-		if (MTD_READOOB(inftl->mbd.mtd, ptr, 8, &retlen, (char *)&bci) < 0)
+		if (inftl_read_oob(mtd, ptr, 8, &retlen, (char *)&bci) < 0)
 			return -EIO;
 		bci.Status = bci.Status1 = SECTOR_DELETED;
-		if (MTD_WRITEOOB(inftl->mbd.mtd, ptr, 8, &retlen, (char *)&bci) < 0)
+		if (inftl_write_oob(mtd, ptr, 8, &retlen, (char *)&bci) < 0)
 			return -EIO;
 		INFTL_trydeletechain(inftl, block / (inftl->EraseSize / SECTORSIZE));
 	}
 	return 0;
 }
 
-static int inftl_writeblock(struct mtd_blktrans_dev *mbd, unsigned long block, 
+static int inftl_writeblock(struct mtd_blktrans_dev *mbd, unsigned long block,
 			    char *buffer)
 {
 	struct INFTLrecord *inftl = (void *)mbd;
 	unsigned int writeEUN;
 	unsigned long blockofs = (block * SECTORSIZE) & (inftl->EraseSize - 1);
 	size_t retlen;
-	u8 eccbuf[6];
+	struct inftl_oob oob;
 	char *p, *pend;
 
-	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: inftl_writeblock(inftl=0x%x,block=%ld,"
-		"buffer=0x%x)\n", (int)inftl, block, (int)buffer);
+	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: inftl_writeblock(inftl=%p,block=%ld,"
+		"buffer=%p)\n", inftl, block, buffer);
 
 	/* Is block all zero? */
 	pend = buffer + SECTORSIZE;
@@ -778,11 +847,14 @@ static int inftl_writeblock(struct mtd_blktrans_dev *mbd, unsigned long block,
 			return 1;
 		}
 
-		MTD_WRITEECC(inftl->mbd.mtd, (writeEUN * inftl->EraseSize) +
-			blockofs, SECTORSIZE, &retlen, (char *)buffer,
-			(char *)eccbuf, NULL);
+		memset(&oob, 0xff, sizeof(struct inftl_oob));
+		oob.b.Status = oob.b.Status1 = SECTOR_USED;
+
+		inftl_write(inftl->mbd.mtd, (writeEUN * inftl->EraseSize) +
+			    blockofs, SECTORSIZE, &retlen, (char *)buffer,
+			    (char *)&oob);
 		/*
-		 * No need to write SECTOR_USED flags since they are written
+		 * need to write SECTOR_USED flags since they are not written
 		 * in mtd_writeecc
 		 */
 	} else {
@@ -798,17 +870,18 @@ static int inftl_readblock(struct mtd_blktrans_dev *mbd, unsigned long block,
 	struct INFTLrecord *inftl = (void *)mbd;
 	unsigned int thisEUN = inftl->VUtable[block / (inftl->EraseSize / SECTORSIZE)];
 	unsigned long blockofs = (block * SECTORSIZE) & (inftl->EraseSize - 1);
-        unsigned int status;
+	struct mtd_info *mtd = inftl->mbd.mtd;
+	unsigned int status;
 	int silly = MAX_LOOPS;
-        struct inftl_bci bci;
+	struct inftl_bci bci;
 	size_t retlen;
 
-	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: inftl_readblock(inftl=0x%x,block=%ld,"
-		"buffer=0x%x)\n", (int)inftl, block, (int)buffer);
+	DEBUG(MTD_DEBUG_LEVEL3, "INFTL: inftl_readblock(inftl=%p,block=%ld,"
+		"buffer=%p)\n", inftl, block, buffer);
 
 	while (thisEUN < inftl->nb_blocks) {
-		if (MTD_READOOB(inftl->mbd.mtd, (thisEUN * inftl->EraseSize) +
-		     blockofs, 8, &retlen, (char *)&bci) < 0)
+		if (inftl_read_oob(mtd, (thisEUN * inftl->EraseSize) +
+				  blockofs, 8, &retlen, (char *)&bci) < 0)
 			status = SECTOR_IGNORE;
 		else
 			status = bci.Status | bci.Status1;
@@ -844,11 +917,12 @@ foundit:
 		/* The requested block is not on the media, return all 0x00 */
 		memset(buffer, 0, SECTORSIZE);
 	} else {
-        	size_t retlen;
+		size_t retlen;
 		loff_t ptr = (thisEUN * inftl->EraseSize) + blockofs;
-		u_char eccbuf[6];
-		if (MTD_READECC(inftl->mbd.mtd, ptr, SECTORSIZE, &retlen,
-		    buffer, eccbuf, NULL))
+		int ret = mtd->read(mtd, ptr, SECTORSIZE, &retlen, buffer);
+
+		/* Handle corrected bit flips gracefully */
+		if (ret < 0 && ret != -EUCLEAN)
 			return -EIO;
 	}
 	return 0;
@@ -865,10 +939,11 @@ static int inftl_getgeo(struct mtd_blktrans_dev *dev, struct hd_geometry *geo)
 	return 0;
 }
 
-struct mtd_blktrans_ops inftl_tr = {
+static struct mtd_blktrans_ops inftl_tr = {
 	.name		= "inftl",
 	.major		= INFTL_MAJOR,
 	.part_bits	= INFTL_PARTN_BITS,
+	.blksize 	= 512,
 	.getgeo		= inftl_getgeo,
 	.readsect	= inftl_readblock,
 	.writesect	= inftl_writeblock,
@@ -877,13 +952,8 @@ struct mtd_blktrans_ops inftl_tr = {
 	.owner		= THIS_MODULE,
 };
 
-extern char inftlmountrev[];
-
-int __init init_inftl(void)
+static int __init init_inftl(void)
 {
-	printk(KERN_INFO "INFTL: inftlcore.c $Revision: 1.14 $, "
-		"inftlmount.c %s\n", inftlmountrev);
-
 	return register_mtd_blktrans(&inftl_tr);
 }
 

@@ -1,14 +1,14 @@
-/* * Linux ISDN subsystem, X.25 related functions
+/* $Id: isdn_x25iface.c,v 1.1.2.2 2004/01/12 22:37:19 keil Exp $
+ *
+ * Linux ISDN subsystem, X.25 related functions
  *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
- */
-
-/*
+ *
  * stuff needed to support the Linux X.25 PLP code on top of devices that
  * can provide a lab_b service using the concap_proto mechanism.
- * This module supports a network interface wich provides lapb_sematics
- * -- as defined in ../../Documentation/networking/x25-iface.txt -- to
+ * This module supports a network interface which provides lapb_sematics
+ * -- as defined in Documentation/networking/x25-iface.txt -- to
  * the upper layer and assumes that the lower layer provides a reliable
  * data link service by means of the concap_device_ops callbacks.
  *
@@ -17,9 +17,12 @@
  *
  */
 
+/* #include <linux/isdn.h> */
 #include <linux/netdevice.h>
 #include <linux/concap.h>
+#include <linux/slab.h>
 #include <linux/wanrouter.h>
+#include <net/x25device.h>
 #include "isdn_x25iface.h"
 
 /* for debugging messages not to cause an oops when device pointer is NULL*/
@@ -38,15 +41,15 @@ typedef struct isdn_x25iface_proto_data {
 
 
 /* is now in header file (extern): struct concap_proto * isdn_x25iface_proto_new(void); */
-void isdn_x25iface_proto_del( struct concap_proto * );
-int isdn_x25iface_proto_close( struct concap_proto * );
-int isdn_x25iface_proto_restart( struct concap_proto *,
-				 struct net_device *,
-				 struct concap_device_ops *);
-int isdn_x25iface_xmit( struct concap_proto *, struct sk_buff * );
-int isdn_x25iface_receive( struct concap_proto *, struct sk_buff * );
-int isdn_x25iface_connect_ind( struct concap_proto * );
-int isdn_x25iface_disconn_ind( struct concap_proto * );
+static void isdn_x25iface_proto_del( struct concap_proto * );
+static int isdn_x25iface_proto_close( struct concap_proto * );
+static int isdn_x25iface_proto_restart( struct concap_proto *,
+					struct net_device *,
+					struct concap_device_ops *);
+static int isdn_x25iface_xmit( struct concap_proto *, struct sk_buff * );
+static int isdn_x25iface_receive( struct concap_proto *, struct sk_buff * );
+static int isdn_x25iface_connect_ind( struct concap_proto * );
+static int isdn_x25iface_disconn_ind( struct concap_proto * );
 
 
 static struct concap_proto_ops ix25_pops = {
@@ -63,7 +66,7 @@ static struct concap_proto_ops ix25_pops = {
 /* error message helper function */
 static void illegal_state_warn( unsigned state, unsigned char firstbyte) 
 {
-	printk( KERN_WARNING "isdn_x25iface: firstbyte %x invalid in"
+	printk( KERN_WARNING "isdn_x25iface: firstbyte %x illegal in"
 		"current state %d\n",firstbyte, state );
 }
 
@@ -72,13 +75,13 @@ static int pdata_is_bad( ix25_pdata_t * pda ){
 
 	if( pda  &&  pda -> magic == ISDN_X25IFACE_MAGIC ) return 0;
 	printk( KERN_WARNING
-		"isdn_x25iface_xxx: invalid pointer to proto data\n" );
+		"isdn_x25iface_xxx: illegal pointer to proto data\n" );
 	return 1;
 }
 
 /* create a new x25 interface protocol instance
  */
-struct concap_proto * isdn_x25iface_proto_new()
+struct concap_proto * isdn_x25iface_proto_new(void)
 {
 	ix25_pdata_t * tmp = kmalloc(sizeof(ix25_pdata_t),GFP_KERNEL);
 	IX25DEBUG("isdn_x25iface_proto_new\n");
@@ -87,6 +90,7 @@ struct concap_proto * isdn_x25iface_proto_new()
 		tmp -> state = WAN_UNCONFIGURED;
 		/* private data space used to hold the concap_proto data.
 		   Only to be accessed via the returned pointer */
+		spin_lock_init(&tmp->priv.lock);
 		tmp -> priv.dops       = NULL;
 		tmp -> priv.net_dev    = NULL;
 		tmp -> priv.pops       = &ix25_pops;
@@ -99,7 +103,7 @@ struct concap_proto * isdn_x25iface_proto_new()
 
 /* close the x25iface encapsulation protocol 
  */
-int isdn_x25iface_proto_close(struct concap_proto *cprot){
+static int isdn_x25iface_proto_close(struct concap_proto *cprot){
 
 	ix25_pdata_t *tmp;
         int ret = 0;
@@ -111,9 +115,7 @@ int isdn_x25iface_proto_close(struct concap_proto *cprot){
 		return -1;
 	}
 	IX25DEBUG( "isdn_x25iface_proto_close %s \n", MY_DEVNAME(cprot -> net_dev) );
-	save_flags(flags);
-	cli();  /* avoid races with incoming events calling pops methods while
-		 cprot members are inconsistent */  
+	spin_lock_irqsave(&cprot->lock, flags);
 	cprot -> dops    = NULL;
 	cprot -> net_dev = NULL;
 	tmp = cprot -> proto_data;
@@ -122,14 +124,13 @@ int isdn_x25iface_proto_close(struct concap_proto *cprot){
 	} else {
 		tmp -> state = WAN_UNCONFIGURED;
 	}
-	restore_flags(flags);
-
+	spin_unlock_irqrestore(&cprot->lock, flags);
 	return ret;
 }
 
 /* Delete the x25iface encapsulation protocol instance
  */
-void isdn_x25iface_proto_del(struct concap_proto *cprot){
+static void isdn_x25iface_proto_del(struct concap_proto *cprot){
 
 	ix25_pdata_t * tmp;
  
@@ -158,9 +159,9 @@ void isdn_x25iface_proto_del(struct concap_proto *cprot){
 
 /* (re-)initialize the data structures for x25iface encapsulation
  */
-int isdn_x25iface_proto_restart(struct concap_proto *cprot,
-				struct net_device *ndev, 
-				struct concap_device_ops *dops)
+static int isdn_x25iface_proto_restart(struct concap_proto *cprot,
+					struct net_device *ndev,
+					struct concap_device_ops *dops)
 {
 	ix25_pdata_t * pda = cprot -> proto_data ;
 	ulong flags;
@@ -176,30 +177,25 @@ int isdn_x25iface_proto_restart(struct concap_proto *cprot,
 		isdn_x25iface_proto_close(cprot);
 		return -1;
 	}
-	save_flags(flags);
-	cli();  /* avoid races with incoming events calling pops methods while
-		 cprot members are inconsistent */  
+	spin_lock_irqsave(&cprot->lock, flags);
 	cprot -> net_dev = ndev;
 	cprot -> pops = &ix25_pops;
 	cprot -> dops = dops;
 	pda -> state = WAN_DISCONNECTED;
-	restore_flags(flags);
+	spin_unlock_irqrestore(&cprot->lock, flags);
 	return 0;
 }
 
 /* deliver a dl_data frame received from i4l HL driver to the network layer 
  */
-int isdn_x25iface_receive(struct concap_proto *cprot, struct sk_buff *skb)
+static int isdn_x25iface_receive(struct concap_proto *cprot, struct sk_buff *skb)
 {
   	IX25DEBUG( "isdn_x25iface_receive %s \n", MY_DEVNAME(cprot->net_dev) );
 	if ( ( (ix25_pdata_t*) (cprot->proto_data) ) 
 	     -> state == WAN_CONNECTED ){
-		skb -> dev = cprot -> net_dev;
-		skb -> protocol = htons(ETH_P_X25);
-		skb -> pkt_type = PACKET_HOST;
 		if( skb_push(skb, 1)){
-			skb -> data[0]=0x00;
-			skb -> mac.raw = skb -> data;
+			skb->data[0] = X25_IFACE_DATA;
+			skb->protocol = x25_type_trans(skb, cprot->net_dev);
 			netif_rx(skb);
 			return 0;
 		}
@@ -211,9 +207,9 @@ int isdn_x25iface_receive(struct concap_proto *cprot, struct sk_buff *skb)
 
 /* a connection set up is indicated by lower layer 
  */
-int isdn_x25iface_connect_ind(struct concap_proto *cprot)
+static int isdn_x25iface_connect_ind(struct concap_proto *cprot)
 {
-	struct sk_buff * skb = dev_alloc_skb(1);
+	struct sk_buff * skb;
 	enum wan_states *state_p 
 	  = &( ( (ix25_pdata_t*) (cprot->proto_data) ) -> state);
 	IX25DEBUG( "isdn_x25iface_connect_ind %s \n"
@@ -222,17 +218,14 @@ int isdn_x25iface_connect_ind(struct concap_proto *cprot)
 		printk(KERN_WARNING 
 		       "isdn_x25iface_connect_ind while unconfigured %s\n"
 		       , MY_DEVNAME(cprot->net_dev) );
-		if (skb)
-			dev_kfree_skb(skb);
 		return -1;
 	}
 	*state_p = WAN_CONNECTED;
+
+	skb = dev_alloc_skb(1);
 	if( skb ){
-		*( skb_put(skb, 1) ) = 0x01;
-		skb -> mac.raw = skb -> data;
-		skb -> dev  = cprot -> net_dev;
-		skb -> protocol = htons(ETH_P_X25);
-		skb -> pkt_type = PACKET_HOST;
+		*(skb_put(skb, 1)) = X25_IFACE_CONNECT;
+		skb->protocol = x25_type_trans(skb, cprot->net_dev);
 		netif_rx(skb);
 		return 0;
 	} else {
@@ -245,7 +238,7 @@ int isdn_x25iface_connect_ind(struct concap_proto *cprot)
 	
 /* a disconnect is indicated by lower layer 
  */
-int isdn_x25iface_disconn_ind(struct concap_proto *cprot)
+static int isdn_x25iface_disconn_ind(struct concap_proto *cprot)
 {
 	struct sk_buff *skb;
 	enum wan_states *state_p 
@@ -260,11 +253,8 @@ int isdn_x25iface_disconn_ind(struct concap_proto *cprot)
 	*state_p = WAN_DISCONNECTED;
 	skb = dev_alloc_skb(1);
 	if( skb ){
-		*( skb_put(skb, 1) ) = 0x02;
-		skb -> mac.raw = skb -> data;
-		skb -> dev  = cprot -> net_dev;
-		skb -> protocol = htons(ETH_P_X25);
-		skb -> pkt_type = PACKET_HOST;
+		*(skb_put(skb, 1)) = X25_IFACE_DISCONNECT;
+		skb->protocol = x25_type_trans(skb, cprot->net_dev);
 		netif_rx(skb);
 		return 0;
 	} else {
@@ -275,17 +265,17 @@ int isdn_x25iface_disconn_ind(struct concap_proto *cprot)
 }
 
 /* process a frame handed over to us from linux network layer. First byte
-   semantics as defined in ../../Documentation/networking/x25-iface.txt 
+   semantics as defined in Documentation/networking/x25-iface.txt
    */
-int isdn_x25iface_xmit(struct concap_proto *cprot, struct sk_buff *skb)
+static int isdn_x25iface_xmit(struct concap_proto *cprot, struct sk_buff *skb)
 {
 	unsigned char firstbyte = skb->data[0];
-	unsigned *state = 
-		&( ( (ix25_pdata_t*) (cprot -> proto_data) ) -> state  );
+	enum wan_states *state = &((ix25_pdata_t*)cprot->proto_data)->state;
 	int ret = 0;
-	IX25DEBUG( "isdn_x25iface_xmit: %s first=%x state=%d \n", MY_DEVNAME(cprot -> net_dev), firstbyte, *state );
+	IX25DEBUG("isdn_x25iface_xmit: %s first=%x state=%d\n",
+		MY_DEVNAME(cprot->net_dev), firstbyte, *state);
 	switch ( firstbyte ){
-	case 0x00: /* dl_data request */
+	case X25_IFACE_DATA:
 		if( *state == WAN_CONNECTED ){
 			skb_pull(skb, 1);
 			cprot -> net_dev -> trans_start = jiffies;
@@ -296,7 +286,7 @@ int isdn_x25iface_xmit(struct concap_proto *cprot, struct sk_buff *skb)
 		}
 		illegal_state_warn( *state, firstbyte ); 
 		break;
-	case 0x01: /* dl_connect request */
+	case X25_IFACE_CONNECT:
 		if( *state == WAN_DISCONNECTED ){
 			*state = WAN_CONNECTING;
 		        ret = cprot -> dops -> connect_req(cprot);
@@ -309,7 +299,7 @@ int isdn_x25iface_xmit(struct concap_proto *cprot, struct sk_buff *skb)
 			illegal_state_warn( *state, firstbyte );
 		}
 		break;
-	case 0x02: /* dl_disconnect request */
+	case X25_IFACE_DISCONNECT:
 		switch ( *state ){
 		case WAN_DISCONNECTED: 
 			/* Should not happen. However, give upper layer a
@@ -329,12 +319,12 @@ int isdn_x25iface_xmit(struct concap_proto *cprot, struct sk_buff *skb)
 			illegal_state_warn( *state, firstbyte );
 		}
 		break;
-	case 0x03: /* changing lapb parameters requested */
+	case X25_IFACE_PARAMS:
 		printk(KERN_WARNING "isdn_x25iface_xmit: setting of lapb"
 		       " options not yet supported\n");
 		break;
 	default:
-		printk(KERN_WARNING "isdn_x25iface_xmit: frame with invalid"
+		printk(KERN_WARNING "isdn_x25iface_xmit: frame with illegal"
 		       " first byte %x ignored:\n", firstbyte);
 	}
 	dev_kfree_skb(skb);

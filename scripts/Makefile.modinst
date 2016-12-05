@@ -2,38 +2,34 @@
 # Installing modules
 # ==========================================================================
 
-.PHONY: __modinst
+PHONY := __modinst
 __modinst:
 
-include scripts/Makefile.lib
+include scripts/Kbuild.include
 
 #
 
-__modules := $(shell cat /dev/null $(wildcard $(MODVERDIR)/*.mod))
+__modules := $(sort $(shell grep -h '\.ko' /dev/null $(wildcard $(MODVERDIR)/*.mod)))
 modules := $(patsubst %.o,%.ko,$(wildcard $(__modules:.ko=.o)))
 
-ifneq ($(filter-out $(modules),$(__modules)),)
-  $(warning *** Uh-oh, you have stale module entries. You messed with SUBDIRS, do not complain if something goes wrong.)
-endif
-
-.PHONY: $(modules)
+PHONY += $(modules)
 __modinst: $(modules)
 	@:
 
-# Modules built within the kernel tree
-
 quiet_cmd_modules_install = INSTALL $@
-      cmd_modules_install = mkdir -p $(MODLIB)/kernel/$(@D); \
-			    cp $@ $(MODLIB)/kernel/$(@D)
+      cmd_modules_install = mkdir -p $(2); cp $@ $(2) ; $(mod_strip_cmd) $(2)/$(notdir $@)
 
-$(filter-out ../% /%,$(modules)):
-	$(call cmd,modules_install)
+# Modules built outside the kernel source tree go into extra by default
+INSTALL_MOD_DIR ?= extra
+ext-mod-dir = $(INSTALL_MOD_DIR)$(subst $(patsubst %/,%,$(KBUILD_EXTMOD)),,$(@D))
 
-# Modules built outside just go into extra
+modinst_dir = $(if $(KBUILD_EXTMOD),$(ext-mod-dir),kernel/$(@D))
 
-quiet_cmd_modules_install_extra = INSTALL $(obj-m:.o=.ko)
-      cmd_modules_install_extra = mkdir -p $(MODLIB)/extra; \
-			    	  cp $@ $(MODLIB)/extra
+$(modules):
+	$(call cmd,modules_install,$(MODLIB)/$(modinst_dir))
 
-$(filter     ../% /%,$(modules)):
-	$(call cmd,modules_install_extra)
+
+# Declare the contents of the .PHONY variable as phony.  We keep that
+# information in a variable se we can use it in if_changed and friends.
+
+.PHONY: $(PHONY)

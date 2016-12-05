@@ -23,7 +23,7 @@
 
 /* Define the number of blocks we need to account to a transaction to
  * modify one block of data.
- * 
+ *
  * We may have to touch one inode, one bitmap buffer, up to three
  * indirection blocks, the group and superblock summaries, and the data
  * block to complete the transaction.  */
@@ -42,16 +42,15 @@
  * superblock only gets updated once, of course, so don't bother
  * counting that again for the quota updates. */
 
-#define EXT3_DATA_TRANS_BLOCKS		(3 * EXT3_SINGLEDATA_TRANS_BLOCKS + \
-					 EXT3_XATTR_TRANS_BLOCKS - 2)
-
-extern int ext3_writepage_trans_blocks(struct inode *inode);
+#define EXT3_DATA_TRANS_BLOCKS(sb)	(EXT3_SINGLEDATA_TRANS_BLOCKS + \
+					 EXT3_XATTR_TRANS_BLOCKS - 2 + \
+					 EXT3_MAXQUOTAS_TRANS_BLOCKS(sb))
 
 /* Delete operations potentially hit one directory's namespace plus an
  * entire inode, plus arbitrary amounts of bitmap/indirection data.  Be
  * generous.  We can grow the delete transaction later if necessary. */
 
-#define EXT3_DELETE_TRANS_BLOCKS	(2 * EXT3_DATA_TRANS_BLOCKS + 64)
+#define EXT3_DELETE_TRANS_BLOCKS(sb)   (EXT3_MAXQUOTAS_TRANS_BLOCKS(sb) + 64)
 
 /* Define an arbitrary limit for the amount of data we will anticipate
  * writing to any given transaction.  For unbounded transactions such as
@@ -72,17 +71,36 @@ extern int ext3_writepage_trans_blocks(struct inode *inode);
 
 #define EXT3_INDEX_EXTRA_TRANS_BLOCKS	8
 
+#ifdef CONFIG_QUOTA
+/* Amount of blocks needed for quota update - we know that the structure was
+ * allocated so we need to update only inode+data */
+#define EXT3_QUOTA_TRANS_BLOCKS(sb) (test_opt(sb, QUOTA) ? 2 : 0)
+/* Amount of blocks needed for quota insert/delete - we do some block writes
+ * but inode, sb and group updates are done only once */
+#define EXT3_QUOTA_INIT_BLOCKS(sb) (test_opt(sb, QUOTA) ? (DQUOT_INIT_ALLOC*\
+		(EXT3_SINGLEDATA_TRANS_BLOCKS-3)+3+DQUOT_INIT_REWRITE) : 0)
+#define EXT3_QUOTA_DEL_BLOCKS(sb) (test_opt(sb, QUOTA) ? (DQUOT_DEL_ALLOC*\
+		(EXT3_SINGLEDATA_TRANS_BLOCKS-3)+3+DQUOT_DEL_REWRITE) : 0)
+#else
+#define EXT3_QUOTA_TRANS_BLOCKS(sb) 0
+#define EXT3_QUOTA_INIT_BLOCKS(sb) 0
+#define EXT3_QUOTA_DEL_BLOCKS(sb) 0
+#endif
+#define EXT3_MAXQUOTAS_TRANS_BLOCKS(sb) (MAXQUOTAS*EXT3_QUOTA_TRANS_BLOCKS(sb))
+#define EXT3_MAXQUOTAS_INIT_BLOCKS(sb) (MAXQUOTAS*EXT3_QUOTA_INIT_BLOCKS(sb))
+#define EXT3_MAXQUOTAS_DEL_BLOCKS(sb) (MAXQUOTAS*EXT3_QUOTA_DEL_BLOCKS(sb))
+
 int
-ext3_mark_iloc_dirty(handle_t *handle, 
+ext3_mark_iloc_dirty(handle_t *handle,
 		     struct inode *inode,
 		     struct ext3_iloc *iloc);
 
-/* 
+/*
  * On success, We end up with an outstanding reference count against
- * iloc->bh.  This _must_ be cleaned up later. 
+ * iloc->bh.  This _must_ be cleaned up later.
  */
 
-int ext3_reserve_inode_write(handle_t *handle, struct inode *inode, 
+int ext3_reserve_inode_write(handle_t *handle, struct inode *inode,
 			struct ext3_iloc *iloc);
 
 int ext3_mark_inode_dirty(handle_t *handle, struct inode *inode);
@@ -94,91 +112,58 @@ int ext3_mark_inode_dirty(handle_t *handle, struct inode *inode);
  * been done yet.
  */
 
+static inline void ext3_journal_release_buffer(handle_t *handle,
+						struct buffer_head *bh)
+{
+	journal_release_buffer(handle, bh);
+}
+
 void ext3_journal_abort_handle(const char *caller, const char *err_fn,
 		struct buffer_head *bh, handle_t *handle, int err);
 
-static inline int
-__ext3_journal_get_undo_access(const char *where, handle_t *handle,
-				struct buffer_head *bh, int *credits)
-{
-	int err = journal_get_undo_access(handle, bh, credits);
-	if (err)
-		ext3_journal_abort_handle(where, __FUNCTION__, bh, handle,err);
-	return err;
-}
+int __ext3_journal_get_undo_access(const char *where, handle_t *handle,
+				struct buffer_head *bh);
 
-static inline int
-__ext3_journal_get_write_access(const char *where, handle_t *handle,
-				struct buffer_head *bh, int *credits)
-{
-	int err = journal_get_write_access(handle, bh, credits);
-	if (err)
-		ext3_journal_abort_handle(where, __FUNCTION__, bh, handle,err);
-	return err;
-}
+int __ext3_journal_get_write_access(const char *where, handle_t *handle,
+				struct buffer_head *bh);
 
-static inline void
-ext3_journal_release_buffer(handle_t *handle, struct buffer_head *bh,
-				int credits)
-{
-	journal_release_buffer(handle, bh, credits);
-}
+int __ext3_journal_forget(const char *where, handle_t *handle,
+				struct buffer_head *bh);
 
-static inline void
-ext3_journal_forget(handle_t *handle, struct buffer_head *bh)
-{
-	journal_forget(handle, bh);
-}
+int __ext3_journal_revoke(const char *where, handle_t *handle,
+				unsigned long blocknr, struct buffer_head *bh);
 
-static inline int
-__ext3_journal_revoke(const char *where, handle_t *handle,
-		      unsigned long blocknr, struct buffer_head *bh)
-{
-	int err = journal_revoke(handle, blocknr, bh);
-	if (err)
-		ext3_journal_abort_handle(where, __FUNCTION__, bh, handle,err);
-	return err;
-}
+int __ext3_journal_get_create_access(const char *where,
+				handle_t *handle, struct buffer_head *bh);
 
-static inline int
-__ext3_journal_get_create_access(const char *where,
-				 handle_t *handle, struct buffer_head *bh)
-{
-	int err = journal_get_create_access(handle, bh);
-	if (err)
-		ext3_journal_abort_handle(where, __FUNCTION__, bh, handle,err);
-	return err;
-}
+int __ext3_journal_dirty_metadata(const char *where,
+				handle_t *handle, struct buffer_head *bh);
 
-static inline int
-__ext3_journal_dirty_metadata(const char *where,
-			      handle_t *handle, struct buffer_head *bh)
-{
-	int err = journal_dirty_metadata(handle, bh);
-	if (err)
-		ext3_journal_abort_handle(where, __FUNCTION__, bh, handle,err);
-	return err;
-}
-
-
-#define ext3_journal_get_undo_access(handle, bh, credits) \
-	__ext3_journal_get_undo_access(__FUNCTION__, (handle), (bh), (credits))
+#define ext3_journal_get_undo_access(handle, bh) \
+	__ext3_journal_get_undo_access(__func__, (handle), (bh))
 #define ext3_journal_get_write_access(handle, bh) \
-	__ext3_journal_get_write_access(__FUNCTION__, (handle), (bh), NULL)
-#define ext3_journal_get_write_access_credits(handle, bh, credits) \
-	__ext3_journal_get_write_access(__FUNCTION__, (handle), (bh), (credits))
+	__ext3_journal_get_write_access(__func__, (handle), (bh))
 #define ext3_journal_revoke(handle, blocknr, bh) \
-	__ext3_journal_revoke(__FUNCTION__, (handle), (blocknr), (bh))
+	__ext3_journal_revoke(__func__, (handle), (blocknr), (bh))
 #define ext3_journal_get_create_access(handle, bh) \
-	__ext3_journal_get_create_access(__FUNCTION__, (handle), (bh))
+	__ext3_journal_get_create_access(__func__, (handle), (bh))
 #define ext3_journal_dirty_metadata(handle, bh) \
-	__ext3_journal_dirty_metadata(__FUNCTION__, (handle), (bh))
+	__ext3_journal_dirty_metadata(__func__, (handle), (bh))
+#define ext3_journal_forget(handle, bh) \
+	__ext3_journal_forget(__func__, (handle), (bh))
 
-handle_t *ext3_journal_start(struct inode *inode, int nblocks);
+int ext3_journal_dirty_data(handle_t *handle, struct buffer_head *bh);
+
+handle_t *ext3_journal_start_sb(struct super_block *sb, int nblocks);
 int __ext3_journal_stop(const char *where, handle_t *handle);
 
+static inline handle_t *ext3_journal_start(struct inode *inode, int nblocks)
+{
+	return ext3_journal_start_sb(inode->i_sb, nblocks);
+}
+
 #define ext3_journal_stop(handle) \
-	__ext3_journal_stop(__FUNCTION__, (handle))
+	__ext3_journal_stop(__func__, (handle))
 
 static inline handle_t *ext3_journal_current_handle(void)
 {
@@ -221,13 +206,24 @@ static inline int ext3_should_journal_data(struct inode *inode)
 
 static inline int ext3_should_order_data(struct inode *inode)
 {
-	return (test_opt(inode->i_sb, DATA_FLAGS) == EXT3_MOUNT_ORDERED_DATA);
+	if (!S_ISREG(inode->i_mode))
+		return 0;
+	if (EXT3_I(inode)->i_flags & EXT3_JOURNAL_DATA_FL)
+		return 0;
+	if (test_opt(inode->i_sb, DATA_FLAGS) == EXT3_MOUNT_ORDERED_DATA)
+		return 1;
+	return 0;
 }
 
 static inline int ext3_should_writeback_data(struct inode *inode)
 {
-	return !ext3_should_journal_data(inode) &&
-			!ext3_should_order_data(inode);
+	if (!S_ISREG(inode->i_mode))
+		return 0;
+	if (EXT3_I(inode)->i_flags & EXT3_JOURNAL_DATA_FL)
+		return 0;
+	if (test_opt(inode->i_sb, DATA_FLAGS) == EXT3_MOUNT_WRITEBACK_DATA)
+		return 1;
+	return 0;
 }
 
 #endif	/* _LINUX_EXT3_JBD_H */

@@ -1,14 +1,12 @@
 /*
- *  drivers/s390/char/sclp_rw.c
- *     driver: reading from and writing to system console on S/390 via SCLP
+ * driver: reading from and writing to system console on S/390 via SCLP
  *
- *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Martin Peschke <mpeschke@de.ibm.com>
- *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
+ * Copyright IBM Corp. 1999, 2009
+ *
+ * Author(s): Martin Peschke <mpeschke@de.ibm.com>
+ *	      Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
-#include <linux/config.h>
 #include <linux/kmod.h>
 #include <linux/types.h>
 #include <linux/err.h>
@@ -20,18 +18,23 @@
 #include "sclp.h"
 #include "sclp_rw.h"
 
-#define SCLP_RW_PRINT_HEADER "sclp low level driver: "
-
 /*
  * The room for the SCCB (only for writing) is not equal to a pages size
- * (as it is specified as the maximum size in the the SCLP ducumentation)
+ * (as it is specified as the maximum size in the SCLP documentation)
  * because of the additional data structure described above.
  */
 #define MAX_SCCB_ROOM (PAGE_SIZE - sizeof(struct sclp_buffer))
 
+static void sclp_rw_pm_event(struct sclp_register *reg,
+			     enum sclp_pm_event sclp_pm_event)
+{
+	sclp_console_pm_event(sclp_pm_event);
+}
+
 /* Event type structure for write message and write priority message */
 static struct sclp_register sclp_rw_event = {
-	.send_mask = EvTyp_Msg_Mask | EvTyp_PMsgCmd_Mask
+	.send_mask = EVTYP_MSG_MASK | EVTYP_PMSGCMD_MASK,
+	.pm_event_fn = sclp_rw_pm_event,
 };
 
 /*
@@ -54,7 +57,6 @@ sclp_make_buffer(void *page, unsigned short columns, unsigned short htab)
 	buffer = ((struct sclp_buffer *) ((addr_t) sccb + PAGE_SIZE)) - 1;
 	buffer->sccb = sccb;
 	buffer->retry_count = 0;
-	init_timer(&buffer->retry_timer);
 	buffer->mto_number = 0;
 	buffer->mto_char_sum = 0;
 	buffer->current_line = NULL;
@@ -66,7 +68,7 @@ sclp_make_buffer(void *page, unsigned short columns, unsigned short htab)
 	memset(sccb, 0, sizeof(struct write_sccb));
 	sccb->header.length = sizeof(struct write_sccb);
 	sccb->msg_buf.header.length = sizeof(struct msg_buf);
-	sccb->msg_buf.header.type = EvTyp_Msg;
+	sccb->msg_buf.header.type = EVTYP_MSG;
 	sccb->msg_buf.mdb.header.length = sizeof(struct mdb);
 	sccb->msg_buf.mdb.header.type = 1;
 	sccb->msg_buf.mdb.header.tag = 0xD4C4C240;	/* ebcdic "MDB " */
@@ -78,7 +80,7 @@ sclp_make_buffer(void *page, unsigned short columns, unsigned short htab)
 }
 
 /*
- * Return a pointer to the orignal page that has been used to create
+ * Return a pointer to the original page that has been used to create
  * the buffer.
  */
 void *
@@ -116,7 +118,7 @@ sclp_initialize_mto(struct sclp_buffer *buffer, int max_len)
 	memset(mto, 0, sizeof(struct mto));
 	mto->length = sizeof(struct mto);
 	mto->type = 4;	/* message text object */
-	mto->line_type_flags = LnTpFlgs_EndText; /* end text */
+	mto->line_type_flags = LNTPFLGS_ENDTEXT; /* end text */
 
 	/* set pointer to first byte after struct mto. */
 	buffer->current_line = (char *) (mto + 1);
@@ -175,11 +177,9 @@ sclp_finalize_mto(struct sclp_buffer *buffer)
  *  is not busy)
  */
 int
-sclp_write(struct sclp_buffer *buffer,
-	   const unsigned char *msg, int count, int from_user)
+sclp_write(struct sclp_buffer *buffer, const unsigned char *msg, int count)
 {
 	int spaces, i_msg;
-	char ch;
 	int rc;
 
 	/*
@@ -206,13 +206,7 @@ sclp_write(struct sclp_buffer *buffer,
 	 * This is in order to a slim and quick implementation.
 	 */
 	for (i_msg = 0; i_msg < count; i_msg++) {
-		if (from_user) {
-			if (get_user(ch, msg + i_msg) != 0)
-				return -EFAULT;
-		} else
-			ch = msg[i_msg];
-
-		switch (ch) {
+		switch (msg[i_msg]) {
 		case '\n':	/* new line, line feed (ASCII)	*/
 			/* check if new mto needs to be created */
 			if (buffer->current_line == NULL) {
@@ -225,7 +219,7 @@ sclp_write(struct sclp_buffer *buffer,
 		case '\a':	/* bell, one for several times	*/
 			/* set SCLP sound alarm bit in General Object */
 			buffer->sccb->msg_buf.mdb.go.general_msg_flags |=
-				GnrlMsgFlgs_SndAlrm;
+				GNRLMSGFLGS_SNDALRM;
 			break;
 		case '\t':	/* horizontal tabulator	 */
 			/* check if new mto needs to be created */
@@ -282,11 +276,11 @@ sclp_write(struct sclp_buffer *buffer,
 			if (buffer->current_line != NULL)
 				sclp_finalize_mto(buffer);
 			/* skip the rest of the message including the 0 byte */
-			i_msg = count;
+			i_msg = count - 1;
 			break;
 		default:	/* no escape character	*/
 			/* do not output unprintable characters */
-			if (!isprint(ch))
+			if (!isprint(msg[i_msg]))
 				break;
 			/* check if new mto needs to be created */
 			if (buffer->current_line == NULL) {
@@ -295,7 +289,7 @@ sclp_write(struct sclp_buffer *buffer,
 				if (rc)
 					return i_msg;
 			}
-			*buffer->current_line++ = sclp_ascebc(ch);
+			*buffer->current_line++ = sclp_ascebc(msg[i_msg]);
 			buffer->current_length++;
 			break;
 		}
@@ -373,17 +367,7 @@ sclp_rw_init(void)
 	return rc;
 }
 
-static void
-sclp_buffer_retry(unsigned long data)
-{
-	struct sclp_buffer *buffer = (struct sclp_buffer *) data;
-	buffer->request.status = SCLP_REQ_FILLED;
-	buffer->sccb->header.response_code = 0x0000;
-	sclp_add_request(&buffer->request);
-}
-
-#define SCLP_BUFFER_MAX_RETRY		5
-#define	SCLP_BUFFER_RETRY_INTERVAL	2
+#define SCLP_BUFFER_MAX_RETRY		1
 
 /*
  * second half of Write Event Data-function that has to be done after
@@ -412,7 +396,7 @@ sclp_writedata_callback(struct sclp_req *request, void *data)
 		break;
 
 	case 0x0340: /* Contained SCLP equipment check */
-		if (buffer->retry_count++ > SCLP_BUFFER_MAX_RETRY) {
+		if (++buffer->retry_count > SCLP_BUFFER_MAX_RETRY) {
 			rc = -EIO;
 			break;
 		}
@@ -421,26 +405,26 @@ sclp_writedata_callback(struct sclp_req *request, void *data)
 			/* not all buffers were processed */
 			sccb->header.response_code = 0x0000;
 			buffer->request.status = SCLP_REQ_FILLED;
-			sclp_add_request(request);
-			return;
-		}
-		rc = 0;
+			rc = sclp_add_request(request);
+			if (rc == 0)
+				return;
+		} else
+			rc = 0;
 		break;
 
 	case 0x0040: /* SCLP equipment check */
 	case 0x05f0: /* Target resource in improper state */
-		if (buffer->retry_count++ > SCLP_BUFFER_MAX_RETRY) {
+		if (++buffer->retry_count > SCLP_BUFFER_MAX_RETRY) {
 			rc = -EIO;
 			break;
 		}
-		/* wait some time, then retry request */
-		buffer->retry_timer.function = sclp_buffer_retry;
-		buffer->retry_timer.data = (unsigned long) buffer;
-		buffer->retry_timer.expires = jiffies +
-						SCLP_BUFFER_RETRY_INTERVAL*HZ;
-		add_timer(&buffer->retry_timer);
-		return;
-
+		/* retry request */
+		sccb->header.response_code = 0x0000;
+		buffer->request.status = SCLP_REQ_FILLED;
+		rc = sclp_add_request(request);
+		if (rc == 0)
+			return;
+		break;
 	default:
 		if (sccb->header.response_code == 0x71f0)
 			rc = -ENOMEM;
@@ -454,9 +438,10 @@ sclp_writedata_callback(struct sclp_req *request, void *data)
 
 /*
  * Setup the request structure in the struct sclp_buffer to do SCLP Write
- * Event Data and pass the request to the core SCLP loop.
+ * Event Data and pass the request to the core SCLP loop. Return zero on
+ * success, non-zero otherwise.
  */
-void
+int
 sclp_emit_buffer(struct sclp_buffer *buffer,
 		 void (*callback)(struct sclp_buffer *, int))
 {
@@ -467,29 +452,23 @@ sclp_emit_buffer(struct sclp_buffer *buffer,
 		sclp_finalize_mto(buffer);
 
 	/* Are there messages in the output buffer ? */
-	if (buffer->mto_number == 0) {
-		if (callback != NULL)
-			callback(buffer, 0);
-		return;
-	}
+	if (buffer->mto_number == 0)
+		return -EIO;
 
 	sccb = buffer->sccb;
-	if (sclp_rw_event.sclp_send_mask & EvTyp_Msg_Mask)
+	if (sclp_rw_event.sclp_receive_mask & EVTYP_MSG_MASK)
 		/* Use normal write message */
-		sccb->msg_buf.header.type = EvTyp_Msg;
-	else if (sclp_rw_event.sclp_send_mask & EvTyp_PMsgCmd_Mask)
+		sccb->msg_buf.header.type = EVTYP_MSG;
+	else if (sclp_rw_event.sclp_receive_mask & EVTYP_PMSGCMD_MASK)
 		/* Use write priority message */
-		sccb->msg_buf.header.type = EvTyp_PMsgCmd;
-	else {
-		if (callback != NULL)
-			callback(buffer, -ENOSYS);
-		return;
-	}
-	buffer->request.command = SCLP_CMDW_WRITEDATA;
+		sccb->msg_buf.header.type = EVTYP_PMSGCMD;
+	else
+		return -ENOSYS;
+	buffer->request.command = SCLP_CMDW_WRITE_EVENT_DATA;
 	buffer->request.status = SCLP_REQ_FILLED;
 	buffer->request.callback = sclp_writedata_callback;
 	buffer->request.callback_data = buffer;
 	buffer->request.sccb = sccb;
 	buffer->callback = callback;
-	sclp_add_request(&buffer->request);
+	return sclp_add_request(&buffer->request);
 }

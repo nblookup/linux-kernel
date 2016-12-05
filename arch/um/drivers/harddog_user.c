@@ -1,18 +1,13 @@
-/* 
- * Copyright (C) 2002 Jeff Dike (jdike@karaya.com)
+/*
+ * Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
-#include "user_util.h"
-#include "user.h"
-#include "helper.h"
-#include "mconsole.h"
 #include "os.h"
-#include "choose-mode.h"
-#include "mode.h"
+#include "user.h"
 
 struct dog_data {
 	int stdin;
@@ -39,20 +34,20 @@ int start_watchdog(int *in_fd_ret, int *out_fd_ret, char *sock)
 	int in_fds[2], out_fds[2], pid, n, err;
 	char pid_buf[sizeof("nnnnn\0")], c;
 	char *pid_args[] = { "/usr/bin/uml_watchdog", "-pid", pid_buf, NULL };
-	char *mconsole_args[] = { "/usr/bin/uml_watchdog", "-mconsole", NULL, 
+	char *mconsole_args[] = { "/usr/bin/uml_watchdog", "-mconsole", NULL,
 				  NULL };
 	char **args = NULL;
 
 	err = os_pipe(in_fds, 1, 0);
-	if(err){
-		printk("harddog_open - os_pipe failed, errno = %d\n", -err);
-		return(err);
+	if (err < 0) {
+		printk("harddog_open - os_pipe failed, err = %d\n", -err);
+		goto out;
 	}
 
 	err = os_pipe(out_fds, 1, 0);
-	if(err){
-		printk("harddog_open - os_pipe failed, errno = %d\n", -err);
-		return(err);
+	if (err < 0) {
+		printk("harddog_open - os_pipe failed, err = %d\n", -err);
+		goto out_close_in;
 	}
 
 	data.stdin = out_fds[0];
@@ -60,48 +55,53 @@ int start_watchdog(int *in_fd_ret, int *out_fd_ret, char *sock)
 	data.close_me[0] = out_fds[1];
 	data.close_me[1] = in_fds[0];
 
-	if(sock != NULL){
+	if (sock != NULL) {
 		mconsole_args[2] = sock;
 		args = mconsole_args;
 	}
 	else {
 		/* XXX The os_getpid() is not SMP correct */
-		sprintf(pid_buf, "%d", CHOOSE_MODE(tracing_pid, os_getpid()));
+		sprintf(pid_buf, "%d", os_getpid());
 		args = pid_args;
 	}
 
-	pid = run_helper(pre_exec, &data, args, NULL);
+	pid = run_helper(pre_exec, &data, args);
 
 	close(out_fds[0]);
 	close(in_fds[1]);
 
-	if(pid < 0){
+	if (pid < 0) {
 		err = -pid;
-		printk("harddog_open - run_helper failed, errno = %d\n", err);
-		goto out;
+		printk("harddog_open - run_helper failed, errno = %d\n", -err);
+		goto out_close_out;
 	}
 
 	n = read(in_fds[0], &c, sizeof(c));
-	if(n == 0){
+	if (n == 0) {
 		printk("harddog_open - EOF on watchdog pipe\n");
 		helper_wait(pid);
 		err = -EIO;
-		goto out;
+		goto out_close_out;
 	}
-	else if(n < 0){
+	else if (n < 0) {
 		printk("harddog_open - read of watchdog pipe failed, "
-		       "errno = %d\n", errno);
+		       "err = %d\n", errno);
 		helper_wait(pid);
-		err = -errno;
-		goto out;
+		err = n;
+		goto out_close_out;
 	}
 	*in_fd_ret = in_fds[0];
 	*out_fd_ret = out_fds[1];
-	return(0);
- out:
-	close(out_fds[1]);
+	return 0;
+
+ out_close_in:
 	close(in_fds[0]);
-	return(err);
+	close(in_fds[1]);
+ out_close_out:
+	close(out_fds[0]);
+	close(out_fds[1]);
+ out:
+	return err;
 }
 
 void stop_watchdog(int in_fd, int out_fd)
@@ -116,22 +116,13 @@ int ping_watchdog(int fd)
 	char c = '\n';
 
 	n = write(fd, &c, sizeof(c));
-	if(n < sizeof(c)){
-		printk("ping_watchdog - write failed, errno = %d\n",
-		       errno);
-		return(-errno);
+	if (n != sizeof(c)) {
+		printk("ping_watchdog - write failed, ret = %d, err = %d\n",
+		       n, errno);
+		if (n < 0)
+			return n;
+		return -EIO;
 	}
 	return 1;
 
 }
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

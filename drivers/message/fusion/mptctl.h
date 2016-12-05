@@ -3,24 +3,11 @@
  *      Fusion MPT misc device (ioctl) driver.
  *      For use with PCI chip/adapter(s):
  *          LSIFC9xx/LSI409xx Fibre Channel
- *      running LSI Logic Fusion MPT (Message Passing Technology) firmware.
+ *      running LSI Fusion MPT (Message Passing Technology) firmware.
  *
- *  Credits:
- *      This driver would not exist if not for Alan Cox's development
- *      of the linux i2o driver.
+ *  Copyright (c) 1999-2008 LSI Corporation
+ *  (mailto:DL-MPTFusionLinux@lsi.com)
  *
- *      A huge debt of gratitude is owed to David S. Miller (DaveM)
- *      for fixing much of the stupid and broken stuff in the early
- *      driver while porting to sparc64 platform.  THANK YOU!
- *
- *      (see also mptbase.c)
- *
- *  Copyright (c) 1999-2002 LSI Logic Corporation
- *  Originally By: Steven J. Ralston
- *  (mailto:sjralston1@netscape.net)
- *  (mailto:Pam.Delaney@lsil.com)
- *
- *  $Id: mptctl.h,v 1.13 2002/12/03 21:26:33 pdelaney Exp $
  */
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
 /*
@@ -62,7 +49,6 @@
 #define MPTCTL_H_INCLUDED
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
 
-#include "linux/version.h"
 
 
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
@@ -91,6 +77,7 @@
 
 #define MPTIOCINFO		_IOWR(MPT_MAGIC_NUMBER,17,struct mpt_ioctl_iocinfo)
 #define MPTIOCINFO1		_IOWR(MPT_MAGIC_NUMBER,17,struct mpt_ioctl_iocinfo_rev0)
+#define MPTIOCINFO2		_IOWR(MPT_MAGIC_NUMBER,17,struct mpt_ioctl_iocinfo_rev1)
 #define MPTTARGETINFO		_IOWR(MPT_MAGIC_NUMBER,18,struct mpt_ioctl_targetinfo)
 #define MPTTEST			_IOWR(MPT_MAGIC_NUMBER,19,struct mpt_ioctl_test)
 #define MPTEVENTQUERY		_IOWR(MPT_MAGIC_NUMBER,21,struct mpt_ioctl_eventquery)
@@ -114,7 +101,7 @@
 struct mpt_fw_xfer {
 	unsigned int	 iocnum;	/* IOC unit number */
 	unsigned int	 fwlen;
-	void		*bufp;		/* Pointer to firmware buffer */
+	void		__user *bufp;	/* Pointer to firmware buffer */
 };
 
 #if defined(__KERNEL__) && defined(CONFIG_COMPAT)
@@ -165,16 +152,48 @@ struct mpt_ioctl_pci_info {
 	} u;
 };
 
+struct mpt_ioctl_pci_info2 {
+	union {
+		struct {
+			unsigned int  deviceNumber   :  5;
+			unsigned int  functionNumber :  3;
+			unsigned int  busNumber      : 24;
+		} bits;
+		unsigned int  asUlong;
+	} u;
+  int segmentID;
+};
+
 /*
  *  Adapter Information Page
  *  Read only.
  *  Data starts at offset 0xC
  */
-#define MPT_IOCTL_INTERFACE_FC		(0x01)
 #define MPT_IOCTL_INTERFACE_SCSI	(0x00)
+#define MPT_IOCTL_INTERFACE_FC		(0x01)
+#define MPT_IOCTL_INTERFACE_FC_IP	(0x02)
+#define MPT_IOCTL_INTERFACE_SAS		(0x03)
 #define MPT_IOCTL_VERSION_LENGTH	(32)
 
 struct mpt_ioctl_iocinfo {
+	mpt_ioctl_header hdr;
+	int		 adapterType;	/* SCSI or FCP */
+	int		 port;		/* port number */
+	int		 pciId;		/* PCI Id. */
+	int		 hwRev;		/* hardware revision */
+	int		 subSystemDevice;	/* PCI subsystem Device ID */
+	int		 subSystemVendor;	/* PCI subsystem Vendor ID */
+	int		 numDevices;		/* number of devices */
+	int		 FWVersion;		/* FW Version (integer) */
+	int		 BIOSVersion;		/* BIOS Version (integer) */
+	char		 driverVersion[MPT_IOCTL_VERSION_LENGTH];	/* Driver Version (string) */
+	char		 busChangeEvent;
+	char		 hostId;
+	char		 rsvd[2];
+	struct mpt_ioctl_pci_info2  pciInfo; /* Added Rev 2 */
+};
+
+struct mpt_ioctl_iocinfo_rev1 {
 	mpt_ioctl_header hdr;
 	int		 adapterType;	/* SCSI or FCP */
 	int		 port;		/* port number */
@@ -301,10 +320,10 @@ typedef struct mpt_ioctl_replace_fw {
 struct mpt_ioctl_command {
 	mpt_ioctl_header hdr;
 	int		timeout;	/* optional (seconds) */
-	char		*replyFrameBufPtr;
-	char		*dataInBufPtr;
-	char		*dataOutBufPtr;
-	char		*senseDataPtr;
+	char		__user *replyFrameBufPtr;
+	char		__user *dataInBufPtr;
+	char		__user *dataOutBufPtr;
+	char		__user *senseDataPtr;
 	int		maxReplyBytes;
 	int		dataInSize;
 	int		dataOutSize;
@@ -335,17 +354,13 @@ struct mpt_ioctl_command32 {
 
 
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
-/*
- *	HP Specific IOCTL Defines and Structures
- */
 
 #define CPQFCTS_IOC_MAGIC 'Z'
 #define HP_IOC_MAGIC 'Z'
 #define HP_GETHOSTINFO		_IOR(HP_IOC_MAGIC, 20, hp_host_info_t)
+#define HP_GETHOSTINFO1		_IOR(HP_IOC_MAGIC, 20, hp_host_info_rev0_t)
 #define HP_GETTARGETINFO	_IOR(HP_IOC_MAGIC, 21, hp_target_info_t)
 
-/* All HP IOCTLs must include this header
- */
 typedef struct _hp_header {
 	unsigned int iocnum;
 	unsigned int host;
@@ -357,7 +372,7 @@ typedef struct _hp_header {
 /*
  *  Header:
  *  iocnum 	required (input)
- *  host 	ignored	
+ *  host 	ignored
  *  channe	ignored
  *  id		ignored
  *  lun		ignored
@@ -371,9 +386,9 @@ typedef struct _hp_host_info {
 	u8		 devfn;
 	u8		 bus;
 	ushort		 host_no;		/* SCSI Host number, if scsi driver not loaded*/
-	u8		 fw_version[16];	/* string */	
+	u8		 fw_version[16];	/* string */
 	u8		 serial_number[24];	/* string */
-	u32		 ioc_status;	
+	u32		 ioc_status;
 	u32		 bus_phys_width;
 	u32		 base_io_addr;
 	u32		 rsvd;
@@ -382,10 +397,33 @@ typedef struct _hp_host_info {
 	unsigned int	 timeouts;		/* num timeouts */
 } hp_host_info_t;
 
+/* replace ulongs with uints, need to preserve backwards
+ * compatibility.
+ */
+typedef struct _hp_host_info_rev0 {
+	hp_header_t	 hdr;
+	u16		 vendor;
+	u16		 device;
+	u16		 subsystem_vendor;
+	u16		 subsystem_id;
+	u8		 devfn;
+	u8		 bus;
+	ushort		 host_no;		/* SCSI Host number, if scsi driver not loaded*/
+	u8		 fw_version[16];	/* string */
+	u8		 serial_number[24];	/* string */
+	u32		 ioc_status;
+	u32		 bus_phys_width;
+	u32		 base_io_addr;
+	u32		 rsvd;
+	unsigned long	 hard_resets;		/* driver initiated resets */
+	unsigned long	 soft_resets;		/* ioc, external resets */
+	unsigned long	 timeouts;		/* num timeouts */
+} hp_host_info_rev0_t;
+
 /*
  *  Header:
  *  iocnum 	required (input)
- *  host 	required	
+ *  host 	required
  *  channel	required	(bus number)
  *  id		required
  *  lun		ignored

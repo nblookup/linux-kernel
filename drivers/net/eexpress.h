@@ -53,8 +53,8 @@
 #define SCB_START 0x0008
 
 /* Start of buffer region.  Everything before this is used for control
- * structures and the CU configuration program.  The memory layout is 
- * determined in eexp_hw_probe(), once we know how much memory is 
+ * structures and the CU configuration program.  The memory layout is
+ * determined in eexp_hw_probe(), once we know how much memory is
  * available on the card.
  */
 
@@ -64,21 +64,21 @@
 #define RX_BUF_SIZE ((32+ETH_FRAME_LEN+31)&~0x1f)
 
 /*
- * SCB defines 
+ * SCB defines
  */
 
 /* these functions take the SCB status word and test the relevant status bit */
-#define SCB_complete(s) ((s&0x8000)!=0)
-#define SCB_rxdframe(s) ((s&0x4000)!=0)
-#define SCB_CUdead(s)   ((s&0x2000)!=0)
-#define SCB_RUdead(s)   ((s&0x1000)!=0)
-#define SCB_ack(s)      (s & 0xf000)
+#define SCB_complete(s) (((s) & 0x8000) != 0)
+#define SCB_rxdframe(s) (((s) & 0x4000) != 0)
+#define SCB_CUdead(s)   (((s) & 0x2000) != 0)
+#define SCB_RUdead(s)   (((s) & 0x1000) != 0)
+#define SCB_ack(s)      ((s) & 0xf000)
 
 /* Command unit status: 0=idle, 1=suspended, 2=active */
-#define SCB_CUstat(s)   ((s&0x0300)>>8)
+#define SCB_CUstat(s)   (((s)&0x0300)>>8)
 
 /* Receive unit status: 0=idle, 1=suspended, 2=out of resources, 4=ready */
-#define SCB_RUstat(s)   ((s&0x0070)>>4)
+#define SCB_RUstat(s)   (((s)&0x0070)>>4)
 
 /* SCB commands */
 #define SCB_CUnop       0x0000
@@ -95,21 +95,21 @@
 #define SCB_RUabort     0x0040
 
 /*
- * Command block defines 
+ * Command block defines
  */
 
-#define Stat_Done(s)    ((s&0x8000)!=0)
-#define Stat_Busy(s)    ((s&0x4000)!=0)
-#define Stat_OK(s)      ((s&0x2000)!=0)
-#define Stat_Abort(s)   ((s&0x1000)!=0)
-#define Stat_STFail     ((s&0x0800)!=0)
-#define Stat_TNoCar(s)  ((s&0x0400)!=0)
-#define Stat_TNoCTS(s)  ((s&0x0200)!=0)
-#define Stat_TNoDMA(s)  ((s&0x0100)!=0)
-#define Stat_TDefer(s)  ((s&0x0080)!=0)
-#define Stat_TColl(s)   ((s&0x0040)!=0)
-#define Stat_TXColl(s)  ((s&0x0020)!=0)
-#define Stat_NoColl(s)  (s&0x000f)
+#define Stat_Done(s)    (((s) & 0x8000) != 0)
+#define Stat_Busy(s)    (((s) & 0x4000) != 0)
+#define Stat_OK(s)      (((s) & 0x2000) != 0)
+#define Stat_Abort(s)   (((s) & 0x1000) != 0)
+#define Stat_STFail     (((s) & 0x0800) != 0)
+#define Stat_TNoCar(s)  (((s) & 0x0400) != 0)
+#define Stat_TNoCTS(s)  (((s) & 0x0200) != 0)
+#define Stat_TNoDMA(s)  (((s) & 0x0100) != 0)
+#define Stat_TDefer(s)  (((s) & 0x0080) != 0)
+#define Stat_TColl(s)   (((s) & 0x0040) != 0)
+#define Stat_TXColl(s)  (((s) & 0x0020) != 0)
+#define Stat_NoColl(s)  ((s) & 0x000f)
 
 /* Cmd_END will end AFTER the command if this is the first
  * command block after an SCB_CUstart, but BEFORE the command
@@ -136,16 +136,16 @@
  * Frame Descriptor (Receive block) defines
  */
 
-#define FD_Done(s)  ((s&0x8000)!=0)
-#define FD_Busy(s)  ((s&0x4000)!=0)
-#define FD_OK(s)    ((s&0x2000)!=0)
+#define FD_Done(s)  (((s) & 0x8000) != 0)
+#define FD_Busy(s)  (((s) & 0x4000) != 0)
+#define FD_OK(s)    (((s) & 0x2000) != 0)
 
-#define FD_CRC(s)   ((s&0x0800)!=0)
-#define FD_Align(s) ((s&0x0400)!=0)
-#define FD_Resrc(s) ((s&0x0200)!=0)
-#define FD_DMA(s)   ((s&0x0100)!=0)
-#define FD_Short(s) ((s&0x0080)!=0)
-#define FD_NoEOF(s) ((s&0x0040)!=0)
+#define FD_CRC(s)   (((s) & 0x0800) != 0)
+#define FD_Align(s) (((s) & 0x0400) != 0)
+#define FD_Resrc(s) (((s) & 0x0200) != 0)
+#define FD_DMA(s)   (((s) & 0x0100) != 0)
+#define FD_Short(s) (((s) & 0x0080) != 0)
+#define FD_NoEOF(s) (((s) & 0x0040) != 0)
 
 struct rfd_header {
 	volatile unsigned long flags;
@@ -158,9 +158,9 @@ struct rfd_header {
 	volatile unsigned short srcaddr2;
 	volatile unsigned short srcaddr3;
 	volatile unsigned short length;
-  
-	/* This is actually a Receive Buffer Descriptor.  The way we 
-	 * arrange memory means that an RBD always follows the RFD that 
+
+	/* This is actually a Receive Buffer Descriptor.  The way we
+	 * arrange memory means that an RBD always follows the RFD that
 	 * points to it, so they might as well be in the same structure.
 	 */
 	volatile unsigned short actual_count;

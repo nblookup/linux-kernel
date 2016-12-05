@@ -12,7 +12,7 @@
 #undef MATROXFB_DEBUG
 
 /* heavy debugging: */
-/* -- logs putc[s], so everytime a char is displayed, it's logged */
+/* -- logs putc[s], so every time a char is displayed, it's logged */
 #undef MATROXFB_DEBUG_HEAVY
 
 /* This one _could_ cause infinite loops */
@@ -25,13 +25,11 @@
 /* Guard accelerator accesses with spin_lock_irqsave... */
 #undef MATROXFB_USE_SPINLOCKS
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
@@ -50,16 +48,11 @@
 #include <asm/mtrr.h>
 #endif
 
-#include "../console/fbcon.h"
-
 #if defined(CONFIG_PPC_PMAC)
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include "../macmodes.h"
 #endif
-
-/* always compile support for 32MB... It cost almost nothing */
-#define CONFIG_FB_MATROX_32MB
 
 #ifdef MATROXFB_DEBUG
 
@@ -92,34 +85,6 @@
 #define DBG_LOOP(x)	/* DBG_LOOP */
 
 #endif /* MATROXFB_DEBUG */
-
-#if !defined(__i386__) && !defined(__x86_64__)
-#ifndef ioremap_nocache
-#define ioremap_nocache(X,Y) ioremap(X,Y)
-#endif
-#endif
-
-#if defined(__alpha__) || defined(__mc68000__)
-#define READx_WORKS
-#define MEMCPYTOIO_WORKS
-#else
-#define READx_FAILS
-/* recheck __ppc__, maybe that __ppc__ needs MEMCPYTOIO_WRITEL */
-/* I benchmarked PII/350MHz with G200... MEMCPY, MEMCPYTOIO and WRITEL are on same speed ( <2% diff) */
-/* so that means that G200 speed (or AGP speed?) is our limit... I do not have benchmark to test, how */
-/* much of PCI bandwidth is used during transfers... */
-#if defined(__i386__) || defined(__x86_64__)
-#define MEMCPYTOIO_MEMCPY
-#else
-#define MEMCPYTOIO_WRITEL
-#endif
-#endif
-
-#if defined(__mc68000__)
-#define MAP_BUSTOVIRT
-#else
-#define MAP_IOREMAP
-#endif
 
 #ifdef DEBUG
 #define dprintk(X...)	printk(X)
@@ -155,25 +120,16 @@
 
 /* G-series and Mystique have (almost) same DAC */
 #undef NEED_DAC1064
-#if defined(CONFIG_FB_MATROX_MYSTIQUE) || defined(CONFIG_FB_MATROX_G100)
+#if defined(CONFIG_FB_MATROX_MYSTIQUE) || defined(CONFIG_FB_MATROX_G)
 #define NEED_DAC1064 1
 #endif
 
 typedef struct {
-	u_int8_t*	vaddr;
+	void __iomem*	vaddr;
 } vaddr_t;
 
-#ifdef READx_WORKS
 static inline unsigned int mga_readb(vaddr_t va, unsigned int offs) {
 	return readb(va.vaddr + offs);
-}
-
-static inline unsigned int mga_readw(vaddr_t va, unsigned int offs) {
-	return readw(va.vaddr + offs);
-}
-
-static inline u_int32_t mga_readl(vaddr_t va, unsigned int offs) {
-	return readl(va.vaddr + offs);
 }
 
 static inline void mga_writeb(vaddr_t va, unsigned int offs, u_int8_t value) {
@@ -184,64 +140,42 @@ static inline void mga_writew(vaddr_t va, unsigned int offs, u_int16_t value) {
 	writew(value, va.vaddr + offs);
 }
 
+static inline u_int32_t mga_readl(vaddr_t va, unsigned int offs) {
+	return readl(va.vaddr + offs);
+}
+
 static inline void mga_writel(vaddr_t va, unsigned int offs, u_int32_t value) {
 	writel(value, va.vaddr + offs);
 }
+
+static inline void mga_memcpy_toio(vaddr_t va, const void* src, int len) {
+#if defined(__alpha__) || defined(__i386__) || defined(__x86_64__)
+	/*
+	 * iowrite32_rep works for us if:
+	 *  (1) Copies data as 32bit quantities, not byte after byte,
+	 *  (2) Performs LE ordered stores, and
+	 *  (3) It copes with unaligned source (destination is guaranteed to be page
+	 *      aligned and length is guaranteed to be multiple of 4).
+	 */
+	iowrite32_rep(va.vaddr, src, len >> 2);
 #else
-static inline unsigned int mga_readb(vaddr_t va, unsigned int offs) {
-	return *(volatile u_int8_t*)(va.vaddr + offs);
-}
+        u_int32_t __iomem* addr = va.vaddr;
 
-static inline unsigned int mga_readw(vaddr_t va, unsigned int offs) {
-	return *(volatile u_int16_t*)(va.vaddr + offs);
-}
-
-static inline u_int32_t mga_readl(vaddr_t va, unsigned int offs) {
-	return *(volatile u_int32_t*)(va.vaddr + offs);
-}
-
-static inline void mga_writeb(vaddr_t va, unsigned int offs, u_int8_t value) {
-	*(volatile u_int8_t*)(va.vaddr + offs) = value;
-}
-
-static inline void mga_writew(vaddr_t va, unsigned int offs, u_int16_t value) {
-	*(volatile u_int16_t*)(va.vaddr + offs) = value;
-}
-
-static inline void mga_writel(vaddr_t va, unsigned int offs, u_int32_t value) {
-	*(volatile u_int32_t*)(va.vaddr + offs) = value;
-}
-#endif
-
-static inline void mga_memcpy_toio(vaddr_t va, unsigned int offs, const void* src, int len) {
-#ifdef MEMCPYTOIO_WORKS
-	memcpy_toio(va.vaddr + offs, src, len);
-#elif defined(MEMCPYTOIO_WRITEL)
-#define srcd ((const u_int32_t*)src)
-	if (offs & 3) {
+	if ((unsigned long)src & 3) {
 		while (len >= 4) {
-			mga_writel(va, offs, get_unaligned(srcd++));
-			offs += 4;
+			fb_writel(get_unaligned((u32 *)src), addr);
+			addr++;
 			len -= 4;
+			src += 4;
 		}
 	} else {
 		while (len >= 4) {
-			mga_writel(va, offs, *srcd++);
-			offs += 4;
+			fb_writel(*(u32 *)src, addr);
+			addr++;
 			len -= 4;
+			src += 4;
 		}
 	}
-#undef srcd
-	if (len) {
-		u_int32_t tmp;
-
-		memcpy(&tmp, src, len);
-		mga_writel(va, offs, tmp);
-	}
-#elif defined(MEMCPYTOIO_MEMCPY)
-	memcpy(va.vaddr + offs, src, len);
-#else
-#error "Sorry, do not know how to write block of data to device"
 #endif
 }
 
@@ -249,7 +183,7 @@ static inline void vaddr_add(vaddr_t* va, unsigned long offs) {
 	va->vaddr += offs;
 }
 
-static inline void* vaddr_va(vaddr_t va) {
+static inline void __iomem* vaddr_va(vaddr_t va) {
 	return va.vaddr;
 }
 
@@ -259,25 +193,15 @@ static inline void* vaddr_va(vaddr_t va) {
 #define MGA_IOREMAP_FB		MGA_IOREMAP_NOCACHE
 #define MGA_IOREMAP_MMIO	MGA_IOREMAP_NOCACHE
 static inline int mga_ioremap(unsigned long phys, unsigned long size, int flags, vaddr_t* virt) {
-#ifdef MAP_IOREMAP
 	if (flags & MGA_IOREMAP_NOCACHE)
 		virt->vaddr = ioremap_nocache(phys, size);
 	else
 		virt->vaddr = ioremap(phys, size);
-#else
-#ifdef MAP_BUSTOVIRT
-	virt->vaddr = bus_to_virt(phys);
-#else
-#error "Your architecture does not have neither ioremap nor bus_to_virt... Giving up"
-#endif
-#endif
-	return (virt->vaddr == 0); /* 0, !0... 0, error_code in future */
+	return (virt->vaddr == NULL); /* 0, !0... 0, error_code in future */
 }
 
 static inline void mga_iounmap(vaddr_t va) {
-#ifdef MAP_IOREMAP
 	iounmap(va.vaddr);
-#endif
 }
 
 struct my_timming {
@@ -339,10 +263,6 @@ struct matrox_fb_info;
 struct matrox_DAC1064_features {
 	u_int8_t	xvrefctrl;
 	u_int8_t	xmiscctrl;
-};
-
-struct matrox_accel_features {
-	int		has_cacheflush;
 };
 
 /* current hardware status */
@@ -424,8 +344,6 @@ struct matrox_bios {
 		      } output;
 };
 
-extern struct display fb_display[];
-
 struct matrox_switch;
 struct matroxfb_driver;
 struct matroxfb_dh_fb_info;
@@ -441,6 +359,7 @@ struct matrox_fb_info {
 	struct list_head	next_fb;
 
 	int			dead;
+	int                     initialized;
 	unsigned int		usecount;
 
 	unsigned int		userusecount;
@@ -479,6 +398,7 @@ struct matrox_fb_info {
 	struct matrox_altout*	output;
 	void*			data;
 	unsigned int		mode;
+	unsigned int		default_src;
 			      } outputs[MATROXFB_MAX_OUTPUTS];
 
 #define MATROXFB_MAX_FB_DRIVERS		5
@@ -501,13 +421,13 @@ struct matrox_fb_info {
 		      } mmio;
 
 	unsigned int	max_pixel_clock;
+	unsigned int	max_pixel_clock_panellink;
 
 	struct matrox_switch*	hw_switch;
 
 	struct {
 		struct matrox_pll_features pll;
 		struct matrox_DAC1064_features DAC1064;
-		struct matrox_accel_features accel;
 			      } features;
 	struct {
 		spinlock_t	DAC;
@@ -541,9 +461,7 @@ struct matrox_fb_info {
 		int		nopciretry;
 		int		noinit;
 		int		sgram;
-#ifdef CONFIG_FB_MATROX_32MB
 		int		support32MB;
-#endif
 
 		int		accelerator;
 		int		text_type_aux;
@@ -596,52 +514,16 @@ struct matrox_fb_info {
 					dll:1;
 				      } memory;
 			      } values;
-	u_int32_t cmap[17];
+	u_int32_t cmap[16];
 };
 
 #define info2minfo(info) container_of(info, struct matrox_fb_info, fbcon)
 
-#ifdef CONFIG_FB_MATROX_MULTIHEAD
-#define ACCESS_FBINFO2(info, x) (info->x)
-#define ACCESS_FBINFO(x) ACCESS_FBINFO2(minfo,x)
-
-#define MINFO minfo
-
-#define WPMINFO2 struct matrox_fb_info* minfo
-#define WPMINFO  WPMINFO2 ,
-#define CPMINFO2 const struct matrox_fb_info* minfo
-#define CPMINFO	 CPMINFO2 ,
-#define PMINFO2  minfo
-#define PMINFO   PMINFO2 ,
-
-#define MINFO_FROM(x)	   struct matrox_fb_info* minfo = x
-#else
-
-extern struct matrox_fb_info matroxfb_global_mxinfo;
-
-#define ACCESS_FBINFO(x) (matroxfb_global_mxinfo.x)
-#define ACCESS_FBINFO2(info, x) (matroxfb_global_mxinfo.x)
-
-#define MINFO (&matroxfb_global_mxinfo)
-
-#define WPMINFO2 void
-#define WPMINFO
-#define CPMINFO2 void
-#define CPMINFO
-#define PMINFO2
-#define PMINFO
-
-#define MINFO_FROM(x)
-
-#endif
-
-#define MINFO_FROM_INFO(x) MINFO_FROM(info2minfo(x))
-
 struct matrox_switch {
-	int	(*preinit)(WPMINFO2);
-	void	(*reset)(WPMINFO2);
-	int	(*init)(WPMINFO struct my_timming*);
-	void	(*restore)(WPMINFO2);
+	int	(*preinit)(struct matrox_fb_info *minfo);
+	void	(*reset)(struct matrox_fb_info *minfo);
+	int	(*init)(struct matrox_fb_info *minfo, struct my_timming*);
+	void	(*restore)(struct matrox_fb_info *minfo);
 };
 
 struct matroxfb_driver {
@@ -748,6 +630,8 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 
 #define M_SEQ_INDEX	0x1FC4
 #define M_SEQ_DATA	0x1FC5
+#define     M_SEQ1		0x01
+#define        M_SEQ1_SCROFF		0x20
 
 #define M_MISC_REG_READ	0x1FCC
 
@@ -780,11 +664,11 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 #define DAC_XGENIOCTRL		0x2A
 #define DAC_XGENIODATA		0x2B
 
-#define M_C2CTL		0x3E10
+#define M_C2CTL		0x3C10
+
+#define MX_OPTION_BSWAP         0x00000000
 
 #ifdef __LITTLE_ENDIAN
-#define MX_OPTION_BSWAP		0x00000000
-
 #define M_OPMODE_4BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_LE | M_OPMODE_DMA_BLIT)
 #define M_OPMODE_8BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_LE | M_OPMODE_DMA_BLIT)
 #define M_OPMODE_16BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_LE | M_OPMODE_DMA_BLIT)
@@ -792,29 +676,23 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 #define M_OPMODE_32BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_LE | M_OPMODE_DMA_BLIT)
 #else
 #ifdef __BIG_ENDIAN
-#define MX_OPTION_BSWAP		0x80000000
-
-#define M_OPMODE_4BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_LE | M_OPMODE_DMA_BLIT)	/* TODO */
-#define M_OPMODE_8BPP	(M_OPMODE_DMA_BE_8BPP  | M_OPMODE_DIR_BE_8BPP  | M_OPMODE_DMA_BLIT)
-#define M_OPMODE_16BPP	(M_OPMODE_DMA_BE_16BPP | M_OPMODE_DIR_BE_16BPP | M_OPMODE_DMA_BLIT)
-#define M_OPMODE_24BPP	(M_OPMODE_DMA_BE_8BPP | M_OPMODE_DIR_BE_8BPP | M_OPMODE_DMA_BLIT)	/* TODO, ?32 */
-#define M_OPMODE_32BPP	(M_OPMODE_DMA_BE_32BPP | M_OPMODE_DIR_BE_32BPP | M_OPMODE_DMA_BLIT)
+#define M_OPMODE_4BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_LE       | M_OPMODE_DMA_BLIT)	/* TODO */
+#define M_OPMODE_8BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_BE_8BPP  | M_OPMODE_DMA_BLIT)
+#define M_OPMODE_16BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_BE_16BPP | M_OPMODE_DMA_BLIT)
+#define M_OPMODE_24BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_BE_8BPP  | M_OPMODE_DMA_BLIT)	/* TODO, ?32 */
+#define M_OPMODE_32BPP	(M_OPMODE_DMA_LE | M_OPMODE_DIR_BE_32BPP | M_OPMODE_DMA_BLIT)
 #else
 #error "Byte ordering have to be defined. Cannot continue."
 #endif
 #endif
 
-#define mga_inb(addr)	mga_readb(ACCESS_FBINFO(mmio.vbase), (addr))
-#define mga_inl(addr)	mga_readl(ACCESS_FBINFO(mmio.vbase), (addr))
-#define mga_outb(addr,val) mga_writeb(ACCESS_FBINFO(mmio.vbase), (addr), (val))
-#define mga_outw(addr,val) mga_writew(ACCESS_FBINFO(mmio.vbase), (addr), (val))
-#define mga_outl(addr,val) mga_writel(ACCESS_FBINFO(mmio.vbase), (addr), (val))
-#define mga_readr(port,idx) (mga_outb((port),(idx)), mga_inb((port)+1))
-#ifdef __LITTLE_ENDIAN
-#define mga_setr(addr,port,val) mga_outw(addr, ((val)<<8) | (port))
-#else
-#define mga_setr(addr,port,val) do { mga_outb(addr, port); mga_outb((addr)+1, val); } while (0)
-#endif
+#define mga_inb(addr)		mga_readb(minfo->mmio.vbase, (addr))
+#define mga_inl(addr)		mga_readl(minfo->mmio.vbase, (addr))
+#define mga_outb(addr,val)	mga_writeb(minfo->mmio.vbase, (addr), (val))
+#define mga_outw(addr,val)	mga_writew(minfo->mmio.vbase, (addr), (val))
+#define mga_outl(addr,val)	mga_writel(minfo->mmio.vbase, (addr), (val))
+#define mga_readr(port,idx)	(mga_outb((port),(idx)), mga_inb((port)+1))
+#define mga_setr(addr,port,val)	mga_outw(addr, ((val)<<8) | (port))
 
 #define mga_fifo(n)	do {} while ((mga_inl(M_FIFOSTATUS) & 0xFF) < (n))
 
@@ -831,20 +709,20 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 #define isMilleniumII(x) (0)
 #endif
 
-#define matroxfb_DAC_lock()                   spin_lock(&ACCESS_FBINFO(lock.DAC))
-#define matroxfb_DAC_unlock()                 spin_unlock(&ACCESS_FBINFO(lock.DAC))
-#define matroxfb_DAC_lock_irqsave(flags)      spin_lock_irqsave(&ACCESS_FBINFO(lock.DAC),flags)
-#define matroxfb_DAC_unlock_irqrestore(flags) spin_unlock_irqrestore(&ACCESS_FBINFO(lock.DAC),flags)
-extern void matroxfb_DAC_out(CPMINFO int reg, int val);
-extern int matroxfb_DAC_in(CPMINFO int reg);
-extern struct list_head matroxfb_list;
+#define matroxfb_DAC_lock()                   spin_lock(&minfo->lock.DAC)
+#define matroxfb_DAC_unlock()                 spin_unlock(&minfo->lock.DAC)
+#define matroxfb_DAC_lock_irqsave(flags)      spin_lock_irqsave(&minfo->lock.DAC, flags)
+#define matroxfb_DAC_unlock_irqrestore(flags) spin_unlock_irqrestore(&minfo->lock.DAC, flags)
+extern void matroxfb_DAC_out(const struct matrox_fb_info *minfo, int reg,
+			     int val);
+extern int matroxfb_DAC_in(const struct matrox_fb_info *minfo, int reg);
 extern void matroxfb_var2my(struct fb_var_screeninfo* fvsi, struct my_timming* mt);
-extern int matroxfb_wait_for_sync(WPMINFO u_int32_t crtc);
-extern int matroxfb_enable_irq(WPMINFO int reenable);
+extern int matroxfb_wait_for_sync(struct matrox_fb_info *minfo, u_int32_t crtc);
+extern int matroxfb_enable_irq(struct matrox_fb_info *minfo, int reenable);
 
 #ifdef MATROXFB_USE_SPINLOCKS
-#define CRITBEGIN  spin_lock_irqsave(&ACCESS_FBINFO(lock.accel), critflags);
-#define CRITEND	   spin_unlock_irqrestore(&ACCESS_FBINFO(lock.accel), critflags);
+#define CRITBEGIN  spin_lock_irqsave(&minfo->lock.accel, critflags);
+#define CRITEND	   spin_unlock_irqrestore(&minfo->lock.accel, critflags);
 #define CRITFLAGS  unsigned long critflags;
 #else
 #define CRITBEGIN

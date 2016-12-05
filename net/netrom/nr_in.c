@@ -12,18 +12,17 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/tcp.h>
-#include <net/ip.h>			/* For ip_rcv */
+#include <net/tcp_states.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
@@ -34,7 +33,7 @@
 static int nr_queue_rx_frame(struct sock *sk, struct sk_buff *skb, int more)
 {
 	struct sk_buff *skbo, *skbn = skb;
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	skb_pull(skb, NR_NETWORK_LEN + NR_TRANSPORT_LEN);
 
@@ -53,10 +52,12 @@ static int nr_queue_rx_frame(struct sock *sk, struct sk_buff *skb, int more)
 		if ((skbn = alloc_skb(nr->fraglen, GFP_ATOMIC)) == NULL)
 			return 1;
 
-		skbn->h.raw = skbn->data;
+		skb_reset_transport_header(skbn);
 
 		while ((skbo = skb_dequeue(&nr->frag_queue)) != NULL) {
-			memcpy(skb_put(skbn, skbo->len), skbo->data, skbo->len);
+			skb_copy_from_linear_data(skbo,
+						  skb_put(skbn, skbo->len),
+						  skbo->len);
 			kfree_skb(skbo);
 		}
 
@@ -74,10 +75,9 @@ static int nr_queue_rx_frame(struct sock *sk, struct sk_buff *skb, int more)
 static int nr_state1_machine(struct sock *sk, struct sk_buff *skb,
 	int frametype)
 {
-	bh_lock_sock(sk);
 	switch (frametype) {
 	case NR_CONNACK: {
-		nr_cb *nr = nr_sk(sk);
+		struct nr_sock *nr = nr_sk(sk);
 
 		nr_stop_t1timer(sk);
 		nr_start_idletimer(sk);
@@ -100,11 +100,14 @@ static int nr_state1_machine(struct sock *sk, struct sk_buff *skb,
 		nr_disconnect(sk, ECONNREFUSED);
 		break;
 
+	case NR_RESET:
+		if (sysctl_netrom_reset_circuit)
+			nr_disconnect(sk, ECONNRESET);
+		break;
+
 	default:
 		break;
 	}
-	bh_unlock_sock(sk);
-
 	return 0;
 }
 
@@ -116,7 +119,6 @@ static int nr_state1_machine(struct sock *sk, struct sk_buff *skb,
 static int nr_state2_machine(struct sock *sk, struct sk_buff *skb,
 	int frametype)
 {
-	bh_lock_sock(sk);
 	switch (frametype) {
 	case NR_CONNACK | NR_CHOKE_FLAG:
 		nr_disconnect(sk, ECONNRESET);
@@ -129,11 +131,14 @@ static int nr_state2_machine(struct sock *sk, struct sk_buff *skb,
 		nr_disconnect(sk, 0);
 		break;
 
+	case NR_RESET:
+		if (sysctl_netrom_reset_circuit)
+			nr_disconnect(sk, ECONNRESET);
+		break;
+
 	default:
 		break;
 	}
-	bh_unlock_sock(sk);
-
 	return 0;
 }
 
@@ -144,7 +149,7 @@ static int nr_state2_machine(struct sock *sk, struct sk_buff *skb,
  */
 static int nr_state3_machine(struct sock *sk, struct sk_buff *skb, int frametype)
 {
-	nr_cb *nrom = nr_sk(sk);
+	struct nr_sock *nrom = nr_sk(sk);
 	struct sk_buff_head temp_queue;
 	struct sk_buff *skbn;
 	unsigned short save_vr;
@@ -154,7 +159,6 @@ static int nr_state3_machine(struct sock *sk, struct sk_buff *skb, int frametype
 	nr = skb->data[18];
 	ns = skb->data[17];
 
-	bh_lock_sock(sk);
 	switch (frametype) {
 	case NR_CONNREQ:
 		nr_write_internal(sk, NR_CONNACK);
@@ -262,18 +266,21 @@ static int nr_state3_machine(struct sock *sk, struct sk_buff *skb, int frametype
 		}
 		break;
 
+	case NR_RESET:
+		if (sysctl_netrom_reset_circuit)
+			nr_disconnect(sk, ECONNRESET);
+		break;
+
 	default:
 		break;
 	}
-	bh_unlock_sock(sk);
-
 	return queued;
 }
 
-/* Higher level upcall for a LAPB frame */
+/* Higher level upcall for a LAPB frame - called with sk locked */
 int nr_process_rx_frame(struct sock *sk, struct sk_buff *skb)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 	int queued = 0, frametype;
 
 	if (nr->state == NR_STATE_0)

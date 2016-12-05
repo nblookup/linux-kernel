@@ -1,7 +1,6 @@
 #ifndef _SCSI_LOGGING_H
 #define _SCSI_LOGGING_H
 
-#include <linux/config.h>
 
 /*
  * This defines the scsi logging feature.  It is a means by which the user
@@ -40,12 +39,17 @@
 extern unsigned int scsi_logging_level;
 
 #ifdef CONFIG_SCSI_LOGGING
+
+#define SCSI_LOG_LEVEL(SHIFT, BITS)				\
+        ((scsi_logging_level >> (SHIFT)) & ((1 << (BITS)) - 1))
+
 #define SCSI_CHECK_LOGGING(SHIFT, BITS, LEVEL, CMD)		\
-{								\
-        unsigned int mask = (1 << (BITS)) - 1;			\
-        if (((scsi_logging_level >> (SHIFT)) & mask) > (LEVEL))	\
-		(CMD);						\
-}
+do {								\
+        if (unlikely((SCSI_LOG_LEVEL(SHIFT, BITS)) > (LEVEL)))	\
+		do {						\
+			CMD;					\
+		} while (0);					\
+} while (0)
 #else
 #define SCSI_CHECK_LOGGING(SHIFT, BITS, LEVEL, CMD)
 #endif /* CONFIG_SCSI_LOGGING */

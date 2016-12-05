@@ -16,7 +16,7 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  *  linux/arch/math-emu/driver.c.c
@@ -27,7 +27,6 @@
  *  Copyright (C) 2001	      Hewlett-Packard <bame@debian.org>
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include "float.h"
 #include "math-emu.h"
@@ -120,7 +119,7 @@ handle_fpe(struct pt_regs *regs)
 	    si.si_signo = signalcode >> 24;
 	    si.si_errno = 0;
 	    si.si_code = signalcode & 0xffffff;
-	    si.si_addr = (void *) regs->iaoq[0];
+	    si.si_addr = (void __user *) regs->iaoq[0];
 	    force_sig_info(si.si_signo, &si, current);
 	    return -1;
 	}

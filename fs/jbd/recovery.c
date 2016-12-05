@@ -1,6 +1,6 @@
 /*
- * linux/fs/recovery.c
- * 
+ * linux/fs/jbd/recovery.c
+ *
  * Written by Stephen C. Tweedie <sct@redhat.com>, 1999
  *
  * Copyright 1999-2000 Red Hat Software --- All Rights Reserved
@@ -10,7 +10,7 @@
  * option, any later version, incorporated herein by reference.
  *
  * Journal recovery routines for the generic filesystem journaling code;
- * part of the ext2fs journaling system.  
+ * part of the ext2fs journaling system.
  */
 
 #ifndef __KERNEL__
@@ -20,14 +20,13 @@
 #include <linux/fs.h>
 #include <linux/jbd.h>
 #include <linux/errno.h>
-#include <linux/slab.h>
 #endif
 
 /*
  * Maintain information about the progress of the recovery job, so that
- * the different passes can carry information between them. 
+ * the different passes can carry information between them.
  */
-struct recovery_info 
+struct recovery_info
 {
 	tid_t		start_transaction;
 	tid_t		end_transaction;
@@ -46,7 +45,7 @@ static int scan_revoke_records(journal_t *, struct buffer_head *,
 #ifdef __KERNEL__
 
 /* Release readahead buffers after use */
-void journal_brelse_array(struct buffer_head *b[], int n)
+static void journal_brelse_array(struct buffer_head *b[], int n)
 {
 	while (--n >= 0)
 		brelse (b[n]);
@@ -70,7 +69,7 @@ static int do_readahead(journal_t *journal, unsigned int start)
 {
 	int err;
 	unsigned int max, nbufs, next;
-	unsigned long blocknr;
+	unsigned int blocknr;
 	struct buffer_head *bh;
 
 	struct buffer_head * bufs[MAXBUF];
@@ -116,7 +115,7 @@ static int do_readahead(journal_t *journal, unsigned int start)
 	err = 0;
 
 failed:
-	if (nbufs) 
+	if (nbufs)
 		journal_brelse_array(bufs, nbufs);
 	return err;
 }
@@ -128,16 +127,19 @@ failed:
  * Read a block from the journal
  */
 
-static int jread(struct buffer_head **bhp, journal_t *journal, 
+static int jread(struct buffer_head **bhp, journal_t *journal,
 		 unsigned int offset)
 {
 	int err;
-	unsigned long blocknr;
+	unsigned int blocknr;
 	struct buffer_head *bh;
 
 	*bhp = NULL;
 
-	J_ASSERT (offset < journal->j_maxlen);
+	if (offset >= journal->j_maxlen) {
+		printk(KERN_ERR "JBD: corrupted journal superblock\n");
+		return -EIO;
+	}
 
 	err = journal_bmap(journal, offset, &blocknr);
 
@@ -188,10 +190,10 @@ static int count_tags(struct buffer_head *bh, int size)
 
 		nr++;
 		tagp += sizeof(journal_block_tag_t);
-		if (!(tag->t_flags & htonl(JFS_FLAG_SAME_UUID)))
+		if (!(tag->t_flags & cpu_to_be32(JFS_FLAG_SAME_UUID)))
 			tagp += 16;
 
-		if (tag->t_flags & htonl(JFS_FLAG_LAST_TAG))
+		if (tag->t_flags & cpu_to_be32(JFS_FLAG_LAST_TAG))
 			break;
 	}
 
@@ -207,20 +209,20 @@ do {									\
 } while (0)
 
 /**
- * int journal_recover(journal_t *journal) - recovers a on-disk journal
+ * journal_recover - recovers a on-disk journal
  * @journal: the journal to recover
- * 
+ *
  * The primary function for recovering the log contents when mounting a
- * journaled device.  
+ * journaled device.
  *
  * Recovery is done in three passes.  In the first pass, we look for the
  * end of the log.  In the second, we assemble the list of revoke
  * blocks.  In the third and final pass, we replay any un-revoked blocks
- * in the log.  
+ * in the log.
  */
 int journal_recover(journal_t *journal)
 {
-	int			err;
+	int			err, err2;
 	journal_superblock_t *	sb;
 
 	struct recovery_info	info;
@@ -228,16 +230,16 @@ int journal_recover(journal_t *journal)
 	memset(&info, 0, sizeof(info));
 	sb = journal->j_superblock;
 
-	/* 
+	/*
 	 * The journal superblock's s_start field (the current log head)
 	 * is always zero if, and only if, the journal was cleanly
-	 * unmounted.  
+	 * unmounted.
 	 */
 
 	if (!sb->s_start) {
 		jbd_debug(1, "No recovery required, last transaction %d\n",
-			  ntohl(sb->s_sequence));
-		journal->j_transaction_sequence = ntohl(sb->s_sequence) + 1;
+			  be32_to_cpu(sb->s_sequence));
+		journal->j_transaction_sequence = be32_to_cpu(sb->s_sequence) + 1;
 		return 0;
 	}
 
@@ -247,10 +249,10 @@ int journal_recover(journal_t *journal)
 	if (!err)
 		err = do_one_pass(journal, &info, PASS_REPLAY);
 
-	jbd_debug(0, "JBD: recovery, exit status %d, "
+	jbd_debug(1, "JBD: recovery, exit status %d, "
 		  "recovered transactions %u to %u\n",
 		  err, info.start_transaction, info.end_transaction);
-	jbd_debug(0, "JBD: Replayed %d and revoked %d/%d blocks\n", 
+	jbd_debug(1, "JBD: Replayed %d and revoked %d/%d blocks\n",
 		  info.nr_replays, info.nr_revoke_hits, info.nr_revokes);
 
 	/* Restart the log at the next transaction ID, thus invalidating
@@ -258,32 +260,32 @@ int journal_recover(journal_t *journal)
 	journal->j_transaction_sequence = ++info.end_transaction;
 
 	journal_clear_revoke(journal);
-	sync_blockdev(journal->j_fs_dev);
+	err2 = sync_blockdev(journal->j_fs_dev);
+	if (!err)
+		err = err2;
+
 	return err;
 }
 
 /**
- * int journal_skip_recovery() - Start journal and wipe exiting records 
+ * journal_skip_recovery - Start journal and wipe exiting records
  * @journal: journal to startup
- * 
+ *
  * Locate any valid recovery information from the journal and set up the
  * journal structures in memory to ignore it (presumably because the
- * caller has evidence that it is out of date).  
+ * caller has evidence that it is out of date).
  * This function does'nt appear to be exorted..
  *
  * We perform one pass over the journal to allow us to tell the user how
  * much recovery information is being erased, and to let us initialise
- * the journal transaction sequence numbers to the next unused ID. 
+ * the journal transaction sequence numbers to the next unused ID.
  */
 int journal_skip_recovery(journal_t *journal)
 {
 	int			err;
-	journal_superblock_t *	sb;
-
 	struct recovery_info	info;
 
 	memset (&info, 0, sizeof(info));
-	sb = journal->j_superblock;
 
 	err = do_one_pass(journal, &info, PASS_SCAN);
 
@@ -292,11 +294,12 @@ int journal_skip_recovery(journal_t *journal)
 		++journal->j_transaction_sequence;
 	} else {
 #ifdef CONFIG_JBD_DEBUG
-		int dropped = info.end_transaction - ntohl(sb->s_sequence);
-#endif
-		jbd_debug(0, 
+		int dropped = info.end_transaction -
+			      be32_to_cpu(journal->j_superblock->s_sequence);
+		jbd_debug(1,
 			  "JBD: ignoring %d transaction%s from the journal.\n",
 			  dropped, (dropped == 1) ? "" : "s");
+#endif
 		journal->j_transaction_sequence = ++info.end_transaction;
 	}
 
@@ -308,28 +311,23 @@ static int do_one_pass(journal_t *journal,
 			struct recovery_info *info, enum passtype pass)
 {
 	unsigned int		first_commit_ID, next_commit_ID;
-	unsigned long		next_log_block;
+	unsigned int		next_log_block;
 	int			err, success = 0;
 	journal_superblock_t *	sb;
-	journal_header_t * 	tmp;
+	journal_header_t *	tmp;
 	struct buffer_head *	bh;
 	unsigned int		sequence;
 	int			blocktype;
 
-	/* Precompute the maximum metadata descriptors in a descriptor block */
-	int			MAX_BLOCKS_PER_DESC;
-	MAX_BLOCKS_PER_DESC = ((journal->j_blocksize-sizeof(journal_header_t))
-			       / sizeof(journal_block_tag_t));
-
-	/* 
+	/*
 	 * First thing is to establish what we expect to find in the log
 	 * (in terms of transaction IDs), and where (in terms of log
-	 * block offsets): query the superblock.  
+	 * block offsets): query the superblock.
 	 */
 
 	sb = journal->j_superblock;
-	next_commit_ID = ntohl(sb->s_sequence);
-	next_log_block = ntohl(sb->s_start);
+	next_commit_ID = be32_to_cpu(sb->s_sequence);
+	next_log_block = be32_to_cpu(sb->s_start);
 
 	first_commit_ID = next_commit_ID;
 	if (pass == PASS_SCAN)
@@ -341,7 +339,7 @@ static int do_one_pass(journal_t *journal,
 	 * Now we walk through the log, transaction by transaction,
 	 * making sure that each transaction has a commit block in the
 	 * expected place.  Each complete transaction gets replayed back
-	 * into the main filesystem. 
+	 * into the main filesystem.
 	 */
 
 	while (1) {
@@ -351,6 +349,8 @@ static int do_one_pass(journal_t *journal,
 		struct buffer_head *	obh;
 		struct buffer_head *	nbh;
 
+		cond_resched();
+
 		/* If we already know where to stop the log traversal,
 		 * check right now that we haven't gone past the end of
 		 * the log. */
@@ -359,14 +359,14 @@ static int do_one_pass(journal_t *journal,
 			if (tid_geq(next_commit_ID, info->end_transaction))
 				break;
 
-		jbd_debug(2, "Scanning for sequence ID %u at %lu/%lu\n",
+		jbd_debug(2, "Scanning for sequence ID %u at %u/%u\n",
 			  next_commit_ID, next_log_block, journal->j_last);
 
 		/* Skip over each chunk of the transaction looking
 		 * either the next descriptor block or the final commit
 		 * record. */
 
-		jbd_debug(3, "JBD: checking block %ld\n", next_log_block);
+		jbd_debug(3, "JBD: checking block %u\n", next_log_block);
 		err = jread(&bh, journal, next_log_block);
 		if (err)
 			goto failed;
@@ -374,22 +374,22 @@ static int do_one_pass(journal_t *journal,
 		next_log_block++;
 		wrap(journal, next_log_block);
 
-		/* What kind of buffer is it? 
-		 * 
+		/* What kind of buffer is it?
+		 *
 		 * If it is a descriptor block, check that it has the
 		 * expected sequence number.  Otherwise, we're all done
 		 * here. */
 
 		tmp = (journal_header_t *)bh->b_data;
 
-		if (tmp->h_magic != htonl(JFS_MAGIC_NUMBER)) {
+		if (tmp->h_magic != cpu_to_be32(JFS_MAGIC_NUMBER)) {
 			brelse(bh);
 			break;
 		}
 
-		blocktype = ntohl(tmp->h_blocktype);
-		sequence = ntohl(tmp->h_sequence);
-		jbd_debug(3, "Found magic %d, sequence %d\n", 
+		blocktype = be32_to_cpu(tmp->h_blocktype);
+		sequence = be32_to_cpu(tmp->h_sequence);
+		jbd_debug(3, "Found magic %d, sequence %d\n",
 			  blocktype, sequence);
 
 		if (sequence != next_commit_ID) {
@@ -421,10 +421,10 @@ static int do_one_pass(journal_t *journal,
 			tagp = &bh->b_data[sizeof(journal_header_t)];
 			while ((tagp - bh->b_data +sizeof(journal_block_tag_t))
 			       <= journal->j_blocksize) {
-				unsigned long io_block;
+				unsigned int io_block;
 
 				tag = (journal_block_tag_t *) tagp;
-				flags = ntohl(tag->t_flags);
+				flags = be32_to_cpu(tag->t_flags);
 
 				io_block = next_log_block++;
 				wrap(journal, next_log_block);
@@ -433,21 +433,21 @@ static int do_one_pass(journal_t *journal,
 					/* Recover what we can, but
 					 * report failure at the end. */
 					success = err;
-					printk (KERN_ERR 
+					printk (KERN_ERR
 						"JBD: IO error %d recovering "
-						"block %ld in log\n",
+						"block %u in log\n",
 						err, io_block);
 				} else {
-					unsigned long blocknr;
+					unsigned int blocknr;
 
 					J_ASSERT(obh != NULL);
-					blocknr = ntohl(tag->t_blocknr);
+					blocknr = be32_to_cpu(tag->t_blocknr);
 
 					/* If the block has been
 					 * revoked, then we're all done
 					 * here. */
 					if (journal_test_revoke
-					    (journal, blocknr, 
+					    (journal, blocknr,
 					     next_commit_ID)) {
 						brelse(obh);
 						++info->nr_revoke_hits;
@@ -460,7 +460,7 @@ static int do_one_pass(journal_t *journal,
 							blocknr,
 							journal->j_blocksize);
 					if (nbh == NULL) {
-						printk(KERN_ERR 
+						printk(KERN_ERR
 						       "JBD: Out of memory "
 						       "during recovery.\n");
 						err = -ENOMEM;
@@ -473,8 +473,8 @@ static int do_one_pass(journal_t *journal,
 					memcpy(nbh->b_data, obh->b_data,
 							journal->j_blocksize);
 					if (flags & JFS_FLAG_ESCAPE) {
-						*((unsigned int *)bh->b_data) =
-							htonl(JFS_MAGIC_NUMBER);
+						*((__be32 *)nbh->b_data) =
+						cpu_to_be32(JFS_MAGIC_NUMBER);
 					}
 
 					BUFFER_TRACE(nbh, "marking dirty");
@@ -526,12 +526,13 @@ static int do_one_pass(journal_t *journal,
 		default:
 			jbd_debug(3, "Unrecognised magic %d, end of scan.\n",
 				  blocktype);
+			brelse(bh);
 			goto done;
 		}
 	}
 
  done:
-	/* 
+	/*
 	 * We broke out of the log scan loop: either we came to the
 	 * known end of the log or we found an unexpected block in the
 	 * log.  If the latter happened, then we know that the "current"
@@ -561,7 +562,7 @@ static int do_one_pass(journal_t *journal,
 
 /* Scan a revoke record, marking all blocks mentioned as revoked. */
 
-static int scan_revoke_records(journal_t *journal, struct buffer_head *bh, 
+static int scan_revoke_records(journal_t *journal, struct buffer_head *bh,
 			       tid_t sequence, struct recovery_info *info)
 {
 	journal_revoke_header_t *header;
@@ -569,13 +570,13 @@ static int scan_revoke_records(journal_t *journal, struct buffer_head *bh,
 
 	header = (journal_revoke_header_t *) bh->b_data;
 	offset = sizeof(journal_revoke_header_t);
-	max = ntohl(header->r_count);
+	max = be32_to_cpu(header->r_count);
 
 	while (offset < max) {
-		unsigned long blocknr;
+		unsigned int blocknr;
 		int err;
 
-		blocknr = ntohl(* ((unsigned int *) (bh->b_data+offset)));
+		blocknr = be32_to_cpu(* ((__be32 *) (bh->b_data+offset)));
 		offset += 4;
 		err = journal_set_revoke(journal, blocknr, sequence);
 		if (err)

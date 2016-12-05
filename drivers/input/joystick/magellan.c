@@ -1,6 +1,4 @@
 /*
- * $Id: magellan.c,v 1.16 2002/01/22 20:28:39 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
 
@@ -11,18 +9,18 @@
 /*
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or 
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- * 
+ *
  *  Should you need to contact me, the author, you can do so either by
  * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
@@ -35,8 +33,10 @@
 #include <linux/serio.h>
 #include <linux/init.h>
 
+#define DRIVER_DESC	"Magellan and SpaceMouse 6dof controller driver"
+
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION("Magellan and SpaceMouse 6dof controller driver");
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
 /*
@@ -47,14 +47,13 @@ MODULE_LICENSE("GPL");
 
 static int magellan_buttons[] = { BTN_0, BTN_1, BTN_2, BTN_3, BTN_4, BTN_5, BTN_6, BTN_7, BTN_8 };
 static int magellan_axes[] = { ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ };
-static char *magellan_name = "LogiCad3D Magellan / SpaceMouse";
 
 /*
  * Per-Magellan data.
  */
 
 struct magellan {
-	struct input_dev dev;
+	struct input_dev *dev;
 	int idx;
 	unsigned char data[MAGELLAN_MAX_LENGTH];
 	char phys[32];
@@ -81,15 +80,13 @@ static int magellan_crunch_nibbles(unsigned char *data, int count)
 	return 0;
 }
 
-static void magellan_process_packet(struct magellan* magellan, struct pt_regs *regs)
+static void magellan_process_packet(struct magellan* magellan)
 {
-	struct input_dev *dev = &magellan->dev;
+	struct input_dev *dev = magellan->dev;
 	unsigned char *data = magellan->data;
 	int i, t;
 
 	if (!magellan->idx) return;
-
-	input_regs(dev, regs);
 
 	switch (magellan->data[0]) {
 
@@ -114,12 +111,12 @@ static void magellan_process_packet(struct magellan* magellan, struct pt_regs *r
 }
 
 static irqreturn_t magellan_interrupt(struct serio *serio,
-		unsigned char data, unsigned int flags, struct pt_regs *regs)
+		unsigned char data, unsigned int flags)
 {
-	struct magellan* magellan = serio->private;
+	struct magellan* magellan = serio_get_drvdata(serio);
 
 	if (data == '\r') {
-		magellan_process_packet(magellan, regs);
+		magellan_process_packet(magellan);
 		magellan->idx = 0;
 	} else {
 		if (magellan->idx < MAGELLAN_MAX_LENGTH)
@@ -134,90 +131,109 @@ static irqreturn_t magellan_interrupt(struct serio *serio,
 
 static void magellan_disconnect(struct serio *serio)
 {
-	struct magellan* magellan = serio->private;
-	input_unregister_device(&magellan->dev);
+	struct magellan* magellan = serio_get_drvdata(serio);
+
 	serio_close(serio);
+	serio_set_drvdata(serio, NULL);
+	input_unregister_device(magellan->dev);
 	kfree(magellan);
 }
 
 /*
  * magellan_connect() is the routine that is called when someone adds a
- * new serio device. It looks for the Magellan, and if found, registers
- * it as an input device.
+ * new serio device that supports Magellan protocol and registers it as
+ * an input device.
  */
 
-static void magellan_connect(struct serio *serio, struct serio_dev *dev)
+static int magellan_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct magellan *magellan;
-	int i, t;
+	struct input_dev *input_dev;
+	int err = -ENOMEM;
+	int i;
 
-	if (serio->type != (SERIO_RS232 | SERIO_MAGELLAN))
-		return;
+	magellan = kzalloc(sizeof(struct magellan), GFP_KERNEL);
+	input_dev = input_allocate_device();
+	if (!magellan || !input_dev)
+		goto fail1;
 
-	if (!(magellan = kmalloc(sizeof(struct magellan), GFP_KERNEL)))
-		return;
+	magellan->dev = input_dev;
+	snprintf(magellan->phys, sizeof(magellan->phys), "%s/input0", serio->phys);
 
-	memset(magellan, 0, sizeof(struct magellan));
+	input_dev->name = "LogiCad3D Magellan / SpaceMouse";
+	input_dev->phys = magellan->phys;
+	input_dev->id.bustype = BUS_RS232;
+	input_dev->id.vendor = SERIO_MAGELLAN;
+	input_dev->id.product = 0x0001;
+	input_dev->id.version = 0x0100;
+	input_dev->dev.parent = &serio->dev;
 
-	magellan->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);	
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 
 	for (i = 0; i < 9; i++)
-		set_bit(magellan_buttons[i], magellan->dev.keybit);
+		set_bit(magellan_buttons[i], input_dev->keybit);
 
-	for (i = 0; i < 6; i++) {
-		t = magellan_axes[i];
-		set_bit(t, magellan->dev.absbit);
-		magellan->dev.absmin[t] = -360;
-		magellan->dev.absmax[t] =  360;
-	}
+	for (i = 0; i < 6; i++)
+		input_set_abs_params(input_dev, magellan_axes[i], -360, 360, 0, 0);
 
-	sprintf(magellan->phys, "%s/input0", serio->phys);
+	serio_set_drvdata(serio, magellan);
 
-	init_input_dev(&magellan->dev);
-	magellan->dev.private = magellan;
-	magellan->dev.name = magellan_name;
-	magellan->dev.phys = magellan->phys;
-	magellan->dev.id.bustype = BUS_RS232;
-	magellan->dev.id.vendor = SERIO_MAGELLAN;
-	magellan->dev.id.product = 0x0001;
-	magellan->dev.id.version = 0x0100;
-	
-	serio->private = magellan;
+	err = serio_open(serio, drv);
+	if (err)
+		goto fail2;
 
-	if (serio_open(serio, dev)) {
-		kfree(magellan);
-		return;
-	}
+	err = input_register_device(magellan->dev);
+	if (err)
+		goto fail3;
 
-	input_register_device(&magellan->dev);
+	return 0;
 
-	printk(KERN_INFO "input: %s on %s\n", magellan_name, serio->phys);
-
+ fail3:	serio_close(serio);
+ fail2:	serio_set_drvdata(serio, NULL);
+ fail1:	input_free_device(input_dev);
+	kfree(magellan);
+	return err;
 }
 
 /*
- * The serio device structure.
+ * The serio driver structure.
  */
 
-static struct serio_dev magellan_dev = {
-	.interrupt =	magellan_interrupt,
-	.connect =	magellan_connect,
-	.disconnect =	magellan_disconnect,
+static struct serio_device_id magellan_serio_ids[] = {
+	{
+		.type	= SERIO_RS232,
+		.proto	= SERIO_MAGELLAN,
+		.id	= SERIO_ANY,
+		.extra	= SERIO_ANY,
+	},
+	{ 0 }
+};
+
+MODULE_DEVICE_TABLE(serio, magellan_serio_ids);
+
+static struct serio_driver magellan_drv = {
+	.driver		= {
+		.name	= "magellan",
+	},
+	.description	= DRIVER_DESC,
+	.id_table	= magellan_serio_ids,
+	.interrupt	= magellan_interrupt,
+	.connect	= magellan_connect,
+	.disconnect	= magellan_disconnect,
 };
 
 /*
  * The functions for inserting/removing us as a module.
  */
 
-int __init magellan_init(void)
+static int __init magellan_init(void)
 {
-	serio_register_device(&magellan_dev);
-	return 0;
+	return serio_register_driver(&magellan_drv);
 }
 
-void __exit magellan_exit(void)
+static void __exit magellan_exit(void)
 {
-	serio_unregister_device(&magellan_dev);
+	serio_unregister_driver(&magellan_drv);
 }
 
 module_init(magellan_init);

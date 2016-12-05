@@ -13,6 +13,7 @@
 #ifndef _LINUX_SUNRPC_CACHE_H_
 #define _LINUX_SUNRPC_CACHE_H_
 
+#include <linux/kref.h>
 #include <linux/slab.h>
 #include <asm/atomic.h>
 #include <linux/proc_fs.h>
@@ -34,11 +35,10 @@
  * Each cache must be registered so that it can be cleaned regularly.
  * When the cache is unregistered, it is flushed completely.
  *
- * Entries have a ref count and a 'hashed' flag which counts the existance
+ * Entries have a ref count and a 'hashed' flag which counts the existence
  * in the hash table.
  * We only expire entries when refcount is zero.
- * Existance in the cache is not measured in refcount but rather in
- * CACHE_HASHED flag.
+ * Existence in the cache is counted  the refcount.
  */
 
 /* Every cache item has a common header that is used
@@ -51,17 +51,26 @@ struct cache_head {
 	time_t		last_refresh;   /* If CACHE_PENDING, this is when upcall 
 					 * was sent, else this is when update was received
 					 */
-	atomic_t 	refcnt;
+	struct kref	ref;
 	unsigned long	flags;
 };
 #define	CACHE_VALID	0	/* Entry contains valid data */
 #define	CACHE_NEGATIVE	1	/* Negative entry - there is no match for the key */
 #define	CACHE_PENDING	2	/* An upcall has been sent but no reply received yet*/
-#define	CACHE_HASHED	3	/* Entry is in a hash table */
 
 #define	CACHE_NEW_EXPIRY 120	/* keep new things pending confirmation for 120 seconds */
 
+struct cache_detail_procfs {
+	struct proc_dir_entry	*proc_ent;
+	struct proc_dir_entry   *flush_ent, *channel_ent, *content_ent;
+};
+
+struct cache_detail_pipefs {
+	struct dentry *dir;
+};
+
 struct cache_detail {
+	struct module *		owner;
 	int			hash_size;
 	struct cache_head **	hash_table;
 	rwlock_t		hash_lock;
@@ -69,18 +78,24 @@ struct cache_detail {
 	atomic_t		inuse; /* active user-space update or lookup */
 
 	char			*name;
-	void			(*cache_put)(struct cache_head *,
-					     struct cache_detail*);
+	void			(*cache_put)(struct kref *);
 
-	void			(*cache_request)(struct cache_detail *cd,
-						 struct cache_head *h,
-						 char **bpp, int *blen);
+	int			(*cache_upcall)(struct cache_detail *,
+						struct cache_head *);
+
 	int			(*cache_parse)(struct cache_detail *,
 					       char *buf, int len);
 
 	int			(*cache_show)(struct seq_file *m,
 					      struct cache_detail *cd,
 					      struct cache_head *h);
+	void			(*warn_no_listener)(struct cache_detail *cd,
+					      int has_died);
+
+	struct cache_head *	(*alloc)(void);
+	int			(*match)(struct cache_head *orig, struct cache_head *new);
+	void			(*init)(struct cache_head *orig, struct cache_head *new);
+	void			(*update)(struct cache_head *orig, struct cache_head *new);
 
 	/* fields below this comment are for internal use
 	 * and should not be touched by cache owners
@@ -93,9 +108,15 @@ struct cache_detail {
 
 	/* fields for communication over channel */
 	struct list_head	queue;
-	struct proc_dir_entry	*proc_ent;
+
 	atomic_t		readers;		/* how many time is /chennel open */
-	time_t			last_close;		/* it no readers, when did last close */
+	time_t			last_close;		/* if no readers, when did last close */
+	time_t			last_warn;		/* when we last warned about no readers */
+
+	union {
+		struct cache_detail_procfs procfs;
+		struct cache_detail_pipefs pipefs;
+	} u;
 };
 
 
@@ -105,182 +126,85 @@ struct cache_detail {
  */
 struct cache_req {
 	struct cache_deferred_req *(*defer)(struct cache_req *req);
+	int thread_wait;  /* How long (jiffies) we can block the
+			   * current thread to wait for updates.
+			   */
 };
 /* this must be embedded in a deferred_request that is being
  * delayed awaiting cache-fill
  */
 struct cache_deferred_req {
-	struct list_head	hash;	/* on hash chain */
+	struct hlist_node	hash;	/* on hash chain */
 	struct list_head	recent; /* on fifo */
 	struct cache_head	*item;  /* cache item we wait on */
-	time_t			recv_time;
 	void			*owner; /* we might need to discard all defered requests
 					 * owned by someone */
 	void			(*revisit)(struct cache_deferred_req *req,
 					   int too_many);
 };
 
-/*
- * just like a template in C++, this macro does cache lookup
- * for us.
- * The function is passed some sort of HANDLE from which a cache_detail
- * structure can be determined (via SETUP, DETAIL), a template
- * cache entry (type RTN*), and a "set" flag.  Using the HASHFN and the 
- * TEST, the function will try to find a matching cache entry in the cache.
- * If "set" == 0 :
- *    If an entry is found, it is returned
- *    If no entry is found, a new non-VALID entry is created.
- * If "set" == 1 :
- *    If no entry is found a new one is inserted with data from "template"
- *    If a non-CACHE_VALID entry is found, it is updated from template using UPDATE
- *    If a CACHE_VALID entry is found, a new entry is swapped in with data
- *       from "template"
- * If set == 2, we UPDATE, but don't swap. i.e. update in place
- *
- * If the passed handle has the CACHE_NEGATIVE flag set, then UPDATE is not
- * run but insteead CACHE_NEGATIVE is set in any new item.
 
- *  In any case, the new entry is returned with a reference count.
- *
- *    
- * RTN is a struct type for a cache entry
- * MEMBER is the member of the cache which is cache_head, which must be first
- * FNAME is the name for the function	
- * ARGS are arguments to function and must contain RTN *item, int set.  May
- *   also contain something to be usedby SETUP or DETAIL to find cache_detail.
- * SETUP  locates the cache detail and makes it available as...
- * DETAIL identifies the cache detail, possibly set up by SETUP
- * HASHFN returns a hash value of the cache entry "item"
- * TEST  tests if "tmp" matches "item"
- * INIT copies key information from "item" to "new"
- * UPDATE copies content information from "item" to "tmp"
- * INPLACE is true if updates can happen inplace rather than allocating a new structure
- */
-#define DefineCacheLookup(RTN,MEMBER,FNAME,ARGS,SETUP,DETAIL,HASHFN,TEST,INIT,UPDATE,INPLACE)	\
-RTN *FNAME ARGS										\
-{											\
-	RTN *tmp, *new=NULL;								\
-	struct cache_head **hp, **head;							\
-	SETUP;										\
- retry:											\
-	head = &(DETAIL)->hash_table[HASHFN];						\
-	if (set||new) write_lock(&(DETAIL)->hash_lock);					\
-	else read_lock(&(DETAIL)->hash_lock);						\
-	for(hp=head; *hp != NULL; hp = &tmp->MEMBER.next) {				\
-		tmp = container_of(*hp, RTN, MEMBER);					\
-		if (TEST) { /* found a match */						\
-											\
-			if (set && !INPLACE && test_bit(CACHE_VALID, &tmp->MEMBER.flags) && !new) \
-				break;							\
-											\
-			cache_get(&tmp->MEMBER);					\
-			if (set) {							\
-				if (!INPLACE && test_bit(CACHE_VALID, &tmp->MEMBER.flags))\
-				{ /* need to swap in new */				\
-					RTN *t2;					\
-											\
-					new->MEMBER.next = tmp->MEMBER.next;		\
-					*hp = &new->MEMBER;				\
-					tmp->MEMBER.next = NULL;			\
-					set_bit(CACHE_HASHED, &new->MEMBER.flags);	\
-					clear_bit(CACHE_HASHED, &tmp->MEMBER.flags);	\
-					t2 = tmp; tmp = new; new = t2;			\
-				}							\
-				if (test_bit(CACHE_NEGATIVE,  &item->MEMBER.flags))	\
-					 set_bit(CACHE_NEGATIVE, &tmp->MEMBER.flags);	\
-				else {UPDATE;}						\
-			}								\
-			if (set||new) write_unlock(&(DETAIL)->hash_lock);		\
-			else read_unlock(&(DETAIL)->hash_lock);				\
-			if (set)							\
-				cache_fresh(DETAIL, &tmp->MEMBER, item->MEMBER.expiry_time); \
-			if (set && !INPLACE && new) cache_fresh(DETAIL, &new->MEMBER, 0);	\
-			if (new) (DETAIL)->cache_put(&new->MEMBER, DETAIL);		\
-			return tmp;							\
-		}									\
-	}										\
-	/* Didn't find anything */							\
-	if (new) {									\
-		new->MEMBER.next = *head;						\
-		*head = &new->MEMBER;							\
-		(DETAIL)->entries ++;							\
-		set_bit(CACHE_HASHED, &new->MEMBER.flags);				\
-		if (set) {								\
-			tmp = new;							\
-			if (test_bit(CACHE_NEGATIVE, &item->MEMBER.flags))		\
-				set_bit(CACHE_NEGATIVE, &tmp->MEMBER.flags);		\
-			else {UPDATE;}							\
-		}									\
-	}										\
-	if (set||new) write_unlock(&(DETAIL)->hash_lock);				\
-	else read_unlock(&(DETAIL)->hash_lock);						\
-	if (new && set)									\
-		cache_fresh(DETAIL, &new->MEMBER, item->MEMBER.expiry_time);		\
-	if (new)				       					\
-		return new;								\
-	new = kmalloc(sizeof(*new), GFP_KERNEL);					\
-	if (new) {									\
-		cache_init(&new->MEMBER);						\
-		cache_get(&new->MEMBER);						\
-		INIT;									\
-		tmp = new;								\
-		goto retry;								\
-	}										\
-	return NULL;									\
-}
+extern const struct file_operations cache_file_operations_pipefs;
+extern const struct file_operations content_file_operations_pipefs;
+extern const struct file_operations cache_flush_operations_pipefs;
 
-#define DefineSimpleCacheLookup(STRUCT,INPLACE)	\
-	DefineCacheLookup(struct STRUCT, h, STRUCT##_lookup, (struct STRUCT *item, int set), /*no setup */,	\
-			  & STRUCT##_cache, STRUCT##_hash(item), STRUCT##_match(item, tmp),\
-			  STRUCT##_init(new, item), STRUCT##_update(tmp, item),INPLACE)
+extern struct cache_head *
+sunrpc_cache_lookup(struct cache_detail *detail,
+		    struct cache_head *key, int hash);
+extern struct cache_head *
+sunrpc_cache_update(struct cache_detail *detail,
+		    struct cache_head *new, struct cache_head *old, int hash);
 
-#define cache_for_each(pos, detail, index, member) 						\
-	for (({read_lock(&(detail)->hash_lock); index = (detail)->hash_size;}) ;		\
-	     ({if (index==0)read_unlock(&(detail)->hash_lock); index--;});			\
-		)										\
-		for (pos = container_of((detail)->hash_table[index], typeof(*pos), member);	\
-		     &pos->member;								\
-		     pos = container_of(pos->member.next, typeof(*pos), member))
+extern int
+sunrpc_cache_pipe_upcall(struct cache_detail *detail, struct cache_head *h,
+		void (*cache_request)(struct cache_detail *,
+				      struct cache_head *,
+				      char **,
+				      int *));
 
-	     
 
-extern void cache_defer_req(struct cache_req *req, struct cache_head *item);
-extern void cache_revisit_request(struct cache_head *item);
 extern void cache_clean_deferred(void *owner);
 
 static inline struct cache_head  *cache_get(struct cache_head *h)
 {
-	atomic_inc(&h->refcnt);
+	kref_get(&h->ref);
 	return h;
 }
 
 
-static inline int cache_put(struct cache_head *h, struct cache_detail *cd)
+static inline void cache_put(struct cache_head *h, struct cache_detail *cd)
 {
-	atomic_dec(&h->refcnt);
-	if (!atomic_read(&h->refcnt) &&
+	if (atomic_read(&h->ref.refcount) <= 2 &&
 	    h->expiry_time < cd->nextcheck)
 		cd->nextcheck = h->expiry_time;
-	if (!test_bit(CACHE_HASHED, &h->flags) &&
-	    !atomic_read(&h->refcnt))
-		return 1;
-
-	return 0;
+	kref_put(&h->ref, cd->cache_put);
 }
 
-extern void cache_init(struct cache_head *h);
-extern void cache_fresh(struct cache_detail *detail,
-			struct cache_head *head, time_t expiry);
+static inline int cache_valid(struct cache_head *h)
+{
+	/* If an item has been unhashed pending removal when
+	 * the refcount drops to 0, the expiry_time will be
+	 * set to 0.  We don't want to consider such items
+	 * valid in this context even though CACHE_VALID is
+	 * set.
+	 */
+	return (h->expiry_time != 0 && test_bit(CACHE_VALID, &h->flags));
+}
+
 extern int cache_check(struct cache_detail *detail,
 		       struct cache_head *h, struct cache_req *rqstp);
-extern int cache_clean(void);
 extern void cache_flush(void);
 extern void cache_purge(struct cache_detail *detail);
 #define NEVER (0x7FFFFFFF)
-extern void cache_register(struct cache_detail *cd);
-extern int cache_unregister(struct cache_detail *cd);
-extern struct cache_detail *cache_find(char *name);
-extern void cache_drop(struct cache_detail *detail);
+extern void __init cache_initialize(void);
+extern int cache_register(struct cache_detail *cd);
+extern int cache_register_net(struct cache_detail *cd, struct net *net);
+extern void cache_unregister(struct cache_detail *cd);
+extern void cache_unregister_net(struct cache_detail *cd, struct net *net);
+
+extern int sunrpc_cache_register_pipefs(struct dentry *parent, const char *,
+					mode_t, struct cache_detail *);
+extern void sunrpc_cache_unregister_pipefs(struct cache_detail *);
 
 extern void qword_add(char **bpp, int *lp, char *str);
 extern void qword_addhex(char **bpp, int *lp, char *buf, int blen);
@@ -300,14 +224,45 @@ static inline int get_int(char **bpp, int *anint)
 	return 0;
 }
 
+/*
+ * timestamps kept in the cache are expressed in seconds
+ * since boot.  This is the best for measuring differences in
+ * real time.
+ */
+static inline time_t seconds_since_boot(void)
+{
+	struct timespec boot;
+	getboottime(&boot);
+	return get_seconds() - boot.tv_sec;
+}
+
+static inline time_t convert_to_wallclock(time_t sinceboot)
+{
+	struct timespec boot;
+	getboottime(&boot);
+	return boot.tv_sec + sinceboot;
+}
+
 static inline time_t get_expiry(char **bpp)
 {
 	int rv;
+	struct timespec boot;
+
 	if (get_int(bpp, &rv))
 		return 0;
 	if (rv < 0)
 		return 0;
-	return rv;
+	getboottime(&boot);
+	return rv - boot.tv_sec;
 }
+
+#ifdef CONFIG_NFSD_DEPRECATED
+static inline void sunrpc_invalidate(struct cache_head *h,
+				     struct cache_detail *detail)
+{
+	h->expiry_time = seconds_since_boot() - 1;
+	detail->nextcheck = seconds_since_boot();
+}
+#endif /* CONFIG_NFSD_DEPRECATED */
 
 #endif /*  _LINUX_SUNRPC_CACHE_H_ */
